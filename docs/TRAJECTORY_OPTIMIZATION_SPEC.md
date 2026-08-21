@@ -1,51 +1,98 @@
-# TrajectoryOptimization.jl architecture and feature reference
+# Trajectory optimization in Python: implementation specification
 
-A technical reference for implementing an optimal control and MPC framework in Python.
+Specification for `trajopt`, an optimal control and MPC framework in Python built on JAX.
+
+`TrajectoryOptimization.jl` (vendored at `trajopt_jl/`) is the mathematical reference and the
+correctness oracle during the port. It is not a runtime dependency, and its type hierarchy,
+naming, and storage layout are deliberately **not** mirrored. Where this specification
+diverges from the Julia package, the divergence is listed in
+[Appendix A](#appendix-a-divergences-from-trajectoryoptimizationjl).
 
 ---
 
 ## Table of contents
 
-1. [Core design and scope](#1-core-design-and-scope)
+1. [Scope and design decisions](#1-scope-and-design-decisions)
 2. [Mathematical problem formulation](#2-mathematical-problem-formulation)
-3. [System architecture](#3-system-architecture)
-4. [Trajectory and knot point storage](#4-trajectory-and-knot-point-storage)
-5. [Dynamics and integration](#5-dynamics-and-integration)
-6. [Cost functions and objectives](#6-cost-functions-and-objectives)
-7. [Cones and projections](#7-cones-and-projections)
-8. [Constraint catalog](#8-constraint-catalog)
-9. [ConstraintList management](#9-constraintlist-management)
-10. [Rotations on SO(3)](#10-rotations-on-so3)
-11. [Problem container and MPC workflow](#11-problem-container-and-mpc-workflow)
-12. [First- and second-order expansions](#12-first--and-second-order-expansions)
-13. [NLP transcription](#13-nlp-transcription)
-14. [Python-specific porting pitfalls](#14-python-specific-porting-pitfalls)
-15. [Verification, Julia cross-testing, and CasADi benchmarking](#15-verification-julia-cross-testing-and-casadi-benchmarking)
+3. [Package structure](#3-package-structure)
+4. [Backend, data model, and compilation](#4-backend-data-model-and-compilation)
+5. [Trajectory storage](#5-trajectory-storage)
+6. [Dynamics and integration](#6-dynamics-and-integration)
+7. [Rotations: JPL quaternions and the error state](#7-rotations-jpl-quaternions-and-the-error-state)
+8. [Cost functions and objectives](#8-cost-functions-and-objectives)
+9. [Cones and projections](#9-cones-and-projections)
+10. [Constraint catalog and ConstraintList](#10-constraint-catalog-and-constraintlist)
+11. [Expansions](#11-expansions)
+12. [NLP transcription](#12-nlp-transcription)
+13. [Problem, MPCState, and the MPC loop](#13-problem-mpcstate-and-the-mpc-loop)
+14. [Models](#14-models)
+15. [Verification strategy](#15-verification-strategy)
+16. [Deferred work](#16-deferred-work)
+17. [Appendix A: divergences from TrajectoryOptimization.jl](#appendix-a-divergences-from-trajectoryoptimizationjl)
 
 ---
 
-## 1. Core design and scope
+## 1. Scope and design decisions
 
-`TrajectoryOptimization.jl` solves discrete-time optimal control problems for robotics and aerospace systems. The codebase splits an optimal control problem into modular components:
+`trajopt` is a **production MPC library**, not a transliteration of the Julia package. Design
+is driven by closed-loop latency and by what JAX can compile, subject to matching the Julia
+reference numerically wherever a shared quantity exists.
 
-1. Dynamics models: continuous, discrete, and discretized ODEs with rotation group support.
-2. Cost functions and objectives: stage costs and terminal costs, with dedicated quadratic and LQR structures.
-3. Constraints and cones: vector constraints mapped to convex cones (equalities, inequalities, second-order cones).
-4. Trajectory container: state, control, and time storage along a discrete horizon.
-5. Problem definition: links dynamics, costs, constraints, and boundary conditions.
-6. Expansion engine: computes Taylor series expansions for DDP, iLQR, Augmented Lagrangian (ALTRO), and NLP solvers.
+### Delivery order
 
-### Main design choices
+1. **v1** — modeling layer, expansion engine, NLP transcription to external solvers
+   (Ipopt via `cyipopt`, OSQP, Clarabel).
+2. **v2** — native iLQR and ALTRO, consuming the same expansion engine.
 
-**Markovian stage decoupling.** Stage cost $\ell_k(x_k, u_k)$ and stage constraint $c_k(x_k, u_k)$ depend only on the current knot point $k$. Coupling across time happens exclusively through dynamics $x_{k+1} = f(x_k, u_k)$. This structure keeps the cost Hessian and constraint Jacobian block-diagonal.
+The expansion engine (`expansions.py`) is cut as a standalone module from day one, before its
+first consumer exists. Cutting it later would let transcription's derivative code harden into
+a de facto engine with an Ipopt-shaped interface.
 
-**Conic formulation for constraints.** Constraints evaluate to a vector $c(x, u)$. Feasibility is evaluated by projecting $c(x, u)$ onto a convex cone $\mathcal{K}$. This handles equality, inequality, and second-order cone constraints through a single mathematical interface.
+### Settled decisions
+
+| Decision | Choice |
+| :--- | :--- |
+| Array / autodiff backend | JAX in all evaluation kernels; NumPy only at the solver boundary |
+| Pytree mechanism | `equinox` (`eqx.Module`, `eqx.field(static=True)`, `eqx.filter_jit`) |
+| State / control dimensions | Fixed scalars `n`, `m` across the horizon |
+| Error-state dimension `ne` | Optional; defaults to `n` for Euclidean models |
+| Trajectory storage | Struct-of-arrays; `KnotPoint` is a view, never storage |
+| Differentiation | AD everywhere, no analytic-Jacobian override |
+| Compilation unit | Per-phase, matching Ipopt's four callbacks |
+| Rotations | JPL convention, scalar-last |
+| Error map | `δθ = 2·vec(q_err)` |
+| Objective | One stage cost + one terminal cost, parameters stacked over `k` |
+| Naming | Pythonic (`rollout()`, `set_states()`), no Julia bang-suffix mirroring |
+| SO(3) support | v1, not deferred |
+| Constraint catalog | Full section 10 catalog ships in v1 |
+
+### Invariants
+
+**Markovian stage decoupling.** Stage cost and stage constraint depend only on knot point
+`k`. Coupling across time happens exclusively through the dynamics. This keeps the cost
+Hessian block-diagonal and the constraint Jacobian block-bidiagonal, and it is what makes a
+Riccati recursion possible at all.
+
+This invariant is load-bearing, not decorative. A cost term coupling `z_k` and `z_{k+1}`
+(control-rate or smoothness penalties) makes the Hessian block-**tri**diagonal. Ipopt would
+absorb that silently as extra nonzeros; iLQR and DDP **cannot represent it**. Such penalties
+are therefore implemented by **state augmentation** — appending `u_{k-1}` to the state via
+`models.with_control_rate_penalty` — which restores stage separability at a cost of `m` extra
+state dimensions. No coupled cost term is ever added to `Objective`.
+
+**Conic constraint formulation.** Every constraint evaluates to a vector `c(x, u)` whose
+feasibility is expressed by membership in a convex cone `K`. Equality, inequality, and
+second-order cone constraints share one interface.
+
+**No structural change inside the control loop.** `x0`, `t0`, and `xf` are traced arguments.
+Anything that would alter a trace is a build-time concern. See
+[section 4](#4-backend-data-model-and-compilation).
 
 ---
 
 ## 2. Mathematical problem formulation
 
-The discrete-time trajectory optimization problem over $N$ knot points is:
+The discrete-time problem over `N` knot points:
 
 $$\begin{aligned}
 \min_{x_{1:N}, u_{1:N-1}} \quad & \ell_N(x_N) + \sum_{k=1}^{N-1} \ell_k(x_k, u_k) \\
@@ -55,521 +102,832 @@ $$\begin{aligned}
 & c_N(x_N) \in \mathcal{K}_N
 \end{aligned}$$
 
-Variables:
-- $x_k \in \mathbb{R}^{n_k}$ is the state at knot point $k$.
-- $u_k \in \mathbb{R}^{m_k}$ is the control input at knot point $k$. The terminal knot point $k=N$ has no control input.
-- $t_k$ is the timestamp. $\Delta t_k = t_{k+1} - t_k$ is the step duration.
-- $\ell_k(x_k, u_k)$ is the scalar stage cost. $\ell_N(x_N)$ is the terminal cost.
-- $f_d(\cdot)$ is the discrete dynamics step.
-- $c_k(\cdot)$ is a vector constraint function mapping into cone $\mathcal{K}_k$.
+- $x_k \in \mathbb{R}^{n}$ — state. $n$ is fixed across the horizon.
+- $u_k \in \mathbb{R}^{m}$ — control. The terminal knot point has no control.
+- $\delta x_k \in \mathbb{R}^{n_e}$ — error state. $n_e = n$ for Euclidean models;
+  $n_e = n - 1$ per unit quaternion in the state.
+- $t_k$, $\Delta t_k = t_{k+1} - t_k$ — timestamp and step duration.
+- $\ell_k$, $\ell_N$ — stage and terminal cost.
+- $f_d$ — discrete dynamics step.
+- $c_k$ — constraint vector mapping into cone $\mathcal{K}_k$.
+
+All solver-facing derivative quantities are expressed in **error coordinates** ($n_e$), never
+in state coordinates. See [section 11](#11-expansions).
 
 ---
 
-## 3. System architecture
+## 3. Package structure
 
-```
-TrajectoryOptimization structure
-│
-├── Trajectory and knot points
-│   ├── KnotPoint (x, u, t, dt)
-│   └── SampledTrajectory (list of KnotPoints)
-│
-├── Dynamics and integration
-│   ├── ContinuousDynamics: dx/dt = f(x, u, t)
-│   ├── DiscretizedDynamics (RK4, ImplicitMidpoint, Euler)
-│   └── DiscreteDynamics: x_{k+1} = f(x_k, u_k)
-│
-├── Cost functions and objectives
-│   ├── CostFunction (base scalar function)
-│   │   ├── QuadraticCostFunction (abstract base)
-│   │   │   ├── DiagonalCost (Q, R diagonal, H=0)
-│   │   │   ├── QuadraticCost (dense Q, R, H, q, r, c)
-│   │   │   └── DiagonalQuatCost (quaternion geodesic penalty)
-│   │   ├── ErrorQuadratic (manifold error state cost)
-│   │   └── Generic / autodiff CostFunction
-│   └── Objective (list of N cost functions)
-│
-├── Conic sets and senses
-│   ├── ZeroCone / Equality (g(x) = 0)
-│   ├── NegativeOrthant / Inequality (h(x) <= 0)
-│   ├── PositiveOrthant (h(x) >= 0)
-│   └── SecondOrderCone (||v||_2 <= s)
-│
-├── Constraints
-│   ├── AbstractConstraint
-│   │   └── StageConstraint (function of x and u)
-│   │       ├── StateConstraint (function of x only)
-│   │       │   ├── GoalConstraint (x[inds] == xf)
-│   │       │   ├── StateBound (xmin <= x <= xmax)
-│   │       │   ├── CircleConstraint (2D obstacle)
-│   │       │   ├── SphereConstraint (3D obstacle)
-│   │       │   ├── CollisionConstraint (pairwise body distance)
-│   │       │   └── QuatVecEq (quaternion attitude equality)
-│   │       ├── ControlConstraint (function of u only)
-│   │       │   └── ControlBound (umin <= u <= umax)
-│   │       ├── LinearConstraint (A * [x; u] - b in cone)
-│   │       ├── NormConstraint (||y|| <= a or SOC)
-│   │       ├── BoundConstraint (combined box bounds on x and u)
-│   │       └── IndexedConstraint (subvector wrapper)
-│   └── DynamicsConstraint (collocation constraint)
-│
-├── ConstraintList (stores constraints and active knot-point index ranges)
-│
-└── Problem (model, objective, constraints, initial state, goal state, trajectory)
+```text
+src/trajopt/
+├── cones.py            ZeroCone, NegativeOrthant, PositiveOrthant, SecondOrderCone
+├── rotations/          JPL quaternion algebra, error map, attitude Jacobian, interop
+├── dynamics/           ContinuousDynamics, DiscreteDynamics, integrators, rollout
+├── costs/              stage + terminal cost, stacked parameters, Objective
+├── constraints/        constraint catalog, ConstraintList
+├── trajectory.py       struct-of-arrays storage, KnotPoint view
+├── problem.py          Problem (structure) and MPCState (per-step data)
+├── expansions.py       Expansion: stacked A, B, q, r, Q, R, H in error coordinates
+├── transcription/      Z layout, c(Z), COO sparsity pattern, solver adapters
+└── models/             benchmark models and model transforms
 ```
 
----
-
-## 4. Trajectory and knot point storage
-
-### KnotPoint
-Stores the state, control, and time at index $k$.
-
-Fields:
-- `z`: vector containing $[x_k; u_k] \in \mathbb{R}^{n_k + m_k}$.
-- `_x`: index range for the state slice.
-- `_u`: index range for the control slice.
-- `t`: timestamp $t_k$.
-- `dt`: time step duration $\Delta t_k$.
-
-Methods:
-- `state(z)`: returns a view or copy of $x_k$.
-- `control(z)`: returns a view or copy of $u_k$. Empty at $k = N$.
-- `is_terminal(z)`: returns `true` when $k = N$.
-
-### SampledTrajectory
-A container holding $N$ `KnotPoint` elements.
-
-Methods:
-- `states(traj)`: returns the $N$ state vectors $[x_1, \dots, x_N]$.
-- `controls(traj)`: returns the $N-1$ control vectors $[u_1, \dots, u_{N-1}]$.
-- `gettimes(traj)`: returns timestamps $[t_1, \dots, t_N]$.
-- `setstates!(traj, X)`, `setcontrols!(traj, U)`: updates state or control trajectories in place.
-- `setinitialtime!(traj, t0)`: shifts timestamps starting from $t_0$.
+Sub-packages mirror the *functional* split of the Julia ecosystem
+(`TrajectoryOptimization.jl`, `RobotDynamics.jl`, `Rotations.jl`, `RobotZoo.jl`) without
+vendoring or wrapping any of it. There is no dependency on `jaxlie`, `diffrax`, or `flax`:
+matching the Julia reference bit-for-bit requires owning the conventions, and adopting a
+third-party rotation library means adopting and then debugging its conventions instead.
 
 ---
 
-## 5. Dynamics and integration
+## 4. Backend, data model, and compilation
 
-### Dynamics types
+### JAX boundary
 
-1. `ContinuousDynamics`: defines $\dot{x} = f(x, u, t)$.
-   - `state_dim(model)` returns $n$.
-   - `control_dim(model)` returns $m$.
-   - `dynamics(model, x, u, t)` returns $\dot{x}$.
-   - `jacobian!(model, J, x, u, t)` writes $[\nabla_x f, \nabla_u f] \in \mathbb{R}^{n \times (n+m)}$ into $J$.
+JAX is used for **evaluation kernels**: dynamics, costs, constraints, cones, projections,
+expansions. NumPy appears only where a solver demands concrete host arrays — the Ipopt,
+OSQP, and Clarabel adapters in `transcription/`, and the build-time sparsity-pattern
+computation.
 
-2. `DiscreteDynamics`: defines $x_{k+1} = f(x_k, u_k, t_k, \Delta t_k)$.
+### Pytrees
 
-3. `DiscretizedDynamics`: wraps `ContinuousDynamics` with an integrator.
+All structured objects are `eqx.Module` subclasses.
 
-### Numerical integrators
+- **Leaves** (traced): model parameters (mass, length, gravity, inertia), cost matrices `Q`,
+  `R`, `H`, `q`, `r`, obstacle centers and radii, bounds, `x0`, `t0`, `xf`, multipliers
+  `lam`, penalties `mu`.
+- **Static** (`eqx.field(static=True)`): `n`, `m`, `ne`, `N`, integrator choice, constraint
+  structure and index ranges, cone types.
 
-**Explicit Runge-Kutta 4 (RK4)**:
+Making model parameters leaves means a mass or an obstacle radius can change between solves
+without recompiling, and it makes sensitivity with respect to parameters available for free.
+`equinox` is preferred over hand-maintained `jax.tree_util.register_dataclass` field tuples
+because the traced/static split is declared once per field rather than duplicated in two
+tuples per class, where a mistake surfaces as a silent recompile-per-call rather than an
+error.
+
+### Compilation units
+
+Four independently jitted phases, matching what Ipopt actually calls at independent rates:
+
+| Phase | Produces | Ipopt callback |
+| :--- | :--- | :--- |
+| `cost_and_grad` | $J$, $\nabla J$ | `eval_f`, `eval_grad_f` |
+| `constraints_and_jac` | $c(Z)$, $\nabla c(Z)$ values | `eval_g`, `eval_jac_g` |
+| `hessian` | $\nabla^2\mathcal{L}(Z)$ values | `eval_h` |
+| `rollout` | forward simulation | — |
+
+Fusing across these gains nothing, because Ipopt invokes them at different frequencies.
+
+### The zero-recompile invariant
+
+`x0`, `t0`, and `xf` change on **every** MPC iteration. If any of them becomes a trace
+constant, every control step triggers a recompile and every deadline is missed. This is
+enforced structurally by the `Problem` / `MPCState` split
+([section 13](#13-problem-mpcstate-and-the-mpc-loop)) and asserted by a test that runs 100
+MPC iterations and requires the compilation counter to remain at zero.
+
+---
+
+## 5. Trajectory storage
+
+Storage is **struct-of-arrays**, because `vmap` over knot points is the entire performance
+argument for the JAX backend and it requires leading-axis-stacked arrays.
+
+| Field | Shape |
+| :--- | :--- |
+| `X` | `(N, n)` |
+| `U` | `(N-1, m)` |
+| `t` | `(N,)` |
+| `dt` | `(N-1,)` |
+
+`KnotPoint` is retained in the public API as a lightweight **read-only view** constructed on
+demand — `kp.x`, `kp.u`, `kp.t`, `kp.dt`, `kp.is_terminal`. It is never the storage of record.
+A list of `N` Python objects, as in the Julia design, is precisely the polymorphic container
+that cannot be traced.
+
+The flat NLP vector `Z` (section 12) is not the source of truth either: its interleaved
+$[x_1, u_1, x_2, u_2, \dots, x_N]$ layout makes `X` and `U` non-contiguous strided views that
+cannot be `vmap`ed without a gather. The interleaving is owned exclusively by
+`transcription/`.
+
+### Methods
+
+- `states()`, `controls()`, `times()` — return the stacked arrays.
+- `set_states(X)`, `set_controls(U)` — return a new trajectory (arrays are immutable).
+- `with_initial_time(t0)` — shift timestamps.
+- `shift(dt)` — shift the trajectory forward one step for MPC warm-starting.
+
+---
+
+## 6. Dynamics and integration
+
+### Types
+
+1. `ContinuousDynamics` — $\dot{x} = f(x, u, t)$.
+   - `n`, `m`, `ne` — static properties; `ne` defaults to `n`
+   - `dynamics(x, u, t) -> Array[n]`
+   - `jacobian(x, u, t) -> Array[n, n+m]` — AD-derived
+   - `state_diff(x, x0) -> Array[ne]` — defaults to `x - x0`
+   - `errstate_jacobian(x) -> Array[n, ne]` — defaults to `I`
+2. `DiscreteDynamics` — $x_{k+1} = f_d(x_k, u_k, t_k, \Delta t_k)$.
+3. `DiscretizedDynamics` — wraps a `ContinuousDynamics` with an integrator.
+
+Euclidean models never mention the manifold. The three defaults above make `RigidBody` an
+override rather than a special case, and every downstream consumer writes $G_k$
+unconditionally, paying one identity matmul that `jit` constant-folds away.
+
+### Integrators
+
+**RK4:**
+
 $$\begin{aligned}
 k_1 &= f(x_k, u_k, t_k) \\
 k_2 &= f(x_k + \tfrac{\Delta t}{2} k_1, u_k, t_k + \tfrac{\Delta t}{2}) \\
 k_3 &= f(x_k + \tfrac{\Delta t}{2} k_2, u_k, t_k + \tfrac{\Delta t}{2}) \\
-k_4 &= f(x_k + \Delta t k_3, u_k, t_k + \Delta t) \\
-x_{k+1} &= x_k + \frac{\Delta t}{6}(k_1 + 2k_2 + 2k_3 + k_4)
+k_4 &= f(x_k + \Delta t\, k_3, u_k, t_k + \Delta t) \\
+x_{k+1} &= x_k + \tfrac{\Delta t}{6}(k_1 + 2k_2 + 2k_3 + k_4)
 \end{aligned}$$
 
-**Euler integration**:
-$$x_{k+1} = x_k + \Delta t \cdot f(x_k, u_k, t_k)$$
+**Euler:** $x_{k+1} = x_k + \Delta t \cdot f(x_k, u_k, t_k)$
 
-**Implicit midpoint**:
-$$x_{k+1} - x_k - \Delta t \cdot f\left(\frac{x_k + x_{k+1}}{2}, u_k, t_k + \frac{\Delta t}{2}\right) = 0$$
+**Implicit midpoint:**
+$x_{k+1} - x_k - \Delta t \cdot f\!\left(\tfrac{x_k + x_{k+1}}{2}, u_k, t_k + \tfrac{\Delta t}{2}\right) = 0$
 
-### Forward simulation (rollout)
-`rollout!(prob)` sets $x_1 = x_0$ and propagates $x_{k+1} = f_d(x_k, u_k)$ for $k = 1, \dots, N-1$.
+### Rollout
+
+`rollout(problem, state)` sets $x_1 = x_0$ and propagates $x_{k+1} = f_d(x_k, u_k)$ using
+`jax.lax.scan`. A Python loop over `N` knot points is the loop-latency pitfall verbatim and is
+never used in a hot path.
 
 ---
 
-## 6. Cost functions and objectives
+## 7. Rotations: JPL quaternions and the error state
 
-### Mathematical form
-Stage costs and terminal costs use a general quadratic form:
-$$\ell(x, u) = \frac{1}{2} x^T Q x + \frac{1}{2} u^T R u + u^T H x + q^T x + r^T u + c$$
+`trajopt` uses the **JPL convention with scalar-last storage**, per the reference
+implementation in `docs/quaternion.py`. This differs from `Rotations.jl`, which is Hamilton
+scalar-first; conversion happens at the cross-test and interop boundary only.
 
-### Cost function types
+### Convention
 
-| Class | Purpose | Structure |
-| :--- | :--- | :--- |
-| `DiagonalCost` | Diagonal state and control weights | $Q = \text{diag}(Q_d)$, $R = \text{diag}(R_d)$, $H = 0$. Inverting cost is $O(n+m)$. |
-| `QuadraticCost` | General quadratic cost | Dense matrices $Q \in \mathbb{R}^{n \times n}$, $R \in \mathbb{R}^{m \times m}$, $H \in \mathbb{R}^{m \times n}$. |
-| `LQRCost` | Tracking cost builder | Generates $(x - x_f)^T Q (x - x_f) + (u - u_f)^T R (u - u_f)$ with $q = -Q x_f$, $r = -R u_f$, $c = \frac{1}{2} x_f^T Q x_f + \frac{1}{2} u_f^T R u_f$. |
-| `DiagonalQuatCost` | Attitude tracking on $SO(3)$ | Adds quaternion geodesic penalty $w \min(1 \pm q_{\text{ref}}^T q)$. |
-| `ErrorQuadratic` | Manifold error tracking | Computes $\frac{1}{2}(x \ominus x_d)^T Q (x \ominus x_d)$ using rotation group error states. |
-| `GenericCost` | Non-quadratic user cost | Differentiated with autodiff or finite differences. |
+| Property | Definition |
+| :--- | :--- |
+| Storage | $q = [v_1, v_2, v_3, w]$, scalar-last |
+| Product | $w = w_1 w_2 - v_1 \cdot v_2$, $\;v = w_2 v_1 + w_1 v_2 - v_1 \times v_2$ |
+| Relation to Hamilton | $\text{hamilton}(a, b) = \text{jpl}(b, a)$ |
+| Rotation matrix | **Passive** (frame transformation) |
+| Conjugate / inverse | $(-v, w)$ |
+| Kinematics | $\dot q = \tfrac12 \Xi(q)\,\omega$, body-frame $\omega$ |
+| $\Xi(q)$ | $\begin{bmatrix} w I_3 + [v\times] \\ -v^T \end{bmatrix} \in \mathbb{R}^{4\times3}$ |
+| Attitude error | $q_{\text{err}} = q \otimes q_{\text{ref}}^{-1}$, body-frame left perturbation |
+| Error map | $\delta\theta = 2\,\text{vec}(q_{\text{err}})$ |
+| Hamilton bridge | $\text{to\_hamilton}(q) = (-v, w)$, self-inverse |
 
-### Cost methods
-- `evaluate(cost, x, u)`: returns scalar cost $\ell(x, u)$.
-- `gradient!(cost, grad, z)`: writes $[\nabla_x \ell; \nabla_u \ell]$ into `grad`.
-- `hessian!(cost, hess, z)`: writes $\nabla^2 \ell$ into `hess`.
-- `invert!(Ginv, cost)`: inverts the cost Hessian analytically using diagonal or block-diagonal shortcuts.
-- `c1 + c2`: adds two quadratic costs and promotes the result to `QuadraticCost`.
-- `set_LQR_goal!(cost, xf, [uf])`: updates $q \leftarrow -Q x_f$ and $r \leftarrow -R u_f$ for MPC target updates.
+The minus sign on the cross product is what makes the product JPL rather than Hamilton. The
+passive rotation matrix is the self-consistent pairing: mixing an active $R(q)$ with JPL
+products is the classic silent sign error.
+
+`to_rot_mat` in the reference implementation routes through
+`scipy.spatial.transform.Rotation`, which is not traceable. `rotations/` implements a direct
+JAX $q \to R$; `scipy` is confined to interop helpers and tests.
+
+### Error map
+
+The error state is $\delta\theta = 2\,\text{vec}(q_{\text{err}})$, the multiplicative
+small-angle error standard in JPL and MEKF work. Three reasons over the Cayley map that
+`Rotations.jl` defaults to:
+
+1. The rotation block of $G_k$ becomes exactly $\tfrac12\Xi(q)$, which is already implemented
+   and unit-tested.
+2. It is linear in $q_{\text{err}}$ — no division, and no `jnp.where` guard in a
+   differentiated hot path. The Cayley map's $g = v/w$ diverges as $w \to 0$.
+3. It matches the convention in the attitude-MPC and estimation literature, so $G$, the error
+   covariance, and any reference implementation agree.
+
+Its cost is a singularity and sign ambiguity at 180°. For tracking MPC this is unreachable,
+and none of the section 15 benchmarks performs a large-angle reorientation. The
+exponential/log map is the documented upgrade path ([section 16](#16-deferred-work)).
+
+### Attitude Jacobian
+
+$$G_k = \frac{\partial x}{\partial (\delta x)} \in \mathbb{R}^{n \times n_e}$$
+
+For a rigid body with state $[r, q, v, \omega]$ ($n = 13$, $n_e = 12$):
+
+$$G_k = \operatorname{blockdiag}\!\left(I_3,\; \tfrac12 \Xi(q),\; I_3,\; I_3\right) \in \mathbb{R}^{13\times12}$$
+
+Note the direction: $G_k$ maps error-state variations into state variations, which is what
+makes the sandwich below dimensionally correct.
+
+### Error-state expansions
+
+- Dynamics: $\bar{A}_k = G_{k+1}^T A_k G_k$, $\;\bar{B}_k = G_{k+1}^T B_k$
+- Cost: $\bar{q}_k = G_k^T \nabla_x \ell_k$, $\;\bar{Q}_k = G_k^T (\nabla_{xx}^2 \ell_k) G_k$
+- Constraints: $\bar{\nabla}_x c_k = (\nabla_x c_k) G_k$
+
+These are applied **inside** `expansions.py`. No consumer re-derives them.
+
+### Geodesic quaternion cost
+
+$$\ell(x) = \tfrac12 x^T Q x + w \min(1 + q_{\text{ref}}^T q,\; 1 - q_{\text{ref}}^T q)$$
+
+$$\nabla_q \ell = \begin{cases} +w\, q_{\text{ref}} & q_{\text{ref}}^T q < 0 \\ -w\, q_{\text{ref}} & q_{\text{ref}}^T q \ge 0 \end{cases}$$
+
+The inner product $q_{\text{ref}}^T q$ is **convention-invariant**: converting both operands
+to JPL negates both vector parts, leaving the dot product unchanged. Only the index layout
+changes — `q_ind = [0, 1, 2, 3]` scalar-last, against Julia's `SA[4,5,6,7]`.
+
+### Model structure declaration
+
+Two base classes in v1:
+
+- `EuclideanModel` — `ne == n`, identity error map.
+- `RigidBody` — layout fixed to $[r, q, v, \omega]$, `n = 13`, `ne = 12`.
+
+The only v1 model requiring SO(3) is the quadrotor, whose layout is exactly that. The
+generalization to `Rotations.jl`-style `LieState{R,P}` partitioning — arbitrary interleaving
+of Euclidean blocks and rotations, supporting multi-body systems — is the documented
+expansion path. Because the interface is the `state_diff` / `errstate_jacobian` pair, that
+generalization is additive and does not break existing models.
+
+### Cross-test operand ordering
+
+`RobotDynamics.state_diff` builds `δq = q0 \ q`, that is
+$q_{\text{ref}}^{-1} \otimes_{\text{Ham}} q$ (`liestate.jl:216`), which is the **opposite
+operand order** from `Quaternion.error_to`'s $q \otimes_{\text{JPL}} q_{\text{ref}}^{-1}$.
+
+The relation is **derived in full in [`quaternion_operand_ordering.md`](quaternion_operand_ordering.md)**.
+Summarised: conjugation is an isomorphism from the JPL product to the Hamilton product, so
+$\text{to\_hamilton}(q_{\text{err}}) = \bar q \otimes_{\text{Ham}} \bar q_{\text{ref}}^{-1}$,
+and that differs from the Julia quantity by a similarity transform,
+
+$$\delta q_{\text{Julia}} = \text{to\_hamilton}(q_{\text{ref}})^{-1} \otimes_{\text{Ham}} \text{to\_hamilton}(q_{\text{err}}) \otimes_{\text{Ham}} \text{to\_hamilton}(q_{\text{ref}})$$
+
+which at the level of the error vector is a rotation by the reference attitude:
+
+$$\operatorname{vec}(\delta q_{\text{Julia}}) = -\,R(q_{\text{ref}})^{T}\operatorname{vec}(q_{\text{err}}), \qquad \operatorname{scalar}(\delta q_{\text{Julia}}) = \operatorname{scalar}(q_{\text{err}})$$
+
+with $R(q_{\text{ref}})$ the JPL (passive) rotation matrix of the reference attitude. The two
+error vectors are the same relative rotation resolved in two different frames — the
+left-versus-right multiplicative error distinction — which is why no global sign relates them.
+
+Because the two share a scalar part and their vector parts share a norm, every error map in use
+here ($\delta\theta = 2v$, Cayley, exponential) rescales both by the same factor, so the same
+relation holds after the map:
+
+$$\delta\theta_{\text{Julia}} = -\,R(q_{\text{ref}})^{T}\,\delta\theta_{\text{Python}}$$
+
+**No convention change is required.** The conventions reconcile exactly, in closed form, using
+only quantities both sides already compute.
+
+Consequences for the cross-tests, which are binding:
+
+1. That relation is what the test asserts. It is **not** discovered by flipping signs until the
+   test passes: a sign error in `to_hamilton` can cancel a sign error in the kernel and produce
+   a green test over a wrong implementation. `to_hamilton` is cross-tested independently against
+   known Hamilton values first, before any conjugated comparison exists.
+2. The test pair must have a **nonzero cross product between the quaternion vector parts** — the
+   two orderings differ by exactly $-2\,(x \times y)$ and by nothing else. A pure-`x` against a
+   pure-`y` rotation is the case of record.
+3. Coaxial pairs and an identity reference are **degenerate**: the orderings coincide there, so
+   such a pair would pass against a reversed implementation. Both are pinned as labelled
+   negative controls in `test/unit/test_quaternion_ordering.py` so they are never mistaken for
+   coverage.
+
+The derivation is verified symbolically for a general quaternion pair, numerically over the
+`x`/`y` pair plus 200 random pairs, and against a live `Rotations.jl` evaluation, agreeing to
+`1.1e-16`.
+
+---
+
+## 8. Cost functions and objectives
+
+### Form
+
+$$\ell(x, u) = \tfrac12 x^T Q x + \tfrac12 u^T R u + u^T H x + q^T x + r^T u + c$$
 
 ### Objective structure
-Holds $N$ cost functions where indices $1 \dots N-1$ are stage costs and index $N$ is the terminal cost.
 
-- `cost(obj, traj)`: evaluates $\sum_{k=1}^N \ell_k(z_k)$.
-- `LQRObjective(Q, R, Qf, xf, N)`: creates homogeneous stage LQR costs and a terminal cost.
-- `TrackingObjective(Q, R, Z_ref)`: builds time-varying LQR costs tracking trajectory $Z_{\text{ref}}$.
-- `update_trajectory!(obj, Z_ref, start=1)`: updates reference states along the tracking objective.
+`Objective` holds **one stage cost and one terminal cost**, homogeneous in type, with
+parameters stacked over the horizon:
+
+| Field | Shape |
+| :--- | :--- |
+| `Q` | `(N-1, n, n)`, or `(N-1, n)` if diagonal |
+| `R` | `(N-1, m, m)`, or `(N-1, m)` if diagonal |
+| `H` | `(N-1, m, n)` |
+| `q` | `(N-1, n)` |
+| `r` | `(N-1, m)` |
+| `c` | `(N-1,)` |
+| terminal `Q_f`, `q_f`, `c_f` | `(n, n)`, `(n,)`, `()` |
+
+This is a single `vmap` over `k`. A list of `N` heterogeneous Python cost objects — the Julia
+design — is the polymorphic-dispatch pitfall in its purest form, and it buys a capability
+(different cost *types* at different knot points) that nothing in the benchmark set needs.
+Stacked parameters preserve everything the list actually provided:
+
+- `LQRObjective(Q, R, Qf, xf, N)` — stacked-constant parameters.
+- `TrackingObjective(Q, R, Z_ref)` — stacked time-varying parameters, with
+  $q_k = -Q x_{\text{ref},k}$ and $r_k = -R u_{\text{ref},k}$.
+- `update_reference(obj, Z_ref, start=0)` — rebuilds the stacked `q` and `r` arrays.
+
+### Cost variants
+
+| Variant | Structure |
+| :--- | :--- |
+| Diagonal | `Q`, `R` stored as `(N-1, n)`, `(N-1, m)`; `H = 0`. Hessian inversion is $O(n+m)$. |
+| Dense quadratic | Full `Q`, `R`, `H`. |
+| LQR tracking | $q = -Qx_f$, $r = -Ru_f$, $c = \tfrac12 x_f^T Q x_f + \tfrac12 u_f^T R u_f$. |
+| Quaternion geodesic | Adds the section 7 geodesic penalty. |
+| Error-state quadratic | $\tfrac12 (x \ominus x_d)^T Q (x \ominus x_d)$ using the section 7 error map. |
+| Generic | Arbitrary user callable, differentiated by AD. |
+
+`GenericCost` is a plain Python function of `(x, u, t)` and is traced like anything else; it
+carries no special machinery.
+
+### Methods
+
+- `evaluate(x, u, t) -> float`
+- `gradient(x, u, t) -> Array[n+m]`
+- `hessian(x, u, t) -> Array[n+m, n+m]`
+- `invert(...)` — analytic inverse using the diagonal or block-diagonal shortcut
+- `cost(obj, traj) -> float` — $\sum_k \ell_k$, one `vmap` plus a sum
 
 ---
 
-## 7. Cones and projections
+## 9. Cones and projections
 
-Every constraint is expressed as $c(x, u) \in \mathcal{K}$.
+Every constraint is expressed as $c(x,u) \in \mathcal{K}$.
 
-### Cone definitions
-
-| Cone | Set definition | Projection $\Pi_{\mathcal{K}}(x)$ |
+| Cone | Set | Projection $\Pi_{\mathcal{K}}(x)$ |
 | :--- | :--- | :--- |
-| `ZeroCone` / `Equality` | $x = 0$ | $0$ |
-| `NegativeOrthant` / `Inequality` | $x \le 0$ | $\min(0, x)$ |
+| `ZeroCone` (equality) | $x = 0$ | $0$ |
+| `NegativeOrthant` (inequality) | $x \le 0$ | $\min(0, x)$ |
 | `PositiveOrthant` | $x \ge 0$ | $\max(0, x)$ |
-| `SecondOrderCone` | $\|v\|_2 \le s$ where $x = [v; s]$ | Piecewise projection below |
+| `SecondOrderCone` | $\lVert v\rVert_2 \le s$, $x = [v; s]$ | piecewise, below |
 
-### Second-order cone projection and derivatives
-Let $x = [v; s]$ with $v \in \mathbb{R}^{p-1}$, $s \in \mathbb{R}$, and $a = \|v\|_2$.
+### Second-order cone
 
-1. Projection $\Pi_{\mathcal{K}}(x)$:
-   $$\Pi_{\mathcal{K}}(x) = \begin{cases}
-   0 & a \le -s \quad (\text{below dual cone}) \\
-   x & a \le s \quad (\text{inside cone}) \\
-   \frac{1}{2}\left(1 + \frac{s}{a}\right) \begin{bmatrix} v \\ a \end{bmatrix} & a > |s| \quad (\text{outside cone})
-   \end{cases}$$
+Let $x = [v; s]$, $v \in \mathbb{R}^{p-1}$, $a = \lVert v \rVert_2$.
 
-2. First derivative $\nabla \Pi_{\mathcal{K}}(x)$:
-   $$\nabla \Pi_{\mathcal{K}}(x) = \begin{cases}
-   0 & a \le -s \\
-   I & a \le s \\
-   \frac{1}{2}\begin{bmatrix} \left(1+\frac{s}{a}\right)I - \frac{s}{a^3} v v^T & \frac{v}{a} \\ \left(1+\frac{s}{a}\right)\frac{v^T}{a} - \frac{s}{a^2} v^T & 1 \end{bmatrix} & a > |s|
-   \end{cases}$$
+$$\Pi_{\mathcal{K}}(x) = \begin{cases}
+0 & a \le -s \quad (\text{below dual cone}) \\
+x & a \le s \quad (\text{inside}) \\
+\tfrac12\left(1 + \tfrac{s}{a}\right) \begin{bmatrix} v \\ a \end{bmatrix} & a > |s| \quad (\text{outside})
+\end{cases}$$
 
-3. Second derivative contraction $\nabla^2 \Pi_{\mathcal{K}}(x)[b]$:
-   Used in second-order expansions of the Augmented Lagrangian term $\lambda^T \Pi(c)$.
+$$\nabla \Pi_{\mathcal{K}}(x) = \begin{cases}
+0 & a \le -s \\
+I & a \le s \\
+\tfrac12\begin{bmatrix} \left(1+\tfrac{s}{a}\right)I - \tfrac{s}{a^3} v v^T & \tfrac{v}{a} \\ \tfrac{v^T}{a} & 1 \end{bmatrix} & a > |s|
+\end{cases}$$
+
+$\nabla^2 \Pi_{\mathcal{K}}(x)[b]$ is obtained by AD, not hand-derived.
+
+### Branchless implementation
+
+The three-way branch is implemented with `jnp.where`, never Python `if`/`elif`, and the
+division is guarded as $\max(a, 10^{-10})$. Python control flow on traced values either fails
+outright or silently bakes one branch into the trace.
+
+The existing pure-NumPy `src/trajopt/cones.py` predates this specification and is replaced
+wholesale.
 
 ---
 
-## 8. Constraint catalog
+## 10. Constraint catalog and ConstraintList
 
 ### Base classes
-- `StageConstraint`: depends on both state $x_k$ and control $u_k$.
-- `StateConstraint`: depends only on state $x_k$. Control Jacobian is zero.
-- `ControlConstraint`: depends only on control $u_k$. State Jacobian is zero.
 
-### Defined constraints
+- `StageConstraint` — depends on $x_k$ and $u_k$.
+- `StateConstraint` — depends on $x_k$ only; control Jacobian is zero.
+- `ControlConstraint` — depends on $u_k$ only; state Jacobian is zero.
 
-**`GoalConstraint` (State equality).**
-- Formula: $x_k[\text{inds}] - x_f = 0$.
-- Sense: `Equality`.
-- Jacobian: $\nabla_x c = I_{\text{inds}}$, $\nabla_u c = 0$.
+### Catalog
 
-**`BoundConstraint` / `StateBound` / `ControlBound` (Box bounds).**
-- Formula: $x_k - x_{\max} \le 0$, $x_{\min} - x_k \le 0$, $u_k - u_{\max} \le 0$, $u_{\min} - u_k \le 0$.
-- Sense: `Inequality`.
-- Bound conversion: maps directly to solver primal variable bounds $[z_L, z_U]$.
+| Constraint | Formula | Sense |
+| :--- | :--- | :--- |
+| `GoalConstraint` | $x_k[\text{inds}] - x_f = 0$ | Equality |
+| `StateBound` | $x_k - x_{\max} \le 0$, $x_{\min} - x_k \le 0$ | Inequality |
+| `ControlBound` | $u_k - u_{\max} \le 0$, $u_{\min} - u_k \le 0$ | Inequality |
+| `BoundConstraint` | combined state and control box bounds | Inequality |
+| `LinearConstraint` | $A[x_k; u_k] - b \le 0$, or $= 0$ | Either |
+| `CircleConstraint` | $-(x - x_c)^2 - (y - y_c)^2 + r^2 \le 0$ | Inequality |
+| `SphereConstraint` | $-(x-x_c)^2 - (y-y_c)^2 - (z-z_c)^2 + r^2 \le 0$ | Inequality |
+| `CollisionConstraint` | $r^2 - \lVert x[b_1] - x[b_2]\rVert^2 \le 0$ | Inequality |
+| `NormConstraint` | $\lVert y\rVert_2^2 - a^2 \le 0$, or $[y; a] \in \mathcal{K}_{SOC}$ | Inequality / SOC |
+| `QuatVecEq` | quaternion attitude equality | Equality |
+| `IndexedConstraint` | wraps a sub-system constraint onto a slice of $(x, u)$ | inherited |
+| `DynamicsConstraint` | $x_{k+1} - f_d(x_k, u_k) = 0$ (explicit) | Equality |
 
-**`LinearConstraint`.**
-- Formula: $A [x_k; u_k] - b \le 0$ (or $= 0$).
-- Sense: `Inequality` or `Equality`.
-- Jacobian: constant matrix $A$.
+Implicit collocation:
+$x_k - x_{k+1} + \Delta t\, f\!\left(\tfrac{x_k+x_{k+1}}{2}, u_k\right) = 0$.
 
-**`CircleConstraint` (2D obstacle).**
-- Formula: $-(x - x_c)^2 - (y - y_c)^2 + r^2 \le 0$.
-- Sense: `Inequality`.
-- Jacobian: $\nabla_x c = [-2(x - x_c), -2(y - y_c), 0, \dots]$.
+Jacobians are AD-derived. The analytic forms are retained in this document as documentation
+and as expected values for cross-tests, not as implementation.
 
-**`SphereConstraint` (3D obstacle).**
-- Formula: $-(x - x_c)^2 - (y - y_c)^2 - (z - z_c)^2 + r^2 \le 0$.
-- Sense: `Inequality`.
-- Jacobian: $\nabla_x c = [-2(x - x_c), -2(y - y_c), -2(z - z_c), 0, \dots]$.
+`BoundConstraint`, `StateBound`, and `ControlBound` additionally expose a `primal_bounds()`
+path that maps directly onto solver variable limits $z_L \le z \le z_U$ rather than becoming
+rows of $c(Z)$.
 
-**`CollisionConstraint` (Pairwise body distance).**
-- Formula: $r^2 - \|x[\text{body}_1] - x[\text{body}_2]\|^2 \le 0$.
-- Sense: `Inequality`.
-- Jacobian: $\nabla_{x_1} c = -2(x_1 - x_2)$, $\nabla_{x_2} c = +2(x_1 - x_2)$.
+### ConstraintList
 
-**`NormConstraint`.**
-- Quadratic inequality form: $\|y\|_2^2 - a^2 \le 0$.
-- Second-order cone form: $[y; a] \in \mathcal{K}_{SOC}$.
-- Jacobian for SOC: $\nabla_y c = [I_p; 0]$.
+Constraints and their active knot-point ranges are **fused at build time** into a single
+concatenated $c_k(x_k, u_k)$ per knot point. One `vmap` over `k`; no runtime batching logic,
+no grouping by type.
 
-**`IndexedConstraint`.**
-- Wraps a constraint defined on a subsystem $(x_{\text{sub}}, u_{\text{sub}})$ to apply to an indexed slice of the full state and control vectors.
+Fields:
 
-**`DynamicsConstraint` (Collocation constraint).**
-- Explicit: $x_{k+1} - f_d(x_k, u_k) = 0$. Jacobians are $\nabla_{x_k} c = -\nabla_x f_d$, $\nabla_{u_k} c = -\nabla_u f_d$, $\nabla_{x_{k+1}} c = I$.
-- Implicit: $x_k - x_{k+1} + \Delta t \cdot f(\frac{x_k + x_{k+1}}{2}, u_k) = 0$.
+- `n`, `m` — dimensions (static).
+- `constraints` — the registered constraint objects.
+- `inds` — knot-point index range per constraint.
+- `p` — array of length `N`, total constraint dimension at each knot point.
 
----
+Operations:
 
-## 9. ConstraintList management
+- `add_constraint(con, inds)` — dimension check and registration.
+- `num_constraints() -> p`
+- `primal_bounds() -> (zL, zU)`
+- `build()` — trace and fuse into per-knot functions.
 
-`ConstraintList` stores constraints and tracks the knot-point ranges where they apply.
+Two consequences of fusing at build time. `IndexedConstraint` — a Python-level composition
+that would otherwise fight `vmap` — is resolved during tracing, so `vmap` never sees it. And
+trace time scales with total constraint count, while every structural change invalidates the
+trace. The latter is acceptable precisely because section 4 already forbids structural change
+inside the control loop.
 
-### Internal fields
-- `nx`: list of state dimensions across knot points.
-- `nu`: list of control dimensions across knot points.
-- `constraints`: list of constraint objects.
-- `inds`: list of knot-point index ranges where each constraint is active.
-- `sigs`: evaluation mode (in place or return new).
-- `diffs`: differentiation method (autodiff, finite difference, analytic).
-- `p`: array of length $N$ storing total constraint dimension at each knot point.
-
-### Key operations
-- `add_constraint!(cons, con, inds)`: checks dimensions and registers the constraint over `inds`.
-- `num_constraints(cons)`: returns the vector $p = [p_1, \dots, p_N]$.
-- `primal_bounds!(zL, zU, cons)`: extracts simple box bounds into global variable limits $z_L \le z \le z_U$.
-- Batch evaluation: loops over `inds` to evaluate values and Jacobians along the trajectory.
+The Julia `sigs` (in-place versus return-new signature) and `diffs` (autodiff versus finite
+difference versus analytic) fields are **removed**. `sigs` is meaningless when arrays are
+immutable. `diffs` is meaningless when AD of, say, $-(x-x_c)^2-(y-y_c)^2+r^2$ compiles to
+exactly the analytic expression — an analytic override would be a second place to be wrong
+for no gain.
 
 ---
 
-## 10. Rotations on SO(3)
+## 11. Expansions
 
-Unit quaternions $q \in \mathbb{H}$ with $\|q\|=1$ live on the 3-sphere $S^3$. Standard vector addition and subtraction do not preserve unit length.
+`expansions.py` is the shared seam between NLP transcription (v1) and native iLQR/ALTRO (v2).
 
-### Error state on manifolds
-Instead of Euclidean error $x - x_d$, Lie group models compute the difference:
-$$\delta x = x \ominus x_d = \begin{bmatrix} p - p_d \\ \phi(q \cdot q_d^{-1}) \\ v - v_d \\ \omega - \omega_d \end{bmatrix} \in \mathbb{R}^{12}$$
-where $\phi(\cdot)$ maps a rotation error quaternion to $\mathbb{R}^3$ via the Cayley map or Modified Rodrigues Parameters (MRP).
+### Interface
 
-### Attitude Jacobian ($G_k$)
-The attitude Jacobian maps Euclidean state variations to the 12-dimensional error state:
-$$G_k = \frac{\partial (x \ominus x_d)}{\partial x} \in \mathbb{R}^{13 \times 12}$$
-
-### Error expansions in solvers
-When a solver operates in error state coordinates:
-- Dynamics: $\bar{A}_k = G_{k+1}^T A_k G_k$, $\bar{B}_k = G_{k+1}^T B_k$.
-- Cost: $\bar{q}_k = G_k^T \nabla_x \ell_k$, $\bar{Q}_k = G_k^T (\nabla_{xx}^2 \ell_k) G_k$.
-- Constraints: $\bar{\nabla}_x c_k = (\nabla_x c_k) G_k$.
-
-### Quaternion cost functions
-`DiagonalQuatCost` uses the geodesic penalty:
-$$\ell(x) = \frac{1}{2} x^T Q x + w \min(1 + q_{\text{ref}}^T q, 1 - q_{\text{ref}}^T q)$$
-This handles the double-cover property where $q$ and $-q$ represent the same physical rotation. The gradient is:
-$$\nabla_q \ell = \begin{cases} +w q_{\text{ref}} & q_{\text{ref}}^T q < 0 \\ -w q_{\text{ref}} & q_{\text{ref}}^T q \ge 0 \end{cases}$$
-
----
-
-## 11. Problem container and MPC workflow
-
-### `Problem` fields
-- `model`: list of $N-1$ dynamics steps (supports time-varying or hybrid models).
-- `obj`: `Objective` containing $N$ cost functions.
-- `constraints`: `ConstraintList`.
-- `x0`: initial state vector.
-- `xf`: goal state vector.
-- `Z`: `SampledTrajectory` storing current states, controls, and timestamps.
-- `N`: horizon knot point count.
-- `t0`: start time.
-- `tf`: final time.
-
-### Problem methods
-- `cost(prob)`: evaluates $\sum_{k=1}^N \ell_k(z_k)$.
-- `rollout!(prob)`: simulates dynamics forward from $x_0$ using controls in $Z$.
-- `states(prob)` / `controls(prob)`: extracts trajectory arrays.
-- `initial_states!(prob, X0)`, `initial_controls!(prob, U0)`: sets warm-start trajectories.
-- `set_initial_state!(prob, x0)`: updates the initial condition for the next MPC step.
-- `set_goal_state!(prob, xf)`: updates target state in problem, objective, and goal constraints.
-- `setinitialtime!(prob, t0)`: shifts trajectory timestamps.
-
-### MPC control loop
-```
-1. Initialize Problem(model, obj, x0, tf, constraints)
-2. In each control loop iteration:
-   a. prob.set_initial_state!(x_measured)
-   b. prob.setinitialtime!(t_current)
-   c. Optional: update goal state or reference trajectory
-   d. Solve problem using ALTRO, iLQR, or NLP solver
-   e. Apply first control input: u_command = controls(prob)[0]
-   f. Warm-start next solve by shifting trajectory Z forward by dt
-```
-
----
-
-## 12. First- and second-order expansions
-
-Solvers using Differential Dynamic Programming (DDP), iLQR, or ALTRO require stage-by-stage Taylor expansions:
-
-### Dynamics expansion
-At each stage $k = 1, \dots, N-1$:
-$$A_k = \nabla_x f(x_k, u_k) \in \mathbb{R}^{n_{k+1} \times n_k}, \quad B_k = \nabla_u f(x_k, u_k) \in \mathbb{R}^{n_{k+1} \times m_k}$$
-
-### Cost expansion
-At each stage $k = 1, \dots, N$:
-$$q_k = \nabla_x \ell_k, \quad r_k = \nabla_u \ell_k, \quad Q_k = \nabla_{xx}^2 \ell_k, \quad R_k = \nabla_{uu}^2 \ell_k, \quad H_k = \nabla_{ux}^2 \ell_k$$
-
-### Augmented Lagrangian expansion
-For constraint $c(x, u) \in \mathcal{K}$ with multiplier $\lambda$ and penalty weight $\mu > 0$:
-$$\mathcal{L}_A(x, u, \lambda, \mu) = \ell(x, u) + \lambda^T \Pi_{\mathcal{K}^*}\left(c(x, u) + \frac{\lambda}{\mu}\right) + \frac{\mu}{2} \left\| \Pi_{\mathcal{K}^*}\left(c(x, u) + \frac{\lambda}{\mu}\right) \right\|^2$$
-The gradient and Hessian of $\mathcal{L}_A$ add directly into $q_k, r_k, Q_k, R_k, H_k$.
-
----
-
-## 13. NLP transcription
-
-For general nonlinear solvers like Ipopt or OSQP:
-
-### Primal variable vector ($Z$)
-$$Z = [x_1^T, u_1^T, x_2^T, u_2^T, \dots, x_{N-1}^T, u_{N-1}^T, x_N^T]^T \in \mathbb{R}^{N n + (N-1) m}$$
-
-### Constraint vector ($c(Z)$)
-$$c(Z) = \begin{bmatrix}
-x_1 - x_0 \\
-x_2 - f_d(x_1, u_1) \\
-c_1(x_1, u_1) \\
-\vdots \\
-x_N - f_d(x_{N-1}, u_{N-1}) \\
-c_N(x_N)
-\end{bmatrix} \in \mathbb{R}^P$$
-
-### Sparsity structures
-- **Jacobian $\nabla c(Z)$**: block bidiagonal from dynamics and block diagonal from stage constraints.
-- **Hessian of Lagrangian $\nabla^2 \mathcal{L}(Z)$**: block diagonal, with non-zero blocks corresponding to stage cost and constraint Hessians.
-
----
-
-## 14. Python-specific porting pitfalls
-
-Porting this architecture from Julia into Python introduces specific language and runtime pitfalls:
-
-### 1. Loop latency and dynamic dispatch overhead
-Julia compiles specialized static arrays and unrolls loops into zero-allocation native code. In Python, looping over $N$ knot points in an outer Augmented Lagrangian loop creates high interpreter overhead and per-call dispatch latency. For high-frequency MPC ($>50\text{ Hz}$), a pure Python loop will miss control deadlines.
-
-*Remedy:* Keep the class interface modular, but compile inner rollout and Riccati passes using JAX (`jax.lax.scan`), Numba, or C++/Cython extensions.
-
-### 2. NumPy array view aliasing and silent mutation
-NumPy slicing returns views rather than copies. If a knot point's state is assigned via `kp.x = buffer[idx:idx+n]` without copying, mutating `kp.x` in place during a rollout will corrupt other arrays sharing the same buffer.
-
-*Remedy:* Use `.copy()` during trajectory instantiation and explicit slice assignments (`kp.x[:] = ...`) when writing into pre-allocated memory.
-
-### 3. Autodiff tracing issues with piecewise cone projections
-Libraries like JAX and CasADi trace code as static computation graphs. Second-order cone projections use piecewise conditional branches (`if a <= -s`, `elif a <= s`, `else`). Standard Python `if/else` statements fail during JAX tracing or create non-differentiable graph splits.
-
-*Remedy:* Implement cone projections using branchless operations (`jax.lax.cond` or `jnp.where`) and guard divisions with numerical tolerances ($\max(a, 10^{-10})$).
-
-### 4. Polymorphic dispatch vs. JIT compilation
-Julia uses multiple dispatch to evaluate a list of heterogeneous cost objects (`Vector{CostFunction}`) without performance loss. In Python, iterating through a list of different Python class instances inside a JIT-compiled loop will break JAX or Numba compilation.
-
-*Remedy:* Normalize common cost types (such as quadratic costs) into contiguous parameter arrays ($Q_{\text{all}}, R_{\text{all}}, q_{\text{all}}, r_{\text{all}}$) so that evaluations can run via vectorized matrix operations.
-
-### 5. Sparse NLP transcription memory blow-up
-Generic Python optimizers (like `scipy.optimize.minimize`) default to dense matrix representations if not configured carefully. Treating an $N=100$, $n=12$ collocation problem as dense creates an $O(N^3)$ memory and factorization bottleneck.
-
-*Remedy:* Always construct sparse Jacobian and Hessian patterns using `scipy.sparse.csc_matrix` or pass symbolic sparsity maps to CasADi.
-
----
-
-## 15. Verification, Julia cross-testing, and CasADi benchmarking
-
-To guarantee 100% mathematical fidelity and eliminate transcription bugs during the port, Python components are verified directly against `TrajectoryOptimization.jl` using **live in-process differential testing (`juliacall`)**, and validated end-to-end against a standalone **CasADi-only implementation**.
-
-### Testing architecture with `juliacall`
-
-Python's `pytest` suite invokes the local Julia package in-process without file I/O:
+Three composable pure functions producing an `Expansion` module of stacked arrays:
 
 ```python
-# tests/cross_verification/test_cones.py
-import pytest
-import numpy as np
-from juliacall import Main as jl
+dynamics_expansion(problem, state) -> Expansion
+cost_expansion(problem, state) -> Expansion
+augmented_lagrangian_expansion(problem, state, expansion, lam, mu) -> Expansion
+```
 
-# Load local Julia package from trajopt_jl/
-jl.seval('using Pkg; Pkg.activate("trajopt_jl")')
-jl.seval("using TrajectoryOptimization; const TO = TrajectoryOptimization")
+| Field | Shape |
+| :--- | :--- |
+| `A` | `(N-1, ne, ne)` |
+| `B` | `(N-1, ne, m)` |
+| `q` | `(N, ne)` |
+| `r` | `(N-1, m)` |
+| `Q` | `(N, ne, ne)` |
+| `R` | `(N-1, m, m)` |
+| `H` | `(N-1, m, ne)` |
+
+### Error coordinates
+
+Expansions are returned in **error coordinates** ($n_e$), with $G_k$ applied inside. Two
+reasons this is not negotiable:
+
+1. The augmented-Lagrangian terms below "add directly into $q_k, r_k, Q_k, R_k, H_k$", which
+   is only true if every contribution already lives in one coordinate system.
+2. In state coordinates the quaternion's unit-norm direction is a null direction of the
+   Hessian, which will wreck a KKT factorization.
+
+For Euclidean models $n_e = n$ and $G = I$, which `jit` folds away entirely. Returning state
+coordinates instead would mean every future consumer re-derives the same $G$ sandwich, and
+eventually one of them gets it wrong.
+
+### Augmented Lagrangian
+
+For $c(x,u) \in \mathcal{K}$ with multiplier $\lambda$ and penalty $\mu > 0$:
+
+$$\mathcal{L}_A = \ell(x,u) + \lambda^T \Pi_{\mathcal{K}^*}\!\left(c + \tfrac{\lambda}{\mu}\right) + \frac{\mu}{2}\left\lVert \Pi_{\mathcal{K}^*}\!\left(c + \tfrac{\lambda}{\mu}\right)\right\rVert^2$$
+
+Its gradient and Hessian add into the `Expansion` fields rather than into a separate
+structure.
+
+---
+
+## 12. NLP transcription
+
+### Primal vector
+
+$$Z = [x_1^T, u_1^T, x_2^T, u_2^T, \dots, x_{N-1}^T, u_{N-1}^T, x_N^T]^T \in \mathbb{R}^{Nn + (N-1)m}$$
+
+### Constraint vector
+
+$$c(Z) = \begin{bmatrix} x_1 - x_0 \\ x_2 - f_d(x_1, u_1) \\ c_1(x_1, u_1) \\ \vdots \\ x_N - f_d(x_{N-1}, u_{N-1}) \\ c_N(x_N) \end{bmatrix} \in \mathbb{R}^P$$
+
+### Sparse assembly
+
+Ipopt's `eval_jac_g` has a structure callback invoked once and a values callback invoked every
+iteration, returning a flat array in the structure's order. Accordingly:
+
+1. **Build time.** Compute the `(row, col)` COO pattern from `N`, `n`, `m`, `p` using plain
+   NumPy. The pattern is a pure function of the dimensions.
+2. **Runtime.** A `vmap` produces dense per-knot blocks; a reshape and concatenate place their
+   values into the `data` array in the pattern's order. No gather, no per-iteration
+   allocation.
+
+Each per-knot block is treated as **dense**; structural zeros inside a block are not
+exploited. Explicit zeros cost Ipopt almost nothing at these problem sizes, whereas
+per-constraint sparsity masks would make the pattern depend on constraint *types*,
+reintroducing exactly the heterogeneity that build-time fusion (section 10) eliminates.
+
+Building a `scipy.sparse` matrix per call is the memory-blow-up pitfall wearing a disguise: it
+allocates inside the iteration loop.
+
+### Structure
+
+- $\nabla c(Z)$ — block bidiagonal from dynamics, block diagonal from stage constraints.
+- $\nabla^2 \mathcal{L}(Z)$ — block diagonal, one block per knot point. Block-diagonality
+  holds only because of the section 1 invariant.
+
+---
+
+## 13. Problem, MPCState, and the MPC loop
+
+Structure and per-step data are **separate types**. This turns "never let `x0` become static"
+from a discipline into a property of the type system: nothing in `Problem` can change per
+step, and nothing in `MPCState` is ever a trace constant.
+
+### `Problem` — structure, the compilation cache key
+
+| Field | Kind |
+| :--- | :--- |
+| `model` | `eqx.Module`; parameters are leaves, `n`/`m`/`ne` static |
+| `obj` | `Objective` with stacked parameters |
+| `constraints` | built `ConstraintList` |
+| `N` | static |
+| `integrator` | static |
+
+`Problem` is itself an `eqx.Module` passed as a traced pytree. The compilation cache key is
+its treedef plus its static fields; model parameters flow through as leaves, which is what
+makes "change the mass without recompiling" actually true.
+
+### `MPCState` — per-step data, always traced
+
+| Field | Kind |
+| :--- | :--- |
+| `x0`, `t0`, `xf` | leaves |
+| `lam`, `mu` | leaves |
+| `Z` | warm-start trajectory (leaves) |
+
+### Methods
+
+- `cost(problem, state)`
+- `rollout(problem, state)`
+- `states(state)`, `controls(state)`
+- `state.with_measurement(x, t)` — new state with updated $x_0$, $t_0$
+- `state.with_goal(xf)` — new state with updated $x_f$
+- `state.shift(dt)` — warm-start shift
+- `initial_states(state, X0)`, `initial_controls(state, U0)`
+
+### Control loop
+
+```text
+problem = Problem(model, obj, constraints, N)   # built once, compiled once
+state   = MPCState.initial(problem, x0, t0)
+
+loop:
+    state = state.with_measurement(x_measured, t_current)
+    state = state.with_goal(xf)                 # optional
+    state = solve(problem, state)               # Ipopt / OSQP / ALTRO
+    u_command = controls(state)[0]
+    state = state.shift(dt)                     # warm start next solve
+```
+
+The Julia `set_goal_state!` mutates the problem, the objective, and the goal constraints in
+sync. Under this split, $x_f$ lives in `MPCState` alone and both the objective and the goal
+constraint read it as an argument, so there is nothing to keep in sync.
+
+---
+
+## 14. Models
+
+`models/` contains the four cross-test targets and the model transforms that this
+specification's own decisions have made mandatory.
+
+### Benchmark models
+
+`Cartpole`, `Pendulum`, `Quadrotor`, `DubinsCar` — parameters matched **bit-for-bit** to
+`RobotZoo.jl` (gravity, masses, lengths, and the quadrotor's motor mixing matrix). That
+matching is what makes the dynamics row of section 15 meaningful; a model that differs by a
+parameter produces a cross-test that silently tests nothing.
+
+`Quadrotor` is a `RigidBody` with state $[r, q, v, \omega]$, $n = 13$, $n_e = 12$. RobotZoo
+stores its quaternion Hamilton scalar-first, so its cross-test converts both the state **and**
+the Jacobian.
+
+### Model transforms
+
+- `with_control_rate_penalty(model, R_delta)` — augments the state with $u_{k-1}$ so that a
+  control-rate penalty becomes an ordinary stage cost, preserving the section 1 invariant.
+- `linearize_about(model, X_ref, U_ref)` — trajectory linearization for MPC.
+
+---
+
+## 15. Verification strategy
+
+Two independent oracles, used for different things.
+
+- **`juliacall`, in-process, component level.** Exact numerical parity on mathematical
+  operations where indexing, signs, coordinate frames, or differentiation paths can diverge
+  silently.
+- **A standalone pure-CasADi implementation (`casadi.Opti`), end-to-end.** Full OCP and MPC
+  solves.
+
+Julia is deliberately **not** used as an end-to-end oracle; see
+[Appendix A](#appendix-a-divergences-from-trajectoryoptimizationjl) for why.
+
+### Cross-test harness
+
+```python
+# test/cross_verification/test_cross_cones.py
+import numpy as np
+import pytest
 
 from trajopt.cones import SecondOrderCone
 
-def test_soc_projection():
+@pytest.mark.julia
+def test_soc_projection(jl_to) -> None:
+    TO = jl_to.TO
+    # Every Julia name here contains "!" or a Unicode nabla, so none of them is a valid
+    # Python identifier. They must be reached with getattr, not attribute syntax.
+    jl_project = getattr(TO, "projection!")
+    jl_jacobian = getattr(TO, "∇projection!")
+
     py_cone = SecondOrderCone()
-    jl_cone = jl.TO.SecondOrderCone()
+    jl_cone = TO.SecondOrderCone()
 
     x = np.array([2.0, 3.0, 1.0, 1.0])
 
-    # 1. Verify projection Π(x)
     px_py = py_cone.project(x)
     px_jl = np.zeros_like(x)
-    jl.TO.projection_b(jl_cone, px_jl, x)
+    jl_project(jl_cone, px_jl, x)
     np.testing.assert_allclose(px_py, px_jl, rtol=1e-14, atol=1e-14)
 
-    # 2. Verify Jacobian ∇Π(x)
     J_py = py_cone.jacobian(x)
     J_jl = np.zeros((4, 4))
-    jl.TO.grad_projection_b(jl_cone, J_jl, x)
+    jl_jacobian(jl_cone, J_jl, x)
     np.testing.assert_allclose(J_py, J_jl, rtol=1e-12, atol=1e-12)
 ```
 
+The `jl_to` session fixture activates `trajopt_jl/` and skips when no Julia runtime is
+present. All such tests carry `@pytest.mark.julia`, deselectable with `-m "not julia"`.
+
+The Julia cone API is `projection!`, `∇projection!`, and `∇²projection!` — each takes the cone
+first and writes into a preallocated output. There is no `grad_projection!`. An earlier draft of
+this document named one, and the test written against that name failed at attribute lookup
+rather than at a numerical comparison, which is why the API is pinned here explicitly.
+
+### What must be cross-tested against Julia
+
+| Component | Targets | Tolerance |
+| :--- | :--- | :--- |
+| Cones and projections | $\Pi$, $\nabla\Pi$, $\nabla^2\Pi[b]$ for all four cones, across every region (inside, outside, below dual cone) | `1e-14` values, `1e-12` derivatives |
+| Dynamics and integrators | continuous $f$, `discrete_dynamics`, $[A_k, B_k]$ for RK4, Euler, implicit midpoint, on all four benchmark models | `1e-14` steps, `1e-12` Jacobians |
+| Rotations | $\Xi(q)$, $G_k$, error state, $\bar A_k = G_{k+1}^T A_k G_k$, geodesic cost and its double-cover branches | `1e-12` |
+| Costs and objectives | `evaluate`, `gradient`, `hessian`, `invert` for diagonal, dense, LQR, tracking | `1e-14` values, `1e-12` derivatives |
+| Constraint catalog | $c(x,u)$ and $[\nabla_x c, \nabla_u c]$ for the whole catalog, across active knot points | `1e-12` |
+
+The rotations row is a **conjugated** comparison, through `to_hamilton`, which is strictly
+weaker than a direct one: a convention error in the bridge can cancel a convention error in
+the kernel. Two mitigations are mandatory. `to_hamilton` is cross-tested independently against
+known Hamilton values before any conjugated comparison exists, and the operand-ordering
+relation of section 7 is derived symbolically rather than fitted. Both are discharged in
+`test/unit/test_quaternion_ordering.py`.
+
+Where Python uses a different error map from the Julia default, the cross-test passes the
+matching map explicitly — `Rotations.QuatVecMap()`, scaling `1.0` — rather than relying on
+`state_diff`'s `CayleyMap` default.
+
+### What is not cross-tested
+
+1. **Storage and memory layout** — `KnotPoint` accessors, view semantics, container mechanics,
+   row-major versus column-major buffers.
+2. **Allocation metrics** — Julia's `@allocated` zero-allocation assertions have no analogue.
+   JAX memory behaviour is verified with XLA profiling and the zero-recompile test instead.
+3. **Type hierarchy and dispatch** — Julia's `AbstractConstraint{S,D}` tree and multiple
+   dispatch signatures. Python uses `eqx.Module` and explicit composition.
+4. **Line-search step sequences** — intermediate backtracking $\alpha$ values. FMA and
+   associativity differences between XLA and LLVM perturb them without changing the converged
+   solution.
+5. **Builders and sugar** — chaining helpers, plotting, docstrings, CLI wrappers.
+
+### End-to-end validation against pure CasADi
+
+Each benchmark is formulated identically in `trajopt` and in a standalone `casadi.Opti`
+transcription, matching discretization, cost matrices, boundary conditions, constraint sets,
+and Ipopt options.
+
+- Primal parity: $\lVert X^*_{\text{trajopt}} - X^*_{\text{CasADi}}\rVert_\infty \le 10^{-5}$,
+  and likewise for $U^*$.
+- Objective parity:
+  $|J^*_{\text{trajopt}} - J^*_{\text{CasADi}}| / J^*_{\text{CasADi}} \le 10^{-5}$.
+- Constraint satisfaction: $\lVert c(Z^*)\rVert_\infty \le \epsilon_{\text{feas}}$, with dual
+  multiplier parity under identical solver settings.
+
+### Benchmarking
+
+Timing is broken down into transcription latency (assembling sparsity patterns, bounds, and
+structures), derivative evaluation per iteration, pure solver runtime, and sustained
+closed-loop MPC rate with latency jitter and warm-start speedup.
+
+Benchmark problems:
+
+- **Cartpole swing-up** — underactuated, bounded actuation, state limits.
+- **Quadrotor obstacle avoidance** — SO(3) attitude tracking through spherical keep-out zones.
+- **Dubins car** — nonholonomic navigation with corridor constraints and a tracking objective.
+
+### Standing risks
+
+- **Sparse assembly from `vmap`ed dense blocks is the largest chunk of genuinely novel work in
+  v1.** No library does it, and the COO ordering must line up exactly with Ipopt's structure
+  callback or the failure mode is a wrong answer rather than an error.
+- **The $\delta\theta$ map's 180° singularity is a real constraint on expressible problems.**
+  It is unreachable for all three benchmarks, but it rules out large-angle reorientation until
+  the exponential map lands.
+
 ---
 
-### What MUST be cross-tested (Strict numerical parity)
+## 16. Deferred work
 
-Cross-testing is mandatory for mathematical operations where indexing conventions, signs, coordinate frames, or differentiation paths can cause silent divergence:
+Documented expansion paths, each designed to be additive rather than breaking:
 
-| Module / Component | Specific Functions & Targets to Test | Tolerance | Verification Metric |
-| :--- | :--- | :--- | :--- |
-| **Cones & Projections** | `projection!`, `∇projection!`, `∇²projection!` for `ZeroCone`, `NegativeOrthant`, `PositiveOrthant`, `SecondOrderCone` | `1e-14` (values)<br>`1e-12` (derivatives) | Pointwise projection $\Pi(x)$, Jacobian $\nabla \Pi(x)$, and Hessian contraction $\nabla^2 \Pi(x)[b]$ across all cone regions (inside, outside, below dual cone). |
-| **Dynamics & Integrators** | Continuous ODE dynamics, `discrete_dynamics`, and `jacobian!` ($A_k = \nabla_x f, B_k = \nabla_u f$) for RK4, Euler, and Implicit Midpoint. | `1e-14` (steps)<br>`1e-12` (Jacobians) | Output state $x_{k+1}$ and Jacobians $[A_k, B_k]$ evaluated on benchmark models (`Cartpole`, `Pendulum`, `Quadrotor`, `DubinsCar`). |
-| **Rotations on $SO(3)$** | Attitude Jacobian $G_k$, error state difference $x \ominus x_d$, modified dynamics $\bar{A}_k = G_{k+1}^T A_k G_k$, geodesic quaternion cost `DiagonalQuatCost`. | `1e-12` | $G_k \in \mathbb{R}^{13 \times 12}$ projection, error vector norm, quaternion subgradient double-cover branches ($\pm w q_{\text{ref}}$). |
-| **Cost Functions & Objectives** | `evaluate`, `gradient!`, `hessian!`, and `invert!` for `DiagonalCost`, `QuadraticCost`, `LQRCost`, `TrackingObjective`. | `1e-14` (values)<br>`1e-12` (grads/hess) | Scalar cost $\ell(x,u)$, gradient vector $[q; r]$, Hessian matrix $\begin{bmatrix} Q & H^T \\ H & R \end{bmatrix}$, and analytic inverted Hessian. |
-| **Constraint Catalog** | Value $c(x, u)$ and Jacobians $[\nabla_x c, \nabla_u c]$ for `GoalConstraint`, `StateBound`, `ControlBound`, `CircleConstraint`, `SphereConstraint`, `CollisionConstraint`, `LinearConstraint`, `DynamicsConstraint`. | `1e-12` | Constraint evaluation vector and Jacobian matrices across active knot points. |
-| **NLP Transcription** | Primal vector layout $Z$, constraint vector $c(Z)$, sparse Jacobian $\nabla c(Z)$ non-zero pattern & values, Lagrangian Hessian $\nabla^2 \mathcal{L}(Z)$ pattern & values. | `1e-12` (values)<br>Exact match (sparsity indices) | Column/row indices and numeric values fed into Ipopt evaluator (`eval_f`, `eval_grad_f`, `eval_g`, `eval_jac_g`, `eval_h`). |
-| **End-to-End Problem Solves** | Full trajectory solution $(X, U)$, final objective value, max constraint violation, and solver convergence criteria. | `1e-5` to `1e-6` | Trajectory arrays $[x_1 \dots x_N]$, $[u_1 \dots u_{N-1}]$ and dual multipliers after ALTRO and Ipopt solves on identical problem setups. |
+| Deferred | Enabled by |
+| :--- | :--- |
+| `LieState{R,P}` partitioning for multi-rotation states | the `state_diff` / `errstate_jacobian` interface pair |
+| Time-varying $n_k$, $m_k$ for hybrid and contact problems | requires abandoning fixed scalars; ragged buffers are incompatible with `vmap` |
+| Exponential/log error map for large-angle maneuvers | error map is a named constant behind one interface |
+| Native iLQR and ALTRO | `expansions.py`, cut before its first consumer |
+| Analytic Jacobian overrides | none planned; AD compiles to the analytic form |
 
 ---
 
-### What DOES NOT make sense to cross-test
+## Appendix A: divergences from TrajectoryOptimization.jl
 
-Testing the following against Julia provides no mathematical verification value and introduces unnecessary coupling:
+### Structural
 
-1. **Python Internal Storage & Memory Layout**:
-   - `KnotPoint` property accessors, trajectory slice views, and Python container mechanics.
-   - NumPy vs Julia column-major/row-major internal buffer layouts (as long as vectorized mathematical interfaces expose consistent 1D/2D arrays).
+| Julia | `trajopt` | Reason |
+| :--- | :--- | :--- |
+| `SampledTrajectory` as a list of `KnotPoint` | struct-of-arrays; `KnotPoint` is a view | a list of Python objects cannot be traced or `vmap`ed |
+| `Objective` as `N` heterogeneous cost objects | one stage + one terminal, parameters stacked | same reason; stacked parameters preserve every used capability |
+| `ConstraintList.sigs` | removed | in-place versus return-new is meaningless with immutable arrays |
+| `ConstraintList.diffs` | removed | AD compiles to the analytic form; an override is a second place to be wrong |
+| In-place `!` mutators | value-returning methods | arrays are immutable |
+| `Problem` holds `x0`, `xf` | split into `Problem` and `MPCState` | makes the zero-recompile invariant structural |
+| Time-varying $n_k$, $m_k$ | fixed `n`, `m` | ragged buffers are incompatible with `vmap`; no benchmark needs it |
+| Multiple dispatch on abstract type trees | `eqx.Module` and explicit composition | no Python equivalent worth emulating |
 
-2. **Memory Allocation Metrics**:
-   - Julia's `@allocated` tests (which verify zero GC allocations in Julia's static array system).
-   - In Python/JAX, memory efficiency is evaluated via XLA memory profilers and allocation-free JIT execution rather than Julia heap allocation counters.
+### Conventions
 
-3. **Polymorphic Type Hierarchy & Multiple Dispatch**:
-   - Julia's abstract type trees (`AbstractConstraint{S,D}`) and multiple dispatch method signatures.
-   - Python uses explicit class hierarchies, dataclasses, or functional PyTrees.
+| Julia | `trajopt` |
+| :--- | :--- |
+| Hamilton quaternions, scalar-first `[w,x,y,z]` | JPL, scalar-last `[x,y,z,w]` |
+| Active rotation matrix | passive (frame transformation) |
+| `CayleyMap` error map (default) | $\delta\theta = 2\,\text{vec}(q_{\text{err}})$ |
+| `state_diff` uses $q_{\text{ref}}^{-1}\otimes q$ | `error_to` uses $q \otimes q_{\text{ref}}^{-1}$; related by $\delta\theta_{\text{Julia}} = -R(q_{\text{ref}})^{T}\delta\theta$, section 7 |
+| `q_ind = SA[4,5,6,7]` | `q_ind = [0,1,2,3]` |
 
-4. **Line-Search Backtracking Step Sequences**:
-   - Exact per-step line-search $\alpha$ values during intermediate iterations of ALTRO/iLQR.
-   - Minor floating-point associativity differences (e.g. FMA instructions in XLA vs LLVM) can cause slight differences in step sizes during intermediate backtracking iterations, even though both solvers converge to the exact same optimal trajectory.
+### Gaps in the Julia reference
 
-5. **Purely Syntactic Sugar & Builders**:
-   - Method chaining utilities, plotting recipes, docstring generation, and high-level CLI wrappers.
+Two rows of an earlier draft of the verification table could not be built, because the
+corresponding Julia functionality does not exist:
 
----
+- **No solver.** `trajopt_jl/Project.toml` depends on `RobotDynamics`, `RobotZoo`,
+  `Rotations`, `StaticArrays`, `ForwardDiff`, and `FiniteDiff` — but not on `Altro.jl`. There
+  is no ALTRO or iLQR implementation to compare against. Adding `Altro.jl` as a test
+  dependency was considered and rejected: it would pin the comparison to another solver's
+  parameter defaults and iteration schedule, for agreement that is only meaningful to `1e-5`
+  anyway. The pure-CasADi baseline is a better oracle because it is *independent* rather than
+  a sibling implementation.
+- **`TrajOptNLP` is exported but never defined.** It appears in the export list at
+  `trajopt_jl/src/TrajectoryOptimization.jl:38`, but no `nlp.jl` exists and no file defines
+  it. There is no Julia NLP transcription against which to cross-test $Z$, $c(Z)$, or the
+  sparsity patterns. These are validated against CasADi instead.
 
-### Final verification: Full MPC/OCP validation vs. pure CasADi baseline
+Additionally, much of what an earlier draft attributed to `TrajectoryOptimization.jl` actually
+lives in its dependencies: `KnotPoint`, `SampledTrajectory`, `state_diff`,
+`state_diff_jacobian!`, the integrators, and `rollout!` are all imported from
+`RobotDynamics.jl`, and the benchmark models are `RobotZoo.jl`. They remain reachable through
+`juliacall` for cross-testing, but the Python port's scope is correspondingly broader than
+"port `TrajectoryOptimization.jl`".
 
-The final phase of verification validates full trajectory optimization (OCP) and receding-horizon model predictive control (MPC) runs against an independent, pure CasADi-only implementation (`casadi.Opti` direct transcription).
+### Corrections to the earlier draft
 
-#### 1. Numerical equivalence comparison
-Each benchmark problem is formulated identically in both the framework and pure CasADi (matching discretization, cost matrices, initial/terminal conditions, and constraint sets):
-
-- **Primal trajectory parity**: Maximum absolute error across all states and controls:
-  $$\|X_{\text{framework}}^* - X_{\text{CasADi}}^*\|_\infty \le 10^{-5}, \quad \|U_{\text{framework}}^* - U_{\text{CasADi}}^*\|_\infty \le 10^{-5}$$
-- **Objective function value**: Relative objective agreement:
-  $$\frac{|J_{\text{framework}}^* - J_{\text{CasADi}}^*|}{J_{\text{CasADi}}^*} \le 10^{-5}$$
-- **Constraint satisfaction & dual multipliers**: Maximum constraint residual $\|c(Z^*)\|_\infty \le \epsilon_{\text{feas}}$ and dual multiplier convergence parity under identical solver settings (e.g., Ipopt tolerances).
-
-#### 2. Solve time and latency benchmarking
-Benchmark execution speed, per-iteration timing, and memory overhead across real-world examples:
-
-- **Timing breakdown**:
-  1. *Transcription latency*: Time to assemble sparse problem matrices, Jacobian/Hessian structures, and bound vectors.
-  2. *Derivative evaluation*: Per-iteration time spent evaluating cost gradients, Jacobians, and Hessians.
-  3. *Solver runtime*: Pure solver time (ALTRO vs. Ipopt / CasADi Ipopt).
-  4. *Closed-loop MPC rate*: Sustained control loop frequency ($\text{Hz}$), latency jitter, and warm-start speedups over a receding horizon.
-
-- **Benchmark test problems**:
-  - **Cartpole Swing-Up**: Underactuated nonlinear system with bounded actuation and state limits.
-  - **Quadrotor Obstacle Avoidance**: 3D attitude tracking on $SO(3)$ (quaternion kinematics) navigating around spherical/cylindrical keep-out zones.
-  - **Dubins Car / Wheeled Mobile Robot**: Nonholonomic navigation with corridor constraints and tracking objectives.
+- The attitude Jacobian was given as
+  $G_k = \partial(x \ominus x_d)/\partial x \in \mathbb{R}^{13\times12}$. That derivative is
+  $12\times13$. The shape was right and the formula inverted:
+  $G_k = \partial x/\partial(\delta x)$, which is what makes $\bar A_k = G_{k+1}^T A_k G_k$
+  dimensionally consistent.
+- The "NumPy view aliasing and silent mutation" pitfall and its `.copy()` remedy are void.
+  JAX arrays are immutable and the failure mode cannot occur. The real JAX pitfall in its
+  place is buffer donation and `.at[].set()` producing full copies inside hot loops.
+- The quaternion mathematics throughout was transcribed from Hamilton scalar-first Julia and
+  has been rewritten for JPL scalar-last.

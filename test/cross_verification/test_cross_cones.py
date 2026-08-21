@@ -6,6 +6,16 @@ import pytest
 from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
 
 
+# The Julia names contain "!" and a Unicode nabla, so neither is a valid Python identifier.
+# They have to be reached with getattr rather than attribute syntax.
+def _jl_project(jl_to):
+    return getattr(jl_to.TO, "projection!")
+
+
+def _jl_jacobian(jl_to):
+    return getattr(jl_to.TO, "∇projection!")
+
+
 @pytest.mark.julia
 def test_zero_cone_cross(jl_to) -> None:
     cone_py = ZeroCone()
@@ -14,7 +24,7 @@ def test_zero_cone_cross(jl_to) -> None:
     x = np.array([1.0, -2.0, 3.0])
     px_py = cone_py.project(x)
     px_jl = np.zeros_like(x)
-    jl_to.TO.projection_b(cone_jl, px_jl, x)
+    _jl_project(jl_to)(cone_jl, px_jl, x)
 
     np.testing.assert_allclose(px_py, px_jl, rtol=1e-14, atol=1e-14)
 
@@ -27,7 +37,7 @@ def test_negative_orthant_cross(jl_to) -> None:
     x = np.array([-2.0, 3.0, 0.0])
     px_py = cone_py.project(x)
     px_jl = np.zeros_like(x)
-    jl_to.TO.projection_b(cone_jl, px_jl, x)
+    _jl_project(jl_to)(cone_jl, px_jl, x)
 
     np.testing.assert_allclose(px_py, px_jl, rtol=1e-14, atol=1e-14)
 
@@ -48,11 +58,11 @@ def test_second_order_cone_cross(jl_to) -> None:
         # 1. Projection check
         px_py = cone_py.project(x)
         px_jl = np.zeros_like(x)
-        jl_to.TO.projection_b(cone_jl, px_jl, x)
+        _jl_project(jl_to)(cone_jl, px_jl, x)
         np.testing.assert_allclose(px_py, px_jl, rtol=1e-14, atol=1e-14)
 
         # 2. Jacobian check
         J_py = cone_py.jacobian(x)
         J_jl = np.zeros((len(x), len(x)))
-        jl_to.TO.grad_projection_b(cone_jl, J_jl, x)
+        _jl_jacobian(jl_to)(cone_jl, J_jl, x)
         np.testing.assert_allclose(J_py, J_jl, rtol=1e-12, atol=1e-12)
