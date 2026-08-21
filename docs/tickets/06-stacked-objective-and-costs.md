@@ -18,21 +18,21 @@ control-rate penalties are not implemented here).
 
 ## Acceptance criteria
 
-- [ ] The objective stores stage-cost parameters stacked over the horizon and terminal-cost
+- [x] The objective stores stage-cost parameters stacked over the horizon and terminal-cost
       parameters separately
-- [ ] Diagonal and dense quadratic forms are both supported, with the diagonal form storing
+- [x] Diagonal and dense quadratic forms are both supported, with the diagonal form storing
       weights as vectors rather than matrices
-- [ ] LQR tracking construction produces the correct linear and constant terms from a goal state
+- [x] LQR tracking construction produces the correct linear and constant terms from a goal state
       and goal control
-- [ ] A time-varying tracking objective can be built from a reference trajectory, and its
+- [x] A time-varying tracking objective can be built from a reference trajectory, and its
       reference can be updated from a new reference without rebuilding the objective
-- [ ] A generic user-supplied cost callable is supported and differentiated by autodiff with no
+- [x] A generic user-supplied cost callable is supported and differentiated by autodiff with no
       special-case machinery
-- [ ] Cost evaluation over a trajectory is a single batched pass plus a reduction, not a Python
+- [x] Cost evaluation over a trajectory is a single batched pass plus a reduction, not a Python
       loop
-- [ ] Analytic Hessian inversion is implemented using the diagonal and block-diagonal shortcuts
-- [ ] No interface admits a cost term coupling consecutive knot points; such penalties are the
+- [x] Analytic Hessian inversion is implemented using the diagonal and block-diagonal shortcuts
+- [x] No interface admits a cost term coupling consecutive knot points; such penalties are the
       subject of ticket 14
-- [ ] Cross-verification covers scalar cost, gradient, Hessian, and inverted Hessian for the
+- [x] Cross-verification covers scalar cost, gradient, Hessian, and inverted Hessian for the
       diagonal, dense, LQR, and tracking variants, at `1e-14` for values and `1e-12` for
       derivatives
