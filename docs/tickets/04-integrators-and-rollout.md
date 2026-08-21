@@ -15,14 +15,14 @@ loop over the horizon is the interpreter-overhead failure mode the specification
 
 ## Acceptance criteria
 
-- [ ] Explicit RK4, Euler, and implicit midpoint integrators are implemented
-- [ ] Each integrator composes with the discretized dynamics type from ticket 03 without
+- [x] Explicit RK4, Euler, and implicit midpoint integrators are implemented
+- [x] Each integrator composes with the discretized dynamics type from ticket 03 without
       special-casing the model
-- [ ] Forward simulation uses a compiled scan rather than a Python loop over knot points, and a
+- [x] Forward simulation uses a compiled scan rather than a Python loop over knot points, and a
       test or benchmark demonstrates the horizon length does not multiply interpreter overhead
-- [ ] Rollout sets the first state from the initial condition and propagates the remainder from
+- [x] Rollout sets the first state from the initial condition and propagates the remainder from
       the stored controls
-- [ ] Integration accuracy is verified against an analytically integrable system, so an
+- [x] Integration accuracy is verified against an analytically integrable system, so an
       integrator bug cannot hide behind a matching-but-wrong cross-test
-- [ ] Cross-verification covers the discrete step and the discrete state and control Jacobians
+- [x] Cross-verification covers the discrete step and the discrete state and control Jacobians
       for all three integrators, at `1e-14` for steps and `1e-12` for Jacobians

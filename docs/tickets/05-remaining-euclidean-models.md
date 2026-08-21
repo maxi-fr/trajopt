@@ -14,11 +14,11 @@ while verifying nothing, which is worse than having no cross-test at all.
 
 ## Acceptance criteria
 
-- [ ] Pendulum and Dubins car models are implemented against the same model interface as the
+- [x] Pendulum and Dubins car models are implemented against the same model interface as the
       cartpole
-- [ ] Every physical parameter is matched to the corresponding RobotZoo model, and the match is
+- [x] Every physical parameter is matched to the corresponding RobotZoo model, and the match is
       asserted in a test rather than assumed
-- [ ] Cross-verification covers continuous dynamics, discrete steps, and Jacobians for both
+- [x] Cross-verification covers continuous dynamics, discrete steps, and Jacobians for both
       models across all three integrators
-- [ ] The quadrotor is explicitly out of scope here and is noted as belonging to the rotations
+- [x] The quadrotor is explicitly out of scope here and is noted as belonging to the rotations
       strand

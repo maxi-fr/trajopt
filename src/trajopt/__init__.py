@@ -29,6 +29,8 @@ from trajopt.dynamics import (
 )
 from trajopt.models import (
     Cartpole,
+    DubinsCar,
+    Pendulum,
 )
 from trajopt.trajectory import (
     KnotPoint,
@@ -44,12 +46,14 @@ __all__ = [
     "ContinuousDynamics",
     "DiscreteDynamics",
     "DiscretizedDynamics",
+    "DubinsCar",
     "EuclideanModel",
     "Euler",
     "ImplicitMidpoint",
     "Integrator",
     "KnotPoint",
     "NegativeOrthant",
+    "Pendulum",
     "PositiveOrthant",
     "SecondOrderCone",
     "Trajectory",
