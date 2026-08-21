@@ -18,23 +18,23 @@ structural change inside the control loop is already forbidden.
 
 ## Acceptance criteria
 
-- [ ] The state-only, control-only, and combined constraint kinds exist, with the zero Jacobian
+- [x] The state-only, control-only, and combined constraint kinds exist, with the zero Jacobian
       blocks implied rather than stored
-- [ ] The catalog covers goal, state bound, control bound, combined bound, linear, circle,
+- [x] The catalog covers goal, state bound, control bound, combined bound, linear, circle,
       sphere, collision, norm in both its quadratic and second-order-cone forms, and the indexed
       wrapper
-- [ ] Explicit and implicit dynamics constraints are both implemented
-- [ ] Constraints register against an active knot-point index range, with a dimension check at
+- [x] Explicit and implicit dynamics constraints are both implemented
+- [x] Constraints register against an active knot-point index range, with a dimension check at
       registration time
-- [ ] Total constraint dimension per knot point is queryable across the horizon
-- [ ] Box bounds expose a path that maps onto solver variable limits rather than becoming rows of
+- [x] Total constraint dimension per knot point is queryable across the horizon
+- [x] Box bounds expose a path that maps onto solver variable limits rather than becoming rows of
       the constraint vector
-- [ ] A build step fuses all registered constraints into one concatenated function per knot
+- [x] A build step fuses all registered constraints into one concatenated function per knot
       point, evaluable in a single batched pass
-- [ ] A test covers a knot point carrying several constraints of different types and output
+- [x] A test covers a knot point carrying several constraints of different types and output
       dimensions, confirming the concatenation order is deterministic
-- [ ] Jacobians are autodiff-derived; the analytic forms in the specification are used as
+- [x] Jacobians are autodiff-derived; the analytic forms in the specification are used as
       expected values in tests, not as implementation
-- [ ] Cross-verification covers values and both Jacobian blocks for the whole catalog across
+- [x] Cross-verification covers values and both Jacobian blocks for the whole catalog across
       active knot points at `1e-12`
-- [ ] The Julia signature-mode and differentiation-mode fields are absent, not ported
+- [x] The Julia signature-mode and differentiation-mode fields are absent, not ported
