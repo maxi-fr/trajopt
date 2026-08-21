@@ -12,3 +12,20 @@ temp/
 fort.10
 logs/
 *Manifest.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+.julia_env/
+.env
+!.env.example
