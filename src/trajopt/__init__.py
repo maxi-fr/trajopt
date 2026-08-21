@@ -12,13 +12,33 @@ from trajopt.cones import (
     SecondOrderCone,
     ZeroCone,
 )
+from trajopt.dynamics import (
+    ContinuousDynamics,
+    DiscreteDynamics,
+    DiscretizedDynamics,
+    EuclideanModel,
+)
+from trajopt.models import (
+    Cartpole,
+)
+from trajopt.trajectory import (
+    KnotPoint,
+    Trajectory,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
     "AbstractCone",
+    "Cartpole",
+    "ContinuousDynamics",
+    "DiscreteDynamics",
+    "DiscretizedDynamics",
+    "EuclideanModel",
+    "KnotPoint",
     "NegativeOrthant",
     "PositiveOrthant",
     "SecondOrderCone",
+    "Trajectory",
     "ZeroCone",
 ]

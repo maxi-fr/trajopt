@@ -21,20 +21,20 @@ section 1 (invariants).
 
 ## Acceptance criteria
 
-- [ ] Trajectory storage holds states, controls, times, and step durations as stacked arrays,
+- [x] Trajectory storage holds states, controls, times, and step durations as stacked arrays,
       with control storage one entry shorter than state storage
-- [ ] A knot-point view exposes state, control, time, duration, and terminal status without
+- [x] A knot-point view exposes state, control, time, duration, and terminal status without
       owning any storage
-- [ ] Trajectory operations that would mutate instead return new trajectories: setting states,
+- [x] Trajectory operations that would mutate instead return new trajectories: setting states,
       setting controls, shifting the initial time, and shifting forward one step for
       warm-starting
-- [ ] Continuous, discrete, and discretized dynamics types exist, with the discretized form
+- [x] Continuous, discrete, and discretized dynamics types exist, with the discretized form
       wrapping a continuous model and an integrator
-- [ ] The error-state dimension defaults to the state dimension, the state difference defaults to
+- [x] The error-state dimension defaults to the state dimension, the state difference defaults to
       subtraction, and the error Jacobian defaults to the identity
-- [ ] A test confirms a Euclidean model can be defined without referencing any manifold concept
-- [ ] Model parameters are traced values and dimensions are compile-time metadata, following the
+- [x] A test confirms a Euclidean model can be defined without referencing any manifold concept
+- [x] Model parameters are traced values and dimensions are compile-time metadata, following the
       pytree split in the specification
-- [ ] A cartpole model is implemented with parameters matched to RobotZoo
-- [ ] Cross-verification covers the continuous dynamics and its state and control Jacobians at
+- [x] A cartpole model is implemented with parameters matched to RobotZoo
+- [x] Cross-verification covers the continuous dynamics and its state and control Jacobians at
       `1e-14` and `1e-12` respectively
