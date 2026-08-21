@@ -9,6 +9,10 @@ distlib==0.4.3 \
     --hash=sha256:4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b \
     --hash=sha256:f152097224a0ae24be5a0f6bae1b9359af82133bce63f98a95f86cae1aede9ed
     # via virtualenv
+equinox==0.13.8 \
+    --hash=sha256:ca004348533cc30a63ebe8823d7dd4bb626dce17743d40bbddb89b402ef2a240 \
+    --hash=sha256:dd075050018e2dd02e252e9d29d3060f7e67f085622d8d27a8e89e24bb8523db
+    # via trajopt
 filelock==3.32.3 \
     --hash=sha256:0ffa185a3540854c95caa7fa76b76cb219d907415e2c5dc9af25fd970563487f \
     --hash=sha256:7f0ca4bcc0e181c60dbbd8aa9ab5b120ebb99e4e064e83636340056f833a1f09
@@ -22,7 +26,9 @@ identify==2.6.19 \
 jax==0.11.1 \
     --hash=sha256:43e0d45b1dac002eca04c2de73298395225dd0d4651e3f573a540eaa18abfd80 \
     --hash=sha256:72ed60bf85a0b53d0f5b5cd61e37a8b25f369f6f88481feb98ab489894861a82
-    # via trajopt
+    # via
+    #   equinox
+    #   trajopt
 jaxlib==0.11.1 \
     --hash=sha256:12803e2d6ca821d9f59aeb31ceaa6e49403aaeefbb62e3cba90e1ebcbe244209 \
     --hash=sha256:226616df027f1348da77764753c6c1e2f4d45b5551b67bcfdcafcf9cadf2e280 \
@@ -49,6 +55,10 @@ jaxlib==0.11.1 \
     # via
     #   jax
     #   trajopt
+jaxtyping==0.3.11 \
+    --hash=sha256:8a4bedc4e3f963fa82df41bd13c7ebc2bad925601eb48614c65798f21329d4e3 \
+    --hash=sha256:b09c14acf6686feb9e0df5b0d8c6e7c5b6f8d36bf059ee54cd522a186c2ef050
+    # via equinox
 ml-dtypes==0.6.0 \
     --hash=sha256:084dfe51a7ad58b171f05115f8226ed4233a454a1611371947e806e76f0c638d \
     --hash=sha256:26b1f1fa4f0435a2946859823f6e2bf06796f1e9f10f5a05b08a5e3c8f46ff69 \
@@ -263,7 +273,17 @@ scipy==1.18.0 \
     #   jax
     #   jaxlib
     #   trajopt
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
+    --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
+    # via equinox
 virtualenv==21.7.4 \
     --hash=sha256:376ec93cd6aab3044fa395d7db226db38043b7b5748948044b2a87168525e843 \
     --hash=sha256:c9d960c95fa458171e58222a5ccab7465298e4b6559977865e627c4719f1e825
     # via pre-commit
+wadler-lindig==0.1.7 \
+    --hash=sha256:81d14d3fe77d441acf3ebd7f4aefac20c74128bf460e84b512806dccf7b2cd55 \
+    --hash=sha256:e3ec83835570fd0a9509f969162aeb9c65618f998b1f42918cfc8d45122fe953
+    # via
+    #   equinox
+    #   jaxtyping

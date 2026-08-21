@@ -5,6 +5,11 @@ import os
 import sys
 from pathlib import Path
 
+import jax
+
+# Enable 64-bit precision by default across JAX
+jax.config.update("jax_enable_x64", val=True)
+
 
 def load_env_file(dotenv_path: str | Path | None = None) -> None:
     """Load key-value pairs from a .env file into os.environ if not already present."""

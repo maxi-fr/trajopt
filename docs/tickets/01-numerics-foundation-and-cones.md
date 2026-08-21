@@ -16,18 +16,18 @@ section 15 (verification strategy).
 
 ## Acceptance criteria
 
-- [ ] 64-bit precision is enabled when the package is imported, and a test asserts that a
+- [x] 64-bit precision is enabled when the package is imported, and a test asserts that a
       default-constructed array is 64-bit
-- [ ] `equinox` is a declared dependency and the lockfile and exported requirements are
+- [x] `equinox` is a declared dependency and the lockfile and exported requirements are
       regenerated
-- [ ] All four cones — zero, negative orthant, positive orthant, second-order — implement
+- [x] All four cones — zero, negative orthant, positive orthant, second-order — implement
       projection, projection Jacobian, and the second-derivative contraction
-- [ ] The second-order cone contains no Python branching on traced values; region selection is
+- [x] The second-order cone contains no Python branching on traced values; region selection is
       branchless and the division by the vector norm is guarded against zero
-- [ ] The second-derivative contraction is autodiff-derived rather than hand-written
-- [ ] Cross-verification against Julia covers the second-order cone in all three regions —
+- [x] The second-derivative contraction is autodiff-derived rather than hand-written
+- [x] Cross-verification against Julia covers the second-order cone in all three regions —
       inside, outside, below the dual cone — plus the boundary cases where the norm is zero and
       where the norm exactly equals the scalar part
-- [ ] Tolerances hold at `1e-14` for projections and `1e-12` for derivatives
-- [ ] The pre-existing NumPy cone implementation and its tests are fully replaced, not left
+- [x] Tolerances hold at `1e-14` for projections and `1e-12` for derivatives
+- [x] The pre-existing NumPy cone implementation and its tests are fully replaced, not left
       alongside

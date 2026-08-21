@@ -5,5 +5,20 @@ using JAX for fast automatic differentiation, vectorized Taylor expansions, and 
 """
 
 from trajopt import _env as _env
+from trajopt.cones import (
+    AbstractCone,
+    NegativeOrthant,
+    PositiveOrthant,
+    SecondOrderCone,
+    ZeroCone,
+)
 
 __version__ = "0.1.0"
+
+__all__ = [
+    "AbstractCone",
+    "NegativeOrthant",
+    "PositiveOrthant",
+    "SecondOrderCone",
+    "ZeroCone",
+]
