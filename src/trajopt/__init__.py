@@ -13,10 +13,19 @@ from trajopt.cones import (
     ZeroCone,
 )
 from trajopt.dynamics import (
+    RK4,
     ContinuousDynamics,
     DiscreteDynamics,
     DiscretizedDynamics,
     EuclideanModel,
+    Euler,
+    ImplicitMidpoint,
+    Integrator,
+    euler_step,
+    implicit_midpoint_step,
+    rk4_step,
+    rollout,
+    rollout_states,
 )
 from trajopt.models import (
     Cartpole,
@@ -29,16 +38,25 @@ from trajopt.trajectory import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "RK4",
     "AbstractCone",
     "Cartpole",
     "ContinuousDynamics",
     "DiscreteDynamics",
     "DiscretizedDynamics",
     "EuclideanModel",
+    "Euler",
+    "ImplicitMidpoint",
+    "Integrator",
     "KnotPoint",
     "NegativeOrthant",
     "PositiveOrthant",
     "SecondOrderCone",
     "Trajectory",
     "ZeroCone",
+    "euler_step",
+    "implicit_midpoint_step",
+    "rk4_step",
+    "rollout",
+    "rollout_states",
 ]
