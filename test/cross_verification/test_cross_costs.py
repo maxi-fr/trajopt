@@ -6,13 +6,16 @@ import pytest
 
 from trajopt.costs import (
     DiagonalCost,
+    LieLQRCost,
     LQRCost,
     LQRObjective,
     Objective,
     QuadraticCost,
+    QuatGeodesicCost,
     TrackingObjective,
     update_reference,
 )
+from trajopt.rotations.quaternion import Quaternion
 from trajopt.trajectory import Trajectory
 
 
@@ -436,3 +439,108 @@ def test_cross_tracking_objective(jl_to: Any) -> None:
             np.testing.assert_allclose(inv_k_py, inv_k_jl, rtol=1e-12, atol=1e-12)
         else:
             np.testing.assert_allclose(inv_k_py, np.diag(1.0 / Qf_diag), rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.julia
+def test_cross_geodesic_quaternion_cost_both_branches(jl_to: Any) -> None:
+    r"""Assert QuatGeodesicCost matches Julia DiagonalQuatCost on both subgradient branches.
+
+    Branch 1: dq = q_ref^T q > 0 (normal neighborhood of reference orientation)
+    Branch 2: dq = q_ref^T q < 0 (antipodal double-cover neighborhood of reference orientation)
+    """
+    jl = jl_to
+    jl.seval(
+        "using TrajectoryOptimization, RobotDynamics, LinearAlgebra, StaticArrays; const TO = TrajectoryOptimization; const RD = RobotDynamics"
+    )
+
+    Q_np = np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2])
+    R_np = np.array([0.1, 0.1, 0.1, 0.1])
+    q_ref_py = np.array([0.0, 0.0, 0.0, 1.0])
+    w = 3.5
+
+    # T_quat maps [x, y, z, w] to [w, x, y, z]
+    T_quat = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    T_13 = np.block(
+        [
+            [np.eye(3), np.zeros((3, 4)), np.zeros((3, 3)), np.zeros((3, 3))],
+            [np.zeros((4, 3)), T_quat, np.zeros((4, 3)), np.zeros((4, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.zeros((3, 3)), np.eye(3)],
+        ]
+    )
+    T_grad = np.block(
+        [
+            [T_13, np.zeros((13, 4))],
+            [np.zeros((4, 13)), np.eye(4)],
+        ]
+    )
+
+    q_ref_jl = T_quat @ q_ref_py  # [1, 0, 0, 0]
+
+    cost_py = QuatGeodesicCost(Q=jnp.array(Q_np), R=jnp.array(R_np), q_ref=jnp.array(q_ref_py), w=w, qind=(3, 4, 5, 6))
+
+    jl_create = jl.seval("""
+    function (Qd, Rd, w, q_ref_jl)
+        Q = Diagonal(SVector{13,Float64}(Qd...))
+        R = Diagonal(SVector{4,Float64}(Rd...))
+        q = @SVector zeros(13)
+        r = @SVector zeros(4)
+        c = 0.0
+        q_ref = SVector{4,Float64}(q_ref_jl...)
+        q_ind = SA[4, 5, 6, 7]
+        TO.DiagonalQuatCost(Q, R, q, r, c, Float64(w), q_ref, q_ind)
+    end
+    """)
+    cost_jl = jl_create(Q_np, R_np, w, q_ref_jl)
+
+    jl_eval = jl.seval(
+        "function (cost, x, u) RD.evaluate(cost, SVector{13,Float64}(x...), SVector{4,Float64}(u...)) end"
+    )
+    jl_grad = jl.seval("""
+    function (cost, x, u)
+        z = TO.KnotPoint(SVector{13,Float64}(x...), SVector{4,Float64}(u...), 0.0, 0.1)
+        grad = zeros(17)
+        TO.gradient!(cost, grad, z)
+        grad
+    end
+    """)
+
+    u = np.array([0.5, -0.5, 1.0, -1.0])
+
+    # Branch 1: dq > 0 (e.g. angle around 0.5 rad)
+    q1 = np.array([0.1, -0.2, 0.3, 0.9])
+    q1 /= np.linalg.norm(q1)
+    x1_py = np.concatenate([[1.0, 2.0, 3.0], q1, [0.5, -0.2, 0.8], [0.1, -0.3, 0.2]])
+    x1_jl = T_13 @ x1_py
+
+    assert np.dot(q_ref_py, q1) > 0.0
+    val1_py = float(cost_py.evaluate(jnp.array(x1_py), jnp.array(u)))
+    val1_jl = float(jl_eval(cost_jl, x1_jl, u))
+    np.testing.assert_allclose(val1_py, val1_jl, rtol=1e-14, atol=1e-14)
+
+    grad1_py = np.array(cost_py.gradient(jnp.array(x1_py), jnp.array(u)))
+    grad1_jl = np.array(jl_grad(cost_jl, x1_jl, u))
+    np.testing.assert_allclose(T_grad @ grad1_py, grad1_jl, rtol=1e-12, atol=1e-12)
+
+    # Branch 2: dq < 0 (antipodal / double-cover test: q is close to -q_ref)
+    q2 = -q1
+    x2_py = np.concatenate([[1.0, 2.0, 3.0], q2, [0.5, -0.2, 0.8], [0.1, -0.3, 0.2]])
+    x2_jl = T_13 @ x2_py
+
+    assert np.dot(q_ref_py, q2) < 0.0
+    val2_py = float(cost_py.evaluate(jnp.array(x2_py), jnp.array(u)))
+    val2_jl = float(jl_eval(cost_jl, x2_jl, u))
+    # Double cover invariance: val1 == val2
+    np.testing.assert_allclose(val2_py, val1_py, rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(val2_py, val2_jl, rtol=1e-14, atol=1e-14)
+
+    grad2_py = np.array(cost_py.gradient(jnp.array(x2_py), jnp.array(u)))
+    grad2_jl = np.array(jl_grad(cost_jl, x2_jl, u))
+    np.testing.assert_allclose(T_grad @ grad2_py, grad2_jl, rtol=1e-12, atol=1e-12)

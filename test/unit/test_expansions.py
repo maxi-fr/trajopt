@@ -11,12 +11,15 @@ from trajopt.constraints import (
     NormConstraint,
     StateBound,
 )
+from trajopt.constraints.rotations import QuatVecEq
 from trajopt.costs import (
     DiagonalCost,
     GenericCost,
+    LieLQRCost,
     LQRObjective,
     Objective,
     QuadraticCost,
+    QuatGeodesicCost,
     TrackingObjective,
 )
 from trajopt.dynamics import (
@@ -31,8 +34,9 @@ from trajopt.expansions import (
     cost_expansion,
     dynamics_expansion,
 )
-from trajopt.models import Cartpole, DubinsCar, Pendulum
+from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
 from trajopt.problem import Problem
+from trajopt.rotations.quaternion import Quaternion
 from trajopt.trajectory import Trajectory
 
 
@@ -711,3 +715,88 @@ def test_error_coordinates_with_mock_attitude_jacobian() -> None:
         expected_Qk = G.T @ jnp.diag(jnp.ones(n)) @ G
         np.testing.assert_allclose(exp_cost.q[k], expected_qk, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(exp_cost.Q[k], expected_Qk, rtol=1e-12, atol=1e-12)
+
+
+def _sample_quadrotor_trajectory(n_knots: int = 5) -> tuple[Quadrotor, Trajectory]:
+    """Helper to generate a Quadrotor model and a valid sample trajectory."""
+    model = Quadrotor()
+    m = 4
+    dt = 0.05
+    rng = np.random.default_rng(123)
+    X_list = []
+    for _ in range(n_knots):
+        r = rng.standard_normal(3)
+        q = rng.standard_normal(4)
+        q = q / np.linalg.norm(q)
+        v = rng.standard_normal(3)
+        omega = rng.standard_normal(3)
+        X_list.append(np.concatenate([r, q, v, omega]))
+    X = jnp.array(np.stack(X_list, axis=0))
+    U = jnp.array(rng.standard_normal((n_knots - 1, m)))
+    t = jnp.linspace(0.0, dt * (n_knots - 1), n_knots)
+    traj = Trajectory(X=X, U=U, t=t, dt=jnp.diff(t))
+    return model, traj
+
+
+def test_quadrotor_sandwiched_dynamics_expansion() -> None:
+    """Assert Quadrotor dynamics expansions are properly sandwiched in 12-dimensional error state coordinates."""
+    model, traj = _sample_quadrotor_trajectory(n_knots=5)
+    discrete = DiscretizedDynamics(model, RK4())
+    ne, m, N = 12, 4, 5
+
+    exp_dyn = dynamics_expansion(discrete, traj)
+    assert exp_dyn.A.shape == (N - 1, ne, ne)
+    assert exp_dyn.B.shape == (N - 1, ne, m)
+    assert exp_dyn.ne == ne
+
+    for k in range(N - 1):
+        G_k = model.errstate_jacobian(traj.X[k])
+        G_next = model.errstate_jacobian(traj.X[k + 1])
+        assert G_k.shape == (13, 12)
+        assert G_next.shape == (13, 12)
+
+        Ak_state = discrete.state_jacobian(traj.X[k], traj.U[k], traj.t[k], traj.dt[k])
+        Bk_state = discrete.control_jacobian(traj.X[k], traj.U[k], traj.t[k], traj.dt[k])
+
+        A_bar = G_next.T @ Ak_state @ G_k
+        B_bar = G_next.T @ Bk_state
+        assert A_bar.shape == (12, 12)
+        assert B_bar.shape == (12, 4)
+
+        np.testing.assert_allclose(exp_dyn.A[k], A_bar, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(exp_dyn.B[k], B_bar, rtol=1e-12, atol=1e-12)
+
+
+def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
+    """Assert Quadrotor cost and AL expansions are properly sandwiched in 12-dimensional error coordinates."""
+    model, traj = _sample_quadrotor_trajectory(n_knots=5)
+    n, ne, m, N = 13, 12, 4, 5
+
+    xf = traj.X[-1]
+    uf = jnp.zeros(m)
+    stage_cost = LieLQRCost(Q=jnp.ones(13), R=jnp.ones(m), xf=xf, uf=uf, w=2.0)
+    term_cost = LieLQRCost(Q=jnp.ones(13), R=jnp.ones(m), xf=xf, terminal=True, w=2.0)
+    obj = Objective(stage_cost=stage_cost, terminal_cost=term_cost, N=N)
+    problem = Problem(model=model, obj=obj, N=N)
+
+    exp_cost = cost_expansion(problem, traj)
+    assert exp_cost.q.shape == (N, ne)
+    assert exp_cost.Q.shape == (N, ne, ne)
+    assert exp_cost.r.shape == (N - 1, m)
+    assert exp_cost.R.shape == (N - 1, m, m)
+    assert exp_cost.H.shape == (N - 1, m, ne)
+
+    cons = ConstraintList(n=n, m=m, N=N)
+    q_target = xf[3:7]
+    cons.add_constraint(QuatVecEq(n=n, qf=q_target, m=m), N - 1)
+    built_cons = cons.build()
+
+    lam_list = [jnp.zeros(built_cons.p[k]) for k in range(N)]
+    lam_list[-1] = jnp.array([0.5, -0.5, 0.2])
+    al_exp = augmented_lagrangian_expansion(problem, traj, exp_cost, lam=lam_list, mu=10.0)
+    assert al_exp.q.shape == (N, ne)
+    assert al_exp.Q.shape == (N, ne, ne)
+
+    assert al_exp.r.shape == (N - 1, m)
+    assert al_exp.R.shape == (N - 1, m, m)
+    assert al_exp.H.shape == (N - 1, m, ne)

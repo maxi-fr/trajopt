@@ -4,6 +4,7 @@ from trajopt.dynamics.base import (
     DiscretizedDynamics,
     EuclideanModel,
     IntegratorCallable,
+    RigidBody,
 )
 from trajopt.dynamics.integrators import (
     RK4,
@@ -29,6 +30,7 @@ __all__ = [
     "ImplicitMidpoint",
     "Integrator",
     "IntegratorCallable",
+    "RigidBody",
     "euler_step",
     "implicit_midpoint_step",
     "rk4_step",

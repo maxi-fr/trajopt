@@ -389,7 +389,11 @@ def _terminal_cost_expansion(
     return q_term, Q_term
 
 
-def cost_expansion(problem: Problem | Objective, state: Trajectory) -> Expansion:
+def cost_expansion(
+    problem: Problem | Objective,
+    state: Trajectory,
+    model: AbstractModel | None = None,
+) -> Expansion:
     """Compute the stacked first- and second-order cost expansion in error coordinates.
 
     Parameters
@@ -399,6 +403,8 @@ def cost_expansion(problem: Problem | Objective, state: Trajectory) -> Expansion
     state : Trajectory
         Trajectory holding stacked states X of shape (N, n), controls U of shape (N-1, m),
         and times t of shape (N,).
+    model : AbstractModel | None, optional
+        Model defining the error state coordinates. If None, extracted from problem.
 
     Returns
     -------
@@ -407,21 +413,21 @@ def cost_expansion(problem: Problem | Objective, state: Trajectory) -> Expansion
         R of shape (N-1, m, m), and H of shape (N-1, m, ne) in error coordinates.
     """
     obj = _extract_objective(problem)
-    model = _extract_model(problem)
+    resolved_model = model if model is not None else _extract_model(problem)
 
     X = state.X
     U = state.U
     t = state.t
     N = state.N
     m = obj.m
-    ne = model.ne if model is not None else obj.n
+    ne = resolved_model.ne if resolved_model is not None else obj.n
     dtype = X.dtype
 
     # 1. Stage cost expansions k = 0, ..., N-2
-    q_st, r_st, Q_st, R_st, H_st = _stage_cost_expansion(obj, X[:-1], U, t[:-1], model)
+    q_st, r_st, Q_st, R_st, H_st = _stage_cost_expansion(obj, X[:-1], U, t[:-1], resolved_model)
 
     # 2. Terminal cost expansion k = N-1
-    q_term, Q_term = _terminal_cost_expansion(obj, X[-1], t[-1], model)
+    q_term, Q_term = _terminal_cost_expansion(obj, X[-1], t[-1], resolved_model)
 
     # 3. Assemble stacked arrays
     q_stacked = jnp.concatenate([q_st, jnp.expand_dims(q_term, 0)], axis=0)
@@ -571,12 +577,13 @@ def _knot_al_expansion(
     return q_al, None, Q_al, None, None
 
 
-def augmented_lagrangian_expansion(
+def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion takes problem, state, expansion, lam, mu, model
     problem: Problem | BuiltConstraintList | ConstraintList,
     state: Trajectory,
     expansion: Expansion,
     lam: Sequence[jax.Array] | jax.Array | None = None,
     mu: float | jax.Array = 1.0,
+    model: AbstractModel | None = None,
 ) -> Expansion:
     """Add augmented Lagrangian gradient and Hessian contributions into an existing Expansion.
 
@@ -593,6 +600,8 @@ def augmented_lagrangian_expansion(
         Lagrange multiplier vectors per knot point or concatenated 1D vector.
     mu : float | jax.Array, optional
         Penalty parameter (scalar or array of length N). Default is 1.0.
+    model : AbstractModel | None, optional
+        Model defining error state coordinates. If None, extracted from problem.
 
     Returns
     -------
@@ -600,7 +609,7 @@ def augmented_lagrangian_expansion(
         New Expansion with augmented Lagrangian gradient and Hessian terms added.
     """
     built_constraints = _extract_constraints(problem)
-    model = _extract_model(problem)
+    resolved_model = model if model is not None else _extract_model(problem)
 
     if built_constraints is None or len(built_constraints.knot_evaluators) == 0:
         return expansion
@@ -631,7 +640,7 @@ def augmented_lagrangian_expansion(
         xk = X[k]
         uk = U[k] if k < N - 1 else None
 
-        q_k, r_k, Q_k, R_k, H_k = _knot_al_expansion(ctx, xk, uk, model)
+        q_k, r_k, Q_k, R_k, H_k = _knot_al_expansion(ctx, xk, uk, resolved_model)
         q_al_list.append(q_k)
         Q_al_list.append(Q_k)
         if r_k is not None:

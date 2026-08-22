@@ -5,6 +5,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
+from trajopt.rotations.quaternion import (
+    Quaternion,
+    attitude_jacobian,
+    error_map,
+)
+
 IntegratorCallable = Callable[
     ["ContinuousDynamics", jax.Array, jax.Array, float | jax.Array, float | jax.Array], jax.Array
 ]
@@ -122,6 +128,81 @@ class EuclideanModel(ContinuousDynamics):
 
     def __init__(self, n: int, m: int) -> None:
         super().__init__(n=n, m=m, ne=n)
+
+
+class RigidBody(ContinuousDynamics):
+    """Continuous-time rigid-body dynamics model with SO(3) attitude state.
+
+    State layout (n = 13):
+        x = [r, q, v, omega]
+        r : position in world frame of shape (3,)
+        q : JPL unit quaternion [qx, qy, qz, qw] in body frame of shape (4,)
+        v : linear velocity in world frame of shape (3,)
+        omega : angular velocity in body frame of shape (3,)
+
+    Error state layout (ne = 12):
+        delta_x = [delta_r, delta_theta, delta_v, delta_omega]
+        delta_r : position error of shape (3,)
+        delta_theta : small-angle attitude error 2 * vec(q (x) q0^-1) of shape (3,)
+        delta_v : linear velocity error of shape (3,)
+        delta_omega : angular velocity error of shape (3,)
+
+    Parameters
+    ----------
+    m : int
+        Control dimension. Compile-time static metadata.
+    """
+
+    def __init__(self, m: int) -> None:
+        super().__init__(n=13, m=m, ne=12)
+
+    def state_diff(self, x: jax.Array, x0: jax.Array) -> jax.Array:
+        """Compute error state dx = x (-) x0 of shape (12,) from states of shape (13,).
+
+        Parameters
+        ----------
+        x : jax.Array
+            Current state of shape (13,).
+        x0 : jax.Array
+            Reference state of shape (13,).
+
+        Returns
+        -------
+        jax.Array
+            Error state vector of shape (12,).
+        """
+        dr = x[:3] - x0[:3]
+        q = Quaternion.from_array(x[3:7])
+        q0 = Quaternion.from_array(x0[3:7])
+        dtheta = error_map(q, q0)
+        dv = x[7:10] - x0[7:10]
+        domega = x[10:13] - x0[10:13]
+        return jnp.concatenate([dr, dtheta, dv, domega])
+
+    def errstate_jacobian(self, x: jax.Array) -> jax.Array:
+        """Evaluate error-state Jacobian G = dx / d(delta x) of shape (13, 12).
+
+        Parameters
+        ----------
+        x : jax.Array
+            State vector of shape (13,).
+
+        Returns
+        -------
+        jax.Array
+            Error-state Jacobian blockdiag(I_3, 0.5 * Xi(q), I_3, I_3) of shape (13, 12).
+        """
+        q = Quaternion.from_array(x[3:7])
+        g_rot = attitude_jacobian(q)
+        eye3 = jnp.eye(3, dtype=x.dtype)
+        z33 = jnp.zeros((3, 3), dtype=x.dtype)
+        z43 = jnp.zeros((4, 3), dtype=x.dtype)
+
+        row0 = jnp.hstack([eye3, z33, z33, z33])
+        row1 = jnp.hstack([z43, g_rot, z43, z43])
+        row2 = jnp.hstack([z33, z33, eye3, z33])
+        row3 = jnp.hstack([z33, z33, z33, eye3])
+        return jnp.vstack([row0, row1, row2, row3])
 
 
 class DiscreteDynamics(AbstractModel):

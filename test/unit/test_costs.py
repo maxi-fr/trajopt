@@ -6,10 +6,12 @@ import pytest
 from trajopt.costs import (
     DiagonalCost,
     GenericCost,
+    LieLQRCost,
     LQRCost,
     LQRObjective,
     Objective,
     QuadraticCost,
+    QuatGeodesicCost,
     TrackingObjective,
     update_reference,
 )
@@ -391,3 +393,90 @@ def test_objective_indexing_and_properties() -> None:
         _ = obj[N]
     with pytest.raises(IndexError):
         _ = obj[-N - 1]
+
+
+def test_quat_geodesic_cost_evaluation_and_subgradient_branches() -> None:
+    """Assert QuatGeodesicCost evaluation and gradient on both subgradient branches."""
+    n, m = 13, 4
+    Q = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2])
+    R = jnp.array([0.1, 0.1, 0.1, 0.1])
+    q_ref = jnp.array([0.0, 0.0, 0.0, 1.0])
+    w = 2.5
+
+    cost = QuatGeodesicCost(Q=Q, R=R, q_ref=q_ref, w=w, qind=(3, 4, 5, 6))
+    assert cost.n == n
+    assert cost.m == m
+    assert not cost.terminal
+
+    u = jnp.array([0.5, -0.5, 1.0, -1.0])
+
+    # Branch 1: q_ref^T q > 0 (e.g. q is close to q_ref)
+    q_pos = jnp.array([0.1, 0.2, 0.3, 0.9])
+    q_pos = q_pos / jnp.linalg.norm(q_pos)
+    x_pos = jnp.array([1.0, 2.0, 3.0, *q_pos, 0.5, -0.5, 1.0, 0.1, -0.1, 0.2])
+
+    dq_pos = float(jnp.dot(q_ref, q_pos))
+    assert dq_pos > 0.0
+
+    val_pos = cost.evaluate(x_pos, u)
+    expected_quad_pos = 0.5 * jnp.sum(Q * (x_pos**2)) + 0.5 * jnp.sum(R * (u**2))
+    expected_geo_pos = w * (1.0 - dq_pos)
+    np.testing.assert_allclose(val_pos, expected_quad_pos + expected_geo_pos, rtol=1e-14)
+
+    # Gradient check on Branch 1 (dq > 0 => grad_q = -w * q_ref)
+    grad_pos = cost.gradient(x_pos, u)
+    assert grad_pos.shape == (n + m,)
+    expected_gx_pos = Q * x_pos
+    expected_gx_pos = expected_gx_pos.at[3:7].set(-w * q_ref)
+    expected_gu_pos = R * u
+    np.testing.assert_allclose(grad_pos[:n], expected_gx_pos, rtol=1e-12)
+    np.testing.assert_allclose(grad_pos[n:], expected_gu_pos, rtol=1e-12)
+
+    # Branch 2: q_ref^T q < 0 (double-cover antipodal branch: q is close to -q_ref)
+    q_neg = -q_pos
+    x_neg = jnp.array([1.0, 2.0, 3.0, *q_neg, 0.5, -0.5, 1.0, 0.1, -0.1, 0.2])
+
+    dq_neg = float(jnp.dot(q_ref, q_neg))
+    assert dq_neg < 0.0
+
+    val_neg = cost.evaluate(x_neg, u)
+    expected_quad_neg = 0.5 * jnp.sum(Q * (x_neg**2)) + 0.5 * jnp.sum(R * (u**2))
+    expected_geo_neg = w * (1.0 + dq_neg)
+    # Geodesic penalty should be identical for q and -q (double cover!)
+    np.testing.assert_allclose(expected_geo_neg, expected_geo_pos, rtol=1e-14)
+    np.testing.assert_allclose(val_neg, expected_quad_neg + expected_geo_neg, rtol=1e-14)
+
+    # Gradient check on Branch 2 (dq < 0 => grad_q = +w * q_ref)
+    grad_neg = cost.gradient(x_neg, u)
+    expected_gx_neg = Q * x_neg
+    expected_gx_neg = expected_gx_neg.at[3:7].set(+w * q_ref)
+    np.testing.assert_allclose(grad_neg[:n], expected_gx_neg, rtol=1e-12)
+    np.testing.assert_allclose(grad_neg[n:], expected_gu_pos, rtol=1e-12)
+
+    # Hessian check: second derivative of min(1+dq, 1-dq) is zero
+    hess_pos = cost.hessian(x_pos, u)
+    assert hess_pos.shape == (n + m, n + m)
+    np.testing.assert_allclose(hess_pos, jnp.diag(jnp.concatenate([Q, R])), atol=1e-14)
+
+
+def test_lie_lqr_cost_helper() -> None:
+    """Assert LieLQRCost constructor builds tracking cost with zero error at goal."""
+    xf = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    uf = jnp.array([1.2, 1.2, 1.2, 1.2])
+    Q = jnp.ones(13)
+    R = jnp.full(4, 0.1)
+
+    stage_cost = LieLQRCost(Q=Q, R=R, xf=xf, uf=uf, w=4.0)
+    term_cost = LieLQRCost(Q=Q, R=R, xf=xf, terminal=True, w=4.0)
+
+    # At goal state and control, cost must be 0
+    val_stage = stage_cost.evaluate(xf, uf)
+    np.testing.assert_allclose(val_stage, 0.0, atol=1e-14)
+
+    val_term = term_cost.evaluate(xf)
+    np.testing.assert_allclose(val_term, 0.0, atol=1e-14)
+
+    # Double-cover goal state: xf with -qf must also give 0 cost
+    xf_antipodal = xf.at[3:7].set(-xf[3:7])
+    val_antipodal = stage_cost.evaluate(xf_antipodal, uf)
+    np.testing.assert_allclose(val_antipodal, 0.0, atol=1e-14)

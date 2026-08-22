@@ -16,6 +16,10 @@ from trajopt.costs.quadratic import (
     LQRCost,
     QuadraticCost,
 )
+from trajopt.costs.rotations import (
+    LieLQRCost,
+    QuatGeodesicCost,
+)
 
 __all__ = [
     "CostFunction",
@@ -23,9 +27,11 @@ __all__ = [
     "GenericCost",
     "LQRCost",
     "LQRObjective",
+    "LieLQRCost",
     "Objective",
     "QuadraticCost",
     "QuadraticCostFunction",
+    "QuatGeodesicCost",
     "TrackingObjective",
     "update_reference",
 ]

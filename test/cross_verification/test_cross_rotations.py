@@ -1,10 +1,14 @@
 from typing import Any
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from trajopt.dynamics.base import RigidBody
 from trajopt.rotations.quaternion import (
     Quaternion,
+    attitude_jacobian,
     error_map,
     to_hamilton,
 )
@@ -177,3 +181,142 @@ def test_degenerate_coaxial_and_identity_cross(jl_to: Any) -> None:
     q_err = q_rand.error_to(q_ref_id)
 
     np.testing.assert_allclose(vec_jl, -np.array(q_err.vec), atol=1e-15)
+
+
+@pytest.mark.julia
+def test_attitude_jacobian_cross(jl_to: Any) -> None:
+    r"""Assert derived relation between Python attitude Jacobian and Julia ∇differential.
+
+    Derivation:
+    In Python (JPL):
+        delta_q = G_py(q) @ delta_theta_py, where G_py(q) = 0.5 * Xi(q)
+    In Julia (Hamilton scalar-first):
+        delta_h = (0.5 * ∇diff(h)) @ delta_theta_jl
+    Since h = T @ q with T mapping JPL scalar-last to Hamilton scalar-first,
+        delta_h = T @ delta_q = T @ G_py(q) @ delta_theta_py
+    Using the derived relation delta_theta_jl = -R(q)^T @ delta_theta_py:
+        (0.5 * ∇diff(h)) @ (-R(q)^T @ delta_theta_py) = T @ G_py(q) @ delta_theta_py
+    Therefore:
+        T @ G_py(q) = -0.5 * ∇diff(h) @ R(q)^T
+    or equivalently:
+        0.5 * ∇diff(h) = -T @ G_py(q) @ R(q)
+    """
+    jl = jl_to
+    jl.seval("using Rotations")
+    jl_diff = getattr(jl.Rotations, "∇differential")
+
+    # Permutation matrix T mapping [x, y, z, w] to [w, -x, -y, -z]
+    T = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+        ]
+    )
+
+    # 1. Test on non-degenerate orthogonal pair X_Y_PAIR
+    for q, _ in [X_Y_PAIR, *random_pairs(seed=200, count=50)]:
+        q_jl = _py_to_julia_unitquat(jl, q)
+        G_jl = np.array(jl_diff(q_jl))
+        G_py = np.array(attitude_jacobian(q))
+        R_ref = np.array(q.to_rot_mat())
+
+        # Assert derived relation: T @ G_py = -0.5 * G_jl @ R^T
+        expected_TG_py = -0.5 * G_jl @ R_ref.T
+        np.testing.assert_allclose(T @ G_py, expected_TG_py, rtol=1e-12, atol=1e-12)
+
+
+class _TestRigidBody(RigidBody):
+    def __init__(self, m: int = 4) -> None:
+        super().__init__(m=m)
+
+    def dynamics(self, x: jax.Array, u: jax.Array, t: float | jax.Array = 0.0) -> jax.Array:
+        del u, t
+        return jnp.zeros_like(x)
+
+
+@pytest.mark.julia
+def test_rigid_body_errstate_and_jacobian_cross(jl_to: Any) -> None:
+    """Assert RigidBody state_diff and errstate_jacobian match Julia LieState across random states."""
+    jl = jl_to
+    jl.seval("using Rotations, StaticArrays, LinearAlgebra")
+
+    model_py = _TestRigidBody(m=4)
+
+    T_quat = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+        ]
+    )
+    T_13 = np.block(
+        [
+            [np.eye(3), np.zeros((3, 4)), np.zeros((3, 3)), np.zeros((3, 3))],
+            [np.zeros((4, 3)), T_quat, np.zeros((4, 3)), np.zeros((4, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.zeros((3, 3)), np.eye(3)],
+        ]
+    )
+
+    rng = np.random.default_rng(202)
+    for q, q_ref in [X_Y_PAIR, *random_pairs(seed=202, count=30)]:
+        r = rng.standard_normal(3)
+        r0 = rng.standard_normal(3)
+        v = rng.standard_normal(3)
+        v0 = rng.standard_normal(3)
+        omega = rng.standard_normal(3)
+        omega0 = rng.standard_normal(3)
+
+        x_py = jnp.array(np.concatenate([r, q.to_array(), v, omega]))
+        x0_py = jnp.array(np.concatenate([r0, q_ref.to_array(), v0, omega0]))
+
+        # 1. Error state comparison
+        dx_py = np.array(model_py.state_diff(x_py, x0_py))
+
+        q_jl = _py_to_julia_unitquat(jl, q)
+        q_ref_jl = _py_to_julia_unitquat(jl, q_ref)
+        delta_q_jl = jl.seval("function(q, q0) q0 \\ q end")(q_jl, q_ref_jl)
+        dtheta_jl = 2.0 * np.array(jl.Rotations.params(delta_q_jl))[1:4]
+
+        # In Julia error state: [dr, dtheta_jl, dv, domega]
+        dx_jl_expected = np.concatenate([r - r0, dtheta_jl, v - v0, omega - omega0])
+        # Mapping relation between Python and Julia error states
+        R_ref = np.array(q_ref.to_rot_mat())
+        E_mat = np.block(
+            [
+                [np.eye(3), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((3, 3)), -R_ref.T, np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)],
+            ]
+        )
+        np.testing.assert_allclose(dx_jl_expected, E_mat @ dx_py, rtol=1e-12, atol=1e-12)
+
+        # 2. errstate_jacobian comparison
+        G_py = np.array(model_py.errstate_jacobian(x_py))
+        assert G_py.shape == (13, 12)
+
+        jl_diff = getattr(jl.Rotations, "∇differential")
+        G_rot_jl = np.array(jl_diff(q_jl))
+        G_jl = np.block(
+            [
+                [np.eye(3), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((4, 3)), 0.5 * G_rot_jl, np.zeros((4, 3)), np.zeros((4, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)],
+            ]
+        )
+        R_curr = np.array(q.to_rot_mat())
+        E_curr = np.block(
+            [
+                [np.eye(3), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((3, 3)), -R_curr.T, np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)],
+            ]
+        )
+        # Assert T_13 @ G_py == G_jl @ E_curr
+        np.testing.assert_allclose(T_13 @ G_py, G_jl @ E_curr, rtol=1e-12, atol=1e-12)

@@ -31,24 +31,24 @@ geodesic quaternion cost), section 11 (expansions), section 14 (models).
 
 ## Acceptance criteria
 
-- [ ] A rigid-body model base exists with the state laid out as position, attitude, linear
+- [x] A rigid-body model base exists with the state laid out as position, attitude, linear
       velocity, angular velocity, and with the error dimension one less than the state dimension
-- [ ] The attitude Jacobian is block diagonal with identity blocks for the Euclidean components
+- [x] The attitude Jacobian is block diagonal with identity blocks for the Euclidean components
       and the scaled kinematics matrix for the attitude component
-- [ ] The attitude Jacobian maps error variations into state variations, and a shape assertion in
+- [x] The attitude Jacobian maps error variations into state variations, and a shape assertion in
       the test suite pins that direction
-- [ ] The left-versus-right perturbation relation between the Python and Julia attitude Jacobians
+- [x] The left-versus-right perturbation relation between the Python and Julia attitude Jacobians
       is derived symbolically and verified numerically on a non-degenerate pair, before the
       attitude-Jacobian cross-test asserts anything
-- [ ] A quadrotor model is implemented with every parameter matched to RobotZoo, including the
+- [x] A quadrotor model is implemented with every parameter matched to RobotZoo, including the
       motor mixing matrix
-- [ ] The quadrotor cross-test converts both the state vector and the Jacobians, since RobotZoo
+- [x] The quadrotor cross-test converts both the state vector and the Jacobians, since RobotZoo
       stores its quaternion in the opposite convention and ordering
-- [ ] The expansion engine applies the attitude Jacobian sandwich to dynamics, cost, and
+- [x] The expansion engine applies the attitude Jacobian sandwich to dynamics, cost, and
       constraint expansions
-- [ ] Euclidean models still produce results identical to before this ticket, confirming the
+- [x] Euclidean models still produce results identical to before this ticket, confirming the
       identity path is unchanged
-- [ ] The geodesic quaternion cost is implemented with its double-cover branch, and the
+- [x] The geodesic quaternion cost is implemented with its double-cover branch, and the
       quaternion attitude equality constraint is added to the catalog
-- [ ] Cross-verification covers the attitude Jacobian, the error state, the sandwiched dynamics
+- [x] Cross-verification covers the attitude Jacobian, the error state, the sandwiched dynamics
       expansion, and the geodesic cost including both branches of its subgradient, at `1e-12`

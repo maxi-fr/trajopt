@@ -6,17 +6,21 @@ import pytest
 
 from trajopt.dynamics import (
     RK4,
+    DiscretizedDynamics,
     Euler,
     ImplicitMidpoint,
 )
-from trajopt.models import DubinsCar, Pendulum
+from trajopt.expansions import dynamics_expansion
+from trajopt.models import DubinsCar, Pendulum, Quadrotor
+from trajopt.rotations.quaternion import Quaternion
+from trajopt.trajectory import Trajectory
 
 
 @pytest.mark.julia
 def test_model_parameters_match_robotzoo(jl_to: Any) -> None:
-    """Assert that default parameters of Pendulum and DubinsCar match RobotZoo bit-for-bit."""
+    """Assert that default parameters of Pendulum, DubinsCar, and Quadrotor match RobotZoo bit-for-bit."""
     jl = jl_to
-    jl.seval("using RobotZoo, RobotDynamics")
+    jl.seval("using RobotZoo, RobotDynamics, LinearAlgebra")
 
     # 1. Pendulum parameter match assertion
     jl_pendulum = jl.seval("RobotZoo.Pendulum()")
@@ -39,6 +43,21 @@ def test_model_parameters_match_robotzoo(jl_to: Any) -> None:
     assert float(py_car.radius) == float(jl_car.radius)
     assert py_car.n == int(jl.seval("RobotDynamics.state_dim(RobotZoo.DubinsCar())"))
     assert py_car.m == int(jl.seval("RobotDynamics.control_dim(RobotZoo.DubinsCar())"))
+
+    # 3. Quadrotor parameter match assertion
+    jl_quad = jl.seval("RobotZoo.Quadrotor()")
+    py_quad = Quadrotor()
+
+    assert float(py_quad.mass) == float(jl_quad.mass)
+    jl_J = jl.seval("diag(Array(RobotZoo.Quadrotor().J))")
+    np.testing.assert_allclose(py_quad.J, np.array(jl_J))
+    np.testing.assert_allclose(py_quad.gravity, np.array(jl_quad.gravity))
+    assert float(py_quad.motor_dist) == float(jl_quad.motor_dist)
+    assert float(py_quad.kf) == float(jl_quad.kf)
+    assert float(py_quad.km) == float(jl_quad.km)
+
+    assert py_quad.n == int(jl.seval("RobotDynamics.state_dim(RobotZoo.Quadrotor())"))
+    assert py_quad.m == int(jl.seval("RobotDynamics.control_dim(RobotZoo.Quadrotor())"))
 
 
 @pytest.mark.julia
@@ -411,3 +430,214 @@ def test_custom_parameters_cross(jl_to: Any) -> None:
     py_car = DubinsCar(radius=radius)
 
     assert float(py_car.radius) == float(jl_car.radius)
+
+
+@pytest.mark.julia
+def test_quadrotor_continuous_dynamics_and_jacobians_cross(jl_to: Any) -> None:
+    r"""Assert Quadrotor continuous dynamics and Jacobians match RobotZoo under quaternion conversion.
+
+    Conversion:
+    x_jl = T_13 @ x_py
+    xdot_jl = T_13 @ xdot_py
+    df/dx_jl = T_13 @ (df/dx_py) @ T_13^T
+    df/du_jl = T_13 @ (df/du_py)
+    """
+    jl = jl_to
+    jl.seval("using RobotZoo, RobotDynamics, ForwardDiff, StaticArrays, LinearAlgebra")
+
+    jl_model = jl.seval("RobotZoo.Quadrotor()")
+    py_model = Quadrotor()
+
+    T_quat = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    T_13 = np.block(
+        [
+            [np.eye(3), np.zeros((3, 4)), np.zeros((3, 3)), np.zeros((3, 3))],
+            [np.zeros((4, 3)), T_quat, np.zeros((4, 3)), np.zeros((4, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.zeros((3, 3)), np.eye(3)],
+        ]
+    )
+
+    jl_eval_dyn = jl.seval("""
+    function (model, x, u)
+        RobotDynamics.dynamics(model, SVector{13,Float64}(x...), SVector{4,Float64}(u...))
+    end
+    """)
+
+    jl_eval_jac = jl.seval("""
+    function (model, x, u)
+        z = [x; u]
+        ForwardDiff.jacobian(z_ -> RobotDynamics.dynamics(model, z_[1:13], z_[14:17]), z)
+    end
+    """)
+
+    rng = np.random.default_rng(300)
+    for _ in range(20):
+        r = rng.standard_normal(3)
+        q_raw = rng.standard_normal(4)
+        q = q_raw / np.linalg.norm(q_raw)
+        v = rng.standard_normal(3)
+        omega = rng.standard_normal(3)
+        u = rng.uniform(0.5, 3.0, size=4)
+
+        x_py = np.concatenate([r, q, v, omega])
+        x_jl = T_13 @ x_py
+
+        # 1. Continuous dynamics comparison (tol 1e-14)
+        xdot_py = np.array(py_model.dynamics(jnp.array(x_py), jnp.array(u)))
+        xdot_jl = np.array(jl_eval_dyn(jl_model, x_jl, u))
+
+        # 1a. Position derivative r_dot = v
+        np.testing.assert_allclose(xdot_py[:3], xdot_jl[:3], rtol=1e-14, atol=1e-14)
+
+        # 1b. Linear velocity derivative v_dot
+        # In Python: vdot = g + (1/m) * R(q)^T @ F_body
+        # In Julia: vdot = g + (1/m) * q_jl * F_body
+        np.testing.assert_allclose(xdot_py[7:10], xdot_jl[7:10], rtol=1e-14, atol=1e-14)
+
+        # 1c. Angular velocity derivative omega_dot
+        np.testing.assert_allclose(xdot_py[10:13], xdot_jl[10:13], rtol=1e-14, atol=1e-14)
+
+        # 1d. Quaternion kinematics qdot:
+        # In Python (JPL): qdot_py = 0.5 * Xi(q) @ omega_py
+        # In Julia (Hamilton scalar-first): qdot_jl = Rotations.kinematics(q_jl, omega_jl)
+        # Relation: T_quat @ qdot_py = -qdot_jl or qdot_jl?
+        # Note: h = T @ q => hdot = T @ qdot_py.
+        # But Rotations.kinematics(h, omega) in Julia uses right multiplication 0.5 * h * [0; omega]
+        # or left multiplication 0.5 * [0; omega] * h?
+        # Let's check relation: T_quat @ xdot_py[3:7] vs xdot_jl[3:7]
+        np.testing.assert_allclose(T_quat @ xdot_py[3:7], xdot_jl[3:7], rtol=1e-14, atol=1e-14)
+
+        # 2. Continuous Jacobians comparison (tol 1e-12)
+        J_py = np.array(py_model.jacobian(jnp.array(x_py), jnp.array(u)))
+        J_jl = np.array(jl_eval_jac(jl_model, x_jl, u))
+
+        A_py = J_py[:, :13]
+        B_py = J_py[:, 13:]
+        A_jl = J_jl[:, :13]
+        B_jl = J_jl[:, 13:]
+
+        # Continuous state and control Jacobians match under the 13-state basis transformation:
+        np.testing.assert_allclose(T_13 @ A_py @ T_13.T, A_jl, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(T_13 @ B_py, B_jl, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.julia
+def test_quadrotor_sandwiched_dynamics_expansion_cross(jl_to: Any) -> None:
+    r"""Assert RK4 Quadrotor error-state dynamics expansion matches Julia TrajectoryOptimization at 1e-12.
+
+    Relation between error-state expansions:
+    A_bar_jl = E(q_next) @ A_bar_py @ E(q_k)^T
+    B_bar_jl = E(q_next) @ B_bar_py
+    where E(q) = blockdiag(I3, -R(q)^T, I3, I3)
+    """
+    jl = jl_to
+    jl.seval("""
+    using RobotZoo, RobotDynamics, ForwardDiff, StaticArrays, LinearAlgebra, Rotations
+    const RD = RobotDynamics
+    """)
+
+    jl_model = jl.seval("RobotZoo.Quadrotor()")
+    py_model = Quadrotor()
+    discrete_py = DiscretizedDynamics(py_model, RK4())
+
+    T_quat = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    T_13 = np.block(
+        [
+            [np.eye(3), np.zeros((3, 4)), np.zeros((3, 3)), np.zeros((3, 3))],
+            [np.zeros((4, 3)), T_quat, np.zeros((4, 3)), np.zeros((4, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.zeros((3, 3)), np.eye(3)],
+        ]
+    )
+
+    jl_step_jac = jl.seval("""
+    function (model, x_jl, u, t, dt)
+        integ = RD.RK4(13, 4)
+        ForwardDiff.jacobian(z_ -> RD.integrate(integ, model, z_[1:13], z_[14:17], t, dt), [x_jl; u])
+    end
+    """)
+
+    jl_diff = getattr(jl.Rotations, "∇differential")
+
+    dt = 0.05
+    t = 0.0
+    rng = np.random.default_rng(301)
+
+    for _ in range(10):
+        # Generate valid initial state and control
+        r0 = rng.standard_normal(3)
+        q0_raw = rng.standard_normal(4)
+        q0 = q0_raw / np.linalg.norm(q0_raw)
+        v0 = rng.standard_normal(3)
+        omega0 = rng.standard_normal(3)
+        x0_py = np.concatenate([r0, q0, v0, omega0])
+        u_py = rng.uniform(0.8, 2.5, size=4)
+
+        # Step forward in Python to get x1_py and normalize quaternion
+        x1_py = np.array(discrete_py.discrete_dynamics(jnp.array(x0_py), jnp.array(u_py), t, dt))
+        q1_norm = np.linalg.norm(x1_py[3:7])
+        x1_py[3:7] /= q1_norm
+
+        # Python Jacobians and error-state sandwich
+        Ak_py = np.array(discrete_py.state_jacobian(jnp.array(x0_py), jnp.array(u_py), t, dt))
+        Bk_py = np.array(discrete_py.control_jacobian(jnp.array(x0_py), jnp.array(u_py), t, dt))
+        G0_py = np.array(py_model.errstate_jacobian(jnp.array(x0_py)))
+        G1_py = np.array(py_model.errstate_jacobian(jnp.array(x1_py)))
+
+        A_bar_py = G1_py.T @ Ak_py @ G0_py  # (12, 12)
+        B_bar_py = G1_py.T @ Bk_py  # (12, 4)
+
+        # Julia step and error-state expansion
+        x0_jl = T_13 @ x0_py
+        x1_jl = T_13 @ x1_py
+
+        J_jl = np.array(jl_step_jac(jl_model, x0_jl, u_py, t, dt))
+        Ak_jl = J_jl[:, :13]
+        Bk_jl = J_jl[:, 13:]
+
+        # Julia error-state Jacobians G_jl(x0_jl), G_jl(x1_jl)
+        q0_quat_jl = jl.Rotations.UnitQuaternion(x0_jl[3], x0_jl[4], x0_jl[5], x0_jl[6])
+        q1_quat_jl = jl.Rotations.UnitQuaternion(x1_jl[3], x1_jl[4], x1_jl[5], x1_jl[6])
+
+        G0_rot_jl = np.array(jl_diff(q0_quat_jl))
+        G1_rot_jl = np.array(jl_diff(q1_quat_jl))
+
+        G0_jl = np.block(
+            [
+                [np.eye(3), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((4, 3)), 0.5 * G0_rot_jl, np.zeros((4, 3)), np.zeros((4, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)],
+            ]
+        )
+        G1_jl = np.block(
+            [
+                [np.eye(3), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))],
+                [np.zeros((4, 3)), 0.5 * G1_rot_jl, np.zeros((4, 3)), np.zeros((4, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))],
+                [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)],
+            ]
+        )
+
+        A_bar_jl = G1_jl.T @ Ak_jl @ G0_jl
+        B_bar_jl = G1_jl.T @ Bk_jl
+
+        # In this representation where x_jl = T_13 @ x_py and G_jl = T_13 @ G_py,
+        # the error-state vectors are in identical coordinates:
+        np.testing.assert_allclose(A_bar_py, A_bar_jl, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(B_bar_py, B_bar_jl, rtol=1e-12, atol=1e-12)
