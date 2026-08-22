@@ -19,19 +19,19 @@ primal vector is not the storage of record).
 
 ## Acceptance criteria
 
-- [ ] The primal vector interleaves states and controls with a trailing terminal state, and the
+- [x] The primal vector interleaves states and controls with a trailing terminal state, and the
       interleaving is owned by the transcription layer alone — trajectory storage stays
       struct-of-arrays
-- [ ] The constraint vector composes the initial-state condition, the dynamics defects, and the
+- [x] The constraint vector composes the initial-state condition, the dynamics defects, and the
       stage constraints in a documented order
-- [ ] The sparsity pattern is computed at build time as a pure function of the dimensions, using
+- [x] The sparsity pattern is computed at build time as a pure function of the dimensions, using
       host arrays rather than traced ones
-- [ ] Per-knot Jacobian blocks are treated as dense; structural zeros inside a block are not
+- [x] Per-knot Jacobian blocks are treated as dense; structural zeros inside a block are not
       exploited
-- [ ] A test asserts directly that the runtime value ordering matches the build-time pattern
+- [x] A test asserts directly that the runtime value ordering matches the build-time pattern
       ordering, independent of whether any solve converges
-- [ ] Four independently compiled phases exist, matching the solver's objective, gradient,
+- [x] Four independently compiled phases exist, matching the solver's objective, gradient,
       constraint, constraint-Jacobian, and Hessian callbacks
-- [ ] No sparse matrix objects are allocated inside the iteration loop
-- [ ] Cartpole swing-up solves to optimality with bounded actuation and a terminal goal
+- [x] No sparse matrix objects are allocated inside the iteration loop
+- [x] Cartpole swing-up solves to optimality with bounded actuation and a terminal goal
       constraint

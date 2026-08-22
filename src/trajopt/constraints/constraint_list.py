@@ -136,6 +136,10 @@ class BuiltConstraintList(eqx.Module):
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
     p: tuple[int, ...] = eqx.field(static=True)
+    x_lower: jax.Array
+    x_upper: jax.Array
+    u_lower: jax.Array
+    u_upper: jax.Array
 
     def __init__(
         self,
@@ -143,6 +147,7 @@ class BuiltConstraintList(eqx.Module):
         n: int,
         m: int,
         N: int,
+        bounds: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> None:
         self.knot_evaluators = tuple(knot_evaluators)
         self.n = int(n)
@@ -150,12 +155,32 @@ class BuiltConstraintList(eqx.Module):
         self.N = int(N)
         self.p = tuple(k.p for k in self.knot_evaluators)
 
+        if bounds is not None:
+            self.x_lower = jnp.asarray(bounds[0])
+            self.x_upper = jnp.asarray(bounds[1])
+            self.u_lower = jnp.asarray(bounds[2])
+            self.u_upper = jnp.asarray(bounds[3])
+        else:
+            self.x_lower = jnp.full((self.N, self.n), -np.inf)
+            self.x_upper = jnp.full((self.N, self.n), np.inf)
+            self.u_lower = jnp.full((self.N - 1, self.m), -np.inf)
+            self.u_upper = jnp.full((self.N - 1, self.m), np.inf)
+
         by_structure: dict[tuple, list[int]] = {}
         for k, evaluator in enumerate(self.knot_evaluators):
             key = (tuple(id(c) for c in evaluator.constraints), evaluator.is_terminal)
             by_structure.setdefault(key, []).append(k)
         self.groups = tuple(
             ConstraintGroup(evaluator=self.knot_evaluators[ks[0]], knots=tuple(ks)) for ks in by_structure.values()
+        )
+
+    def primal_bounds(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return the collected primal variable box bounds (xL, xU, uL, uU)."""
+        return (
+            np.asarray(self.x_lower, dtype=np.float64),
+            np.asarray(self.x_upper, dtype=np.float64),
+            np.asarray(self.u_lower, dtype=np.float64),
+            np.asarray(self.u_upper, dtype=np.float64),
         )
 
     def evaluate_knot(
@@ -405,6 +430,7 @@ class ConstraintList:
             n=self.n,
             m=self.m,
             N=self.N,
+            bounds=self.primal_bounds(),
         )
 
     def __len__(self) -> int:

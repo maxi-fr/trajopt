@@ -87,6 +87,30 @@ from trajopt.trajectory import (
     KnotPoint,
     Trajectory,
 )
+from trajopt.transcription.ipopt import (
+    IpoptResult,
+    solve_ipopt,
+)
+from trajopt.transcription.layout import (
+    constraint_bounds,
+    primal_bounds,
+    trajectory_to_z,
+    z_to_trajectory,
+)
+from trajopt.transcription.sparsity import (
+    hessian_sparsity_pattern,
+    jacobian_sparsity_pattern,
+)
+from trajopt.transcription.transcription import (
+    constraints_and_jac,
+    cost_and_grad,
+    eval_f,
+    eval_g,
+    eval_grad_f,
+    eval_h,
+    eval_jac_g,
+    hessian,
+)
 
 __version__ = "0.1.0"
 
@@ -122,6 +146,7 @@ __all__ = [
     "ImplicitMidpoint",
     "IndexedConstraint",
     "Integrator",
+    "IpoptResult",
     "KnotPoint",
     "LQRCost",
     "LQRObjective",
@@ -149,18 +174,33 @@ __all__ = [
     "ZeroCone",
     "attitude_jacobian",
     "augmented_lagrangian_expansion",
+    "constraint_bounds",
+    "constraints_and_jac",
     "control_rate_cost",
+    "cost_and_grad",
     "cost_expansion",
     "dynamics_expansion",
     "error_map",
     "euler_step",
+    "eval_f",
+    "eval_g",
+    "eval_grad_f",
+    "eval_h",
+    "eval_jac_g",
     "from_hamilton",
+    "hessian",
+    "hessian_sparsity_pattern",
     "implicit_midpoint_step",
+    "jacobian_sparsity_pattern",
     "linearize_about",
+    "primal_bounds",
     "rk4_step",
     "rollout",
     "rollout_states",
+    "solve_ipopt",
     "to_hamilton",
+    "trajectory_to_z",
     "update_reference",
     "with_control_rate_penalty",
+    "z_to_trajectory",
 ]
