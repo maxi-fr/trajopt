@@ -1,5 +1,3 @@
-"""Unit tests for cone sets, projections, derivatives, and 64-bit numerics foundation."""
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -213,3 +211,38 @@ def test_second_order_cone_jit() -> None:
     np.testing.assert_allclose(jit_proj(x), cone.project(x), rtol=1e-14, atol=1e-14)
     np.testing.assert_allclose(jit_jac(x), cone.jacobian(x), rtol=1e-14, atol=1e-14)
     np.testing.assert_allclose(jit_hess(x, b), cone.hessian(x, b), rtol=1e-14, atol=1e-14)
+
+
+def test_identity_cone() -> None:
+    from trajopt.cones import IdentityCone
+
+    cone = IdentityCone()
+    x = jnp.array([1.5, -2.5, 3.0])
+    b = jnp.array([0.1, 0.2, 0.3])
+
+    np.testing.assert_allclose(cone.project(x), x)
+    np.testing.assert_allclose(cone.jacobian(x), jnp.eye(3))
+    np.testing.assert_allclose(cone.hessian(x, b), jnp.zeros((3, 3)))
+    np.testing.assert_allclose(cone.project_dual(x), jnp.zeros_like(x))
+
+
+def test_cone_duals_and_project_dual() -> None:
+    from trajopt.cones import IdentityCone
+
+    zero_cone = ZeroCone()
+    assert isinstance(zero_cone.dual(), IdentityCone)
+    x = jnp.array([1.0, -2.0, 3.0])
+    np.testing.assert_allclose(zero_cone.project_dual(x), x)
+
+    neg_cone = NegativeOrthant()
+    assert isinstance(neg_cone.dual(), PositiveOrthant)
+    np.testing.assert_allclose(neg_cone.project_dual(jnp.array([-2.0, 0.0, 3.0])), jnp.array([0.0, 0.0, 3.0]))
+
+    pos_cone = PositiveOrthant()
+    assert isinstance(pos_cone.dual(), NegativeOrthant)
+    np.testing.assert_allclose(pos_cone.project_dual(jnp.array([-2.0, 0.0, 3.0])), jnp.array([-2.0, 0.0, 0.0]))
+
+    soc = SecondOrderCone()
+    assert isinstance(soc.dual(), SecondOrderCone)
+    x_soc = jnp.array([2.0, 3.0, 1.0, 1.0])
+    np.testing.assert_allclose(soc.project_dual(x_soc), soc.project(x_soc))

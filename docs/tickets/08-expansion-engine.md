@@ -22,18 +22,18 @@ projections, used by the augmented Lagrangian term).
 
 ## Acceptance criteria
 
-- [ ] An expansion structure holds stacked dynamics Jacobians, cost gradients, and cost Hessian
+- [x] An expansion structure holds stacked dynamics Jacobians, cost gradients, and cost Hessian
       blocks, sized in the error dimension rather than the state dimension
-- [ ] Three composable pure functions produce it: dynamics expansion, cost expansion, and
+- [x] Three composable pure functions produce it: dynamics expansion, cost expansion, and
       augmented Lagrangian expansion
-- [ ] The augmented Lagrangian function takes the multipliers and penalty and returns a new
+- [x] The augmented Lagrangian function takes the multipliers and penalty and returns a new
       expansion with its contributions added into the existing gradient and Hessian fields, not
       into a separate structure
-- [ ] The augmented Lagrangian uses the dual-cone projection of the shifted constraint value,
+- [x] The augmented Lagrangian uses the dual-cone projection of the shifted constraint value,
       consistent with the cone module
-- [ ] All quantities are in error coordinates; no consumer applies the attitude Jacobian sandwich
+- [x] All quantities are in error coordinates; no consumer applies the attitude Jacobian sandwich
       itself
-- [ ] Every expansion is verified against finite differences of the corresponding evaluation
+- [x] Every expansion is verified against finite differences of the corresponding evaluation
       function
-- [ ] Cross-verification against Julia covers whichever expansion quantities have a direct Julia
+- [x] Cross-verification against Julia covers whichever expansion quantities have a direct Julia
       counterpart

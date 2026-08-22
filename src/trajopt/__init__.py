@@ -1,6 +1,7 @@
 from trajopt import _env as _env
 from trajopt.cones import (
     AbstractCone,
+    IdentityCone,
     NegativeOrthant,
     PositiveOrthant,
     SecondOrderCone,
@@ -56,11 +57,18 @@ from trajopt.dynamics import (
     rollout,
     rollout_states,
 )
+from trajopt.expansions import (
+    Expansion,
+    augmented_lagrangian_expansion,
+    cost_expansion,
+    dynamics_expansion,
+)
 from trajopt.models import (
     Cartpole,
     DubinsCar,
     Pendulum,
 )
+from trajopt.problem import Problem
 from trajopt.trajectory import (
     KnotPoint,
     Trajectory,
@@ -91,8 +99,10 @@ __all__ = [
     "DynamicsConstraint",
     "EuclideanModel",
     "Euler",
+    "Expansion",
     "GenericCost",
     "GoalConstraint",
+    "IdentityCone",
     "ImplicitDynamicsConstraint",
     "ImplicitMidpoint",
     "IndexedConstraint",
@@ -106,6 +116,7 @@ __all__ = [
     "Objective",
     "Pendulum",
     "PositiveOrthant",
+    "Problem",
     "QuadraticCost",
     "QuadraticCostFunction",
     "QuatVecEq",
@@ -117,6 +128,9 @@ __all__ = [
     "TrackingObjective",
     "Trajectory",
     "ZeroCone",
+    "augmented_lagrangian_expansion",
+    "cost_expansion",
+    "dynamics_expansion",
     "euler_step",
     "implicit_midpoint_step",
     "rk4_step",

@@ -57,6 +57,47 @@ class AbstractCone(eqx.Module):
         b_arr = jnp.asarray(b)
         return jax.jacobian(lambda x_: self.jacobian(x_).T @ b_arr)(x_arr)
 
+    def dual(self) -> "AbstractCone":
+        """Return the dual cone."""
+        raise NotImplementedError
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone."""
+        return self.dual().project(x)
+
+
+class IdentityCone(AbstractCone):
+    """Identity cone (unconstrained space R^n), dual to ZeroCone."""
+
+    def project(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the identity cone, returning it unchanged."""
+        return jnp.asarray(x)
+
+    def jacobian(self, x: jax.Array) -> jax.Array:
+        """Evaluate the Jacobian of the projection: the identity matrix of shape (n, n).
+
+        Parameters
+        ----------
+        x
+            Vector of shape (n,).
+
+        Returns
+        -------
+        jax.Array
+            Identity matrix of shape (n, n).
+        """
+        x_arr = jnp.asarray(x)
+        return jnp.eye(x_arr.shape[0], dtype=x_arr.dtype)
+
+    def dual(self) -> AbstractCone:
+        """Return the dual cone (ZeroCone)."""
+        return ZeroCone()
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone (ZeroCone -> 0)."""
+        return jnp.zeros_like(x)
+
+
 class ZeroCone(AbstractCone):
     """Zero cone representing equality constraints g(x) = 0."""
 
@@ -81,6 +122,15 @@ class ZeroCone(AbstractCone):
         n = x_arr.shape[0]
         return jnp.zeros((n, n), dtype=x_arr.dtype)
 
+    def dual(self) -> AbstractCone:
+        """Return the dual cone (IdentityCone)."""
+        return IdentityCone()
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone (IdentityCone -> x)."""
+        return jnp.asarray(x)
+
+
 class NegativeOrthant(AbstractCone):
     """Negative orthant representing inequality constraints h(x) <= 0."""
 
@@ -104,6 +154,15 @@ class NegativeOrthant(AbstractCone):
         x_arr = jnp.asarray(x)
         return jnp.diag((x_arr <= 0.0).astype(x_arr.dtype))
 
+    def dual(self) -> AbstractCone:
+        """Return the dual cone (PositiveOrthant)."""
+        return PositiveOrthant()
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone (PositiveOrthant -> max(0, x))."""
+        return jnp.maximum(0.0, jnp.asarray(x))
+
+
 class PositiveOrthant(AbstractCone):
     """Positive orthant representing inequality constraints h(x) >= 0."""
 
@@ -126,6 +185,15 @@ class PositiveOrthant(AbstractCone):
         """
         x_arr = jnp.asarray(x)
         return jnp.diag((x_arr >= 0.0).astype(x_arr.dtype))
+
+    def dual(self) -> AbstractCone:
+        """Return the dual cone (NegativeOrthant)."""
+        return NegativeOrthant()
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone (NegativeOrthant -> min(0, x))."""
+        return jnp.minimum(0.0, jnp.asarray(x))
+
 
 class SecondOrderCone(AbstractCone):
     """Second-order cone (Lorentz cone / ice cream cone): ||v||_2 <= s, where x = [v; s]."""
@@ -212,3 +280,11 @@ class SecondOrderCone(AbstractCone):
                 J_outside,
             ),
         )
+
+    def dual(self) -> AbstractCone:
+        """Return the dual cone (self-dual SecondOrderCone)."""
+        return self
+
+    def project_dual(self, x: jax.Array) -> jax.Array:
+        """Project vector x of shape (n,) onto the dual cone (self-dual)."""
+        return self.project(x)

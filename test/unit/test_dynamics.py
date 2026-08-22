@@ -20,7 +20,7 @@ class LinearContinuousModel(ContinuousDynamics):
     B: jax.Array
 
     def __init__(self, A: jax.Array, B: jax.Array):
-        super().__init__(n=A.shape[0], m=B.shape[1])
+        super().__init__(n=int(A.shape[0]), m=int(B.shape[1]), ne=int(A.shape[0]))
         self.A = A
         self.B = B
 
@@ -36,7 +36,7 @@ class LinearDiscreteModel(DiscreteDynamics):
     Bd: jax.Array
 
     def __init__(self, Ad: jax.Array, Bd: jax.Array):
-        super().__init__(n=Ad.shape[0], m=Bd.shape[1])
+        super().__init__(n=int(Ad.shape[0]), m=int(Bd.shape[1]), ne=int(Ad.shape[0]))
         self.Ad = Ad
         self.Bd = Bd
 
