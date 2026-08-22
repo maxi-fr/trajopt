@@ -21,13 +21,13 @@ no to control-rate penalties.
 
 ## Acceptance criteria
 
-- [ ] A transform augments a model's state with the previous control and exposes the resulting
+- [x] A transform augments a model's state with the previous control and exposes the resulting
       dimensions correctly
-- [ ] A control-rate penalty expressed through the augmented model produces the same trajectory
+- [x] A control-rate penalty expressed through the augmented model produces the same trajectory
       cost as the equivalent coupled penalty computed by hand
-- [ ] The augmented model's cost Hessian is verified to be block diagonal, not block tridiagonal
-- [ ] The transform composes with the existing integrators and rollout without special-casing
-- [ ] A transform linearizes a model about a reference trajectory, producing stacked state and
+- [x] The augmented model's cost Hessian is verified to be block diagonal, not block tridiagonal
+- [x] The transform composes with the existing integrators and rollout without special-casing
+- [x] A transform linearizes a model about a reference trajectory, producing stacked state and
       control Jacobians along the horizon
-- [ ] Both transforms work on Euclidean models; behaviour on rigid-body models is either
+- [x] Both transforms work on Euclidean models; behaviour on rigid-body models is either
       supported or explicitly documented as unsupported
