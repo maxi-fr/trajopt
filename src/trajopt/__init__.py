@@ -69,6 +69,13 @@ from trajopt.models import (
     Pendulum,
 )
 from trajopt.problem import Problem
+from trajopt.rotations.quaternion import (
+    Quaternion,
+    attitude_jacobian,
+    error_map,
+    from_hamilton,
+    to_hamilton,
+)
 from trajopt.trajectory import (
     KnotPoint,
     Trajectory,
@@ -120,6 +127,7 @@ __all__ = [
     "QuadraticCost",
     "QuadraticCostFunction",
     "QuatVecEq",
+    "Quaternion",
     "SecondOrderCone",
     "SphereConstraint",
     "StageConstraint",
@@ -128,13 +136,17 @@ __all__ = [
     "TrackingObjective",
     "Trajectory",
     "ZeroCone",
+    "attitude_jacobian",
     "augmented_lagrangian_expansion",
     "cost_expansion",
     "dynamics_expansion",
+    "error_map",
     "euler_step",
+    "from_hamilton",
     "implicit_midpoint_step",
     "rk4_step",
     "rollout",
     "rollout_states",
+    "to_hamilton",
     "update_reference",
 ]

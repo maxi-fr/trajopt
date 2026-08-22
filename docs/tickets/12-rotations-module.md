@@ -23,19 +23,19 @@ derivation.
 
 ## Acceptance criteria
 
-- [ ] The JPL product, conjugate, inverse, and vector rotation are implemented, with the vector
+- [x] The JPL product, conjugate, inverse, and vector rotation are implemented, with the vector
       rotation being the passive form consistent with the product convention
-- [ ] The kinematics matrix and the quaternion derivative from a body-frame angular velocity are
+- [x] The kinematics matrix and the quaternion derivative from a body-frame angular velocity are
       implemented
-- [ ] The rotation matrix is computed directly rather than through SciPy; SciPy appears only in
+- [x] The rotation matrix is computed directly rather than through SciPy; SciPy appears only in
       interoperability helpers and tests
-- [ ] The error map produces the multiplicative small-angle error, requiring no division and no
+- [x] The error map produces the multiplicative small-angle error, requiring no division and no
       branch guard
-- [ ] The Hamilton bridge is implemented and shown to be its own inverse
-- [ ] The bridge is verified independently against known Hamilton values before any conjugated
+- [x] The Hamilton bridge is implemented and shown to be its own inverse
+- [x] The bridge is verified independently against known Hamilton values before any conjugated
       cross-test exists
-- [ ] Cross-tests against Julia pass the matching error map explicitly rather than relying on the
+- [x] Cross-tests against Julia pass the matching error map explicitly rather than relying on the
       Julia default, and assert the relation derived in ticket 02
-- [ ] Double-cover behaviour is tested: a quaternion and its negation produce the same rotation
+- [x] Double-cover behaviour is tested: a quaternion and its negation produce the same rotation
       and the same error magnitude
-- [ ] Quaternion values are registered pytrees and survive a round trip through compiled code
+- [x] Quaternion values are registered pytrees and survive a round trip through compiled code
