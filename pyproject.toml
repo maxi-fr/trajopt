@@ -164,5 +164,6 @@ rules = { unresolved-reference = "ignore" }
 
 [dependency-groups]
 dev = [
+    "casadi>=3.7.2",
     "pre-commit>=4.6.2",
 ]

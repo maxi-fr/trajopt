@@ -20,13 +20,13 @@ Julia reference, explaining why Julia is not the oracle here).
 
 ## Acceptance criteria
 
-- [ ] Cartpole and Dubins problems are formulated independently in CasADi, matching
+- [x] Cartpole and Dubins problems are formulated independently in CasADi, matching
       discretization, cost weights, boundary conditions, constraint sets, and solver options
-- [ ] The two formulations are asserted to agree on their setup — same horizon, same step
+- [x] The two formulations are asserted to agree on their setup — same horizon, same step
       duration, same bounds — so a parity pass cannot come from comparing different problems
-- [ ] Maximum absolute state and control error against the CasADi solution is within `1e-5`
-- [ ] Relative objective value agreement is within `1e-5`
-- [ ] Maximum constraint residual is within the feasibility tolerance
-- [ ] Dual multipliers agree under identical solver settings
-- [ ] The baseline lives as reusable test infrastructure rather than a one-off script, since the
+- [x] Maximum absolute state and control error against the CasADi solution is within `1e-5`
+- [x] Relative objective value agreement is within `1e-5`
+- [x] Maximum constraint residual is within the feasibility tolerance
+- [x] Dual multipliers agree under identical solver settings
+- [x] The baseline lives as reusable test infrastructure rather than a one-off script, since the
       benchmark suite extends it

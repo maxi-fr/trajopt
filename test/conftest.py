@@ -4,9 +4,11 @@ from typing import Any
 
 import pytest
 
-# Ensure src/ package directory is on Python path
+# Ensure src/ package directory and test directory are on Python path
 src_dir = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(src_dir))
+test_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(test_dir))
 
 import trajopt._env
 
