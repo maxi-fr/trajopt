@@ -1,5 +1,3 @@
-"""Trajectory storage and knot-point views for optimal control and trajectory optimization."""
-
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -130,10 +128,6 @@ class Trajectory(eqx.Module):
     def times(self) -> jax.Array:
         """Return the stacked timestamp array t of shape (N,)."""
         return self.t
-
-    def step_durations(self) -> jax.Array:
-        """Return the stacked step duration array dt of shape (N-1,)."""
-        return self.dt
 
     def set_states(self, X: jax.Array) -> "Trajectory":
         """Return a new Trajectory with updated states.

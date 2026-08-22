@@ -1,5 +1,3 @@
-"""Unit tests for Euler, RK4, and ImplicitMidpoint integrators and their analytical properties."""
-
 import jax
 import jax.numpy as jnp
 import numpy as np

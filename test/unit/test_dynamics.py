@@ -1,5 +1,3 @@
-"""Unit tests for ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics, and models."""
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp

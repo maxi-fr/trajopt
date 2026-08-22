@@ -1,5 +1,3 @@
-"""Cross-verification tests comparing Python integrators (Euler, RK4, ImplicitMidpoint) against Julia RobotDynamics."""
-
 from typing import Any
 
 import jax.numpy as jnp

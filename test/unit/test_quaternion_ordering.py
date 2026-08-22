@@ -1,14 +1,3 @@
-"""Numerical verification of the JPL/Hamilton attitude-error operand-ordering relation.
-
-Companion to ``docs/quaternion_operand_ordering.md``, which carries the symbolic derivation.
-This module pins the result numerically so it cannot silently drift.
-
-Test order matters and is load-bearing. The Hamilton bridge is verified first against
-hardcoded Hamilton values and an independently written Hamilton product, before any test
-compares a bridged quantity to a JPL one. A sign error in the bridge therefore cannot cancel
-a sign error in a kernel and produce a green suite over a wrong implementation.
-"""
-
 import sys
 from pathlib import Path
 

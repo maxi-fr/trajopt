@@ -1,5 +1,3 @@
-"""Pytest fixtures and configuration for unit and cross-verification tests."""
-
 import sys
 from pathlib import Path
 from typing import Any

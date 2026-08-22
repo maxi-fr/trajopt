@@ -1,5 +1,3 @@
-"""Rotational and attitude constraints."""
-
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -73,16 +71,14 @@ class QuatVecEq(StateConstraint):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate quaternion vector difference defect."""
+        """Evaluate quaternion vector difference defect of shape (3,) from x of shape (n,)."""
         del u, t
         if x is None:
             msg = "State vector x is required to evaluate QuatVecEq."
             raise ValueError(msg)
 
         q = x[self.qind_arr]
-        norm_q = jnp.linalg.norm(q)
-        safe_norm = jnp.maximum(norm_q, 1e-12)
-        q_unit = q / safe_norm
+        q_unit = q / jnp.linalg.norm(q)
 
         dq = jnp.dot(self.qf, q_unit)
         qf_sign = jnp.where(dq < 0.0, -self.qf, self.qf)

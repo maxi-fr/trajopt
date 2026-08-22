@@ -1,7 +1,5 @@
-"""Numerical integrators for continuous-time dynamics models."""
-
 from abc import ABC, abstractmethod
-from typing import Any, overload
+from typing import Any, Self, overload
 
 import jax
 import jax.numpy as jnp
@@ -132,7 +130,23 @@ def implicit_midpoint_step(  # noqa: PLR0913, PLR0917
 
 
 class Integrator(ABC):
-    """Abstract base class for numerical integrators."""
+    """Base class for numerical integrators.
+
+    Calling a subclass with a continuous-time model returns that model discretized by this
+    integrator; calling it without one returns a reusable integrator instance.
+    """
+
+    @overload
+    def __new__(cls, model: ContinuousDynamics, /, **kwargs: int) -> DiscretizedDynamics: ...
+
+    @overload
+    def __new__(cls, model: None = None, /, **kwargs: int) -> Self: ...
+
+    def __new__(cls, model: ContinuousDynamics | None = None, /, **kwargs: int) -> Any:
+        """Build an integrator, or a DiscretizedDynamics when a continuous model is supplied."""
+        if model is None:
+            return super().__new__(cls)
+        return DiscretizedDynamics(model, cls(**kwargs))
 
     @abstractmethod
     def __call__(
@@ -143,57 +157,11 @@ class Integrator(ABC):
         t: float | jax.Array = 0.0,
         dt: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Step continuous_dynamics forward by dt from state x with control u at time t.
-
-        Parameters
-        ----------
-        continuous_dynamics : ContinuousDynamics
-            Continuous-time dynamical model.
-        x : jax.Array
-            Current state of shape (n,).
-        u : jax.Array
-            Current control of shape (m,).
-        t : float | jax.Array, optional
-            Current time. Defaults to 0.0.
-        dt : float | jax.Array, optional
-            Time step duration. Defaults to 0.0.
-
-        Returns
-        -------
-        jax.Array
-            Next state of shape (n,).
-        """
-
-    def step(
-        self,
-        continuous_dynamics: ContinuousDynamics,
-        x: jax.Array,
-        u: jax.Array,
-        t: float | jax.Array = 0.0,
-        dt: float | jax.Array = 0.0,
-    ) -> jax.Array:
-        """Step continuous_dynamics forward by dt."""
-        return self(continuous_dynamics, x, u, t, dt)
+        """Step from state x of shape (n,) with control u of shape (m,) to the next state of shape (n,)."""
 
 
 class Euler(Integrator):
     """Explicit Euler numerical integrator: x_{k+1} = x_k + dt * f(x_k, u_k, t_k)."""
-
-    @overload
-    def __new__(cls, model: ContinuousDynamics) -> DiscretizedDynamics: ...
-
-    @overload
-    def __new__(cls, model: None = None) -> "Euler": ...
-
-    def __new__(
-        cls,
-        model: ContinuousDynamics | None = None,
-    ) -> Any:
-        """Create an Euler integrator or return a DiscretizedDynamics if passed a ContinuousDynamics model."""
-        if model is not None and isinstance(model, ContinuousDynamics):
-            integrator = super().__new__(cls)
-            return DiscretizedDynamics(model, integrator)
-        return super().__new__(cls)
 
     def __call__(
         self,
@@ -209,22 +177,6 @@ class Euler(Integrator):
 
 class RK4(Integrator):
     """Explicit 4th-order Runge-Kutta numerical integrator."""
-
-    @overload
-    def __new__(cls, model: ContinuousDynamics) -> DiscretizedDynamics: ...
-
-    @overload
-    def __new__(cls, model: None = None) -> "RK4": ...
-
-    def __new__(
-        cls,
-        model: ContinuousDynamics | None = None,
-    ) -> Any:
-        """Create an RK4 integrator or return a DiscretizedDynamics if passed a ContinuousDynamics model."""
-        if model is not None and isinstance(model, ContinuousDynamics):
-            integrator = super().__new__(cls)
-            return DiscretizedDynamics(model, integrator)
-        return super().__new__(cls)
 
     def __call__(
         self,
@@ -243,45 +195,11 @@ class ImplicitMidpoint(Integrator):
 
     Equation:
         x_{k+1} - x_k - dt * f((x_k + x_{k+1}) / 2, u_k, t_k + dt / 2) = 0
-
-    Parameters
-    ----------
-    model : ContinuousDynamics | None, optional
-        If provided, returns a DiscretizedDynamics wrapping this model.
-    iters : int, optional
-        Number of fixed Newton iterations. Defaults to 10.
     """
 
     iters: int
 
-    @overload
-    def __new__(cls, model: ContinuousDynamics, *, iters: int = 10) -> DiscretizedDynamics: ...
-
-    @overload
-    def __new__(cls, model: None = None, *, iters: int = 10) -> "ImplicitMidpoint": ...
-
-    def __new__(
-        cls,
-        model: ContinuousDynamics | None = None,
-        *,
-        iters: int = 10,
-    ) -> Any:
-        """Create an ImplicitMidpoint integrator or return DiscretizedDynamics if passed a model."""
-        if model is not None and isinstance(model, ContinuousDynamics):
-            integrator = super().__new__(cls)
-            integrator.iters = iters
-            return DiscretizedDynamics(model, integrator)
-        instance = super().__new__(cls)
-        instance.iters = iters
-        return instance
-
-    def __init__(
-        self,
-        model: ContinuousDynamics | None = None,
-        *,
-        iters: int = 10,
-    ) -> None:
-        del model
+    def __init__(self, *, iters: int = 10) -> None:
         self.iters = iters
 
     def __call__(

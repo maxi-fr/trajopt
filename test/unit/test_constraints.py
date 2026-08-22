@@ -1,5 +1,3 @@
-"""Unit tests for constraint catalog and fused ConstraintList."""
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -546,19 +544,85 @@ def test_built_constraint_list_batched_evaluation() -> None:
     X = jnp.zeros((N, n))
     U = jnp.zeros((N - 1, m))
 
+    # Three distinct fused structures: knot 0, knots 1..N-2, and the terminal knot
+    assert [g.knots for g in built.groups] == [(0,), (1, 2, 3, 4), (5,)]
+
     vals = built.evaluate(X, U)
-    assert len(vals) == N
-    assert vals[0].shape == (2,)
-    assert vals[1].shape == (3,)
-    assert vals[N - 1].shape == (4,)
+    assert [v.shape for v in vals] == [(1, 2), (4, 3), (1, 4)]
 
     jacs = built.jacobian(X, U)
-    assert len(jacs) == N
-    for k in range(N):
-        jx, ju = jacs[k]
-        pk = built.p[k]
-        assert jx.shape == (pk, n)
-        if k < N - 1:
-            assert ju.shape == (pk, m)
-        else:
-            assert ju.shape == (pk, 0)
+    assert [(jx.shape, ju.shape) for jx, ju in jacs] == [
+        ((1, 2, n), (1, 2, m)),
+        ((4, 3, n), (4, 3, m)),
+        ((1, 4, n), (1, 4, 0)),
+    ]
+
+    # The batched pass agrees with per-knot evaluation and is jittable
+    for group, batched in zip(built.groups, vals, strict=True):
+        for i, k in enumerate(group.knots):
+            uk = U[k] if k < N - 1 else None
+            np.testing.assert_allclose(batched[i], built.evaluate_knot(k, X[k], uk), atol=1e-14)
+
+    @jax.jit
+    def batched_evaluate(X_, U_):
+        return built.evaluate(X_, U_)
+
+    vals_jit = batched_evaluate(X, U)
+    for batched, batched_jit in zip(vals, vals_jit, strict=True):
+        np.testing.assert_allclose(batched, batched_jit, atol=1e-14)
+
+
+def test_terminal_knot_rejects_control_reaching_constraints() -> None:
+    """Test that any constraint indexing into the control block is rejected at knot N-1."""
+    n, m, N = 3, 2, 4
+    clist = ConstraintList(n=n, m=m, N=N)
+    terminal = "Control constraint cannot be applied at terminal knot"
+
+    lcon = LinearConstraint(n=n, m=m, A=jnp.ones((1, n + m)), b=jnp.zeros(1))
+    with pytest.raises(ValueError, match=terminal):
+        clist.add_constraint(lcon, inds=N - 1)
+
+    ncon = NormConstraint(n=n, m=m, val=1.0, inds="control")
+    with pytest.raises(ValueError, match=terminal):
+        clist.add_constraint(ncon, inds=N - 1)
+
+    bcon = BoundConstraint(n=n, m=m, u_max=jnp.ones(m))
+    with pytest.raises(ValueError, match=terminal):
+        clist.add_constraint(bcon, inds=N - 1)
+
+    # Evaluating one directly without a control raises rather than gathering out of range
+    with pytest.raises(ValueError, match="indexes the control block"):
+        lcon.evaluate(jnp.arange(n, dtype=float))
+
+    # State-only indices remain legal at the terminal knot
+    state_only = LinearConstraint(n=n, m=m, A=jnp.ones((1, n)), b=jnp.zeros(1), inds=range(n))
+    clist.add_constraint(state_only, inds=N - 1)
+    built = clist.build()
+    np.testing.assert_allclose(built.evaluate_knot(N - 1, jnp.arange(n, dtype=float)), np.array([3.0]), atol=1e-14)
+
+
+def test_constraint_list_primal_bounds() -> None:
+    """Test that box bounds collect into per-knot state and control limits."""
+    n, m, N = 3, 2, 5
+    clist = ConstraintList(n=n, m=m, N=N)
+
+    sbnd = StateBound(n=n, x_min=jnp.array([-2.0, -np.inf, 0.0]), x_max=jnp.array([2.0, 5.0, np.inf]), m=m)
+    clist.add_constraint(sbnd, inds=range(N))
+    cbnd = ControlBound(m=m, u_min=-jnp.ones(m), u_max=jnp.ones(m), n=n)
+    clist.add_constraint(cbnd, inds=range(N - 1))
+    # A tighter combined bound over a mid-horizon slice
+    bbnd = BoundConstraint(n=n, m=m, x_max=jnp.array([1.0, 1.0, 1.0]), u_max=jnp.array([0.5, 0.5]))
+    clist.add_constraint(bbnd, inds=range(1, 3))
+
+    xL, xU, uL, uU = clist.primal_bounds()
+    assert xL.shape == (N, n)
+    assert xU.shape == (N, n)
+    assert uL.shape == (N - 1, m)
+    assert uU.shape == (N - 1, m)
+
+    np.testing.assert_allclose(xL[0], np.array([-2.0, -np.inf, 0.0]))
+    np.testing.assert_allclose(xU[0], np.array([2.0, 5.0, np.inf]))
+    np.testing.assert_allclose(xU[1], np.array([1.0, 1.0, 1.0]))
+    np.testing.assert_allclose(uU[1], np.array([0.5, 0.5]))
+    np.testing.assert_allclose(uU[3], np.array([1.0, 1.0]))
+    np.testing.assert_allclose(uL[3], np.array([-1.0, -1.0]))

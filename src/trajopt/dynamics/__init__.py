@@ -1,12 +1,9 @@
-"""Dynamics models, integrators, and simulation for trajectory optimization."""
-
 from trajopt.dynamics.base import (
     ContinuousDynamics,
     DiscreteDynamics,
     DiscretizedDynamics,
     EuclideanModel,
     IntegratorCallable,
-    IntegratorProtocol,
 )
 from trajopt.dynamics.integrators import (
     RK4,
@@ -32,7 +29,6 @@ __all__ = [
     "ImplicitMidpoint",
     "Integrator",
     "IntegratorCallable",
-    "IntegratorProtocol",
     "euler_step",
     "implicit_midpoint_step",
     "rk4_step",

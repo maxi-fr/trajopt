@@ -1,9 +1,3 @@
-"""TrajectoryOptimization (trajopt) in Python.
-
-A high-performance optimal control and trajectory optimization library in Python
-using JAX for fast automatic differentiation, vectorized Taylor expansions, and JIT compilation.
-"""
-
 from trajopt import _env as _env
 from trajopt.cones import (
     AbstractCone,
@@ -45,7 +39,6 @@ from trajopt.costs import (
     QuadraticCost,
     QuadraticCostFunction,
     TrackingObjective,
-    cost,
     update_reference,
 )
 from trajopt.dynamics import (
@@ -124,7 +117,6 @@ __all__ = [
     "TrackingObjective",
     "Trajectory",
     "ZeroCone",
-    "cost",
     "euler_step",
     "implicit_midpoint_step",
     "rk4_step",

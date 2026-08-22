@@ -1,5 +1,3 @@
-"""Pendulum benchmark model matching RobotZoo.jl parameters and dynamics."""
-
 import jax
 import jax.numpy as jnp
 

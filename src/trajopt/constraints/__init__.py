@@ -1,5 +1,3 @@
-"""Constraints catalog and ConstraintList for trajectory optimization."""
-
 from trajopt.constraints.base import (
     Constraint,
     ControlConstraint,

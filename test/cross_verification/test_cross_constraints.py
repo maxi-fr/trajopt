@@ -1,5 +1,3 @@
-"""Cross-verification tests comparing Python constraints against TrajectoryOptimization.jl."""
-
 from typing import Any
 
 import jax.numpy as jnp

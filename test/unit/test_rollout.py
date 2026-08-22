@@ -1,5 +1,3 @@
-"""Unit tests and benchmarks for forward simulation and rollout using jax.lax.scan."""
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -27,7 +25,8 @@ def test_rollout_propagates_states_correctly() -> None:
     dt = jnp.full((N - 1,), dt_val)
 
     # 1. Rollout via scan
-    traj_sim = rollout(disc_model, x0, U, t, dt)
+    traj_init = Trajectory(X=jnp.zeros((N, 4)), U=U, t=t, dt=dt)
+    traj_sim = rollout(disc_model, traj_init, x0=x0)
     assert isinstance(traj_sim, Trajectory)
     assert traj_sim.N == N
     assert traj_sim.X.shape == (N, 4)
@@ -79,10 +78,10 @@ def test_rollout_with_continuous_model_auto_discretization() -> None:
     U = jnp.zeros((N - 1, 1))
 
     # Passing continuous model should default to RK4 discretized dynamics
-    traj = rollout(model, x0, U, dt=0.05)
-    assert isinstance(traj, Trajectory)
-    assert traj.N == N
-    np.testing.assert_allclose(traj.X[0], x0)
+    X = rollout_states(model, x0, U, dt=0.05)
+    assert X.shape == (N, 4)
+    np.testing.assert_allclose(X[0], x0)
+    np.testing.assert_allclose(X, rollout_states(RK4(model), x0, U, dt=0.05), rtol=1e-14, atol=1e-14)
 
 
 def test_rollout_jit_compilation() -> None:

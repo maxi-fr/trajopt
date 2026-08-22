@@ -1,5 +1,3 @@
-"""Cross-verification tests comparing Python costs and objectives against TrajectoryOptimization.jl."""
-
 from typing import Any
 
 import jax.numpy as jnp
@@ -13,7 +11,6 @@ from trajopt.costs import (
     Objective,
     QuadraticCost,
     TrackingObjective,
-    cost,
     update_reference,
 )
 from trajopt.trajectory import Trajectory
@@ -270,7 +267,7 @@ def test_cross_lqr_objective_and_cost(jl_to: Any) -> None:
     traj_jl = jl_create_traj(X_np, U_np, N, dt)
 
     # Total cost comparison (tol 1e-14)
-    cost_py = float(cost(obj_py, traj_py))
+    cost_py = float(obj_py.cost(traj_py))
     cost_jl = float(jl.TO.cost(obj_jl, traj_jl))
     np.testing.assert_allclose(cost_py, cost_jl, rtol=1e-14, atol=1e-14)
 
@@ -375,7 +372,7 @@ def test_cross_tracking_objective(jl_to: Any) -> None:
     obj_track_jl = jl_create_tracking(Q_diag, R_diag, Qf_diag, traj_ref_jl)
 
     # 1. Cost of target trajectory itself should be zero
-    cost_self_py = float(cost(obj_track_py, traj_ref_py))
+    cost_self_py = float(obj_track_py.cost(traj_ref_py))
     cost_self_jl = float(jl.TO.cost(obj_track_jl, traj_ref_jl))
     np.testing.assert_allclose(cost_self_py, 0.0, atol=1e-14)
     np.testing.assert_allclose(cost_self_jl, 0.0, atol=1e-14)
@@ -391,7 +388,7 @@ def test_cross_tracking_objective(jl_to: Any) -> None:
     )
     traj_pert_jl = jl_create_traj(X_pert, U_pert, N, dt)
 
-    cost_pert_py = float(cost(obj_track_py, traj_pert_py))
+    cost_pert_py = float(obj_track_py.cost(traj_pert_py))
     cost_pert_jl = float(jl.TO.cost(obj_track_jl, traj_pert_jl))
     np.testing.assert_allclose(cost_pert_py, cost_pert_jl, rtol=1e-14, atol=1e-14)
 

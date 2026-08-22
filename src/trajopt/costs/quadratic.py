@@ -1,5 +1,3 @@
-"""Quadratic and diagonal cost functions with analytic derivatives and inversion."""
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -12,6 +10,11 @@ _EXPECTED_NDIM_2D = 2
 _EXPECTED_NDIM_3D = 3
 
 
+def diag_matrix(v: jax.Array) -> jax.Array:
+    """Embed diagonal weights of shape (..., n) as full matrices of shape (..., n, n)."""
+    return v[..., :, None] * jnp.eye(v.shape[-1], dtype=v.dtype)
+
+
 class DiagonalCost(QuadraticCostFunction):
     """Diagonal quadratic cost function storing weights as 1D vectors rather than matrices.
 
@@ -21,18 +24,21 @@ class DiagonalCost(QuadraticCostFunction):
     For terminal costs:
     0.5 * sum_i(Q_i * x_i^2) + q^T x + c
 
+    Every parameter is either single-knot or stacked over N - 1 stages along a leading axis;
+    Q and R must agree on which.
+
     Parameters
     ----------
     Q : jax.Array
-        State weighting vector (n,) or diagonal matrix (n, n).
+        State weights of shape (n,) or (N-1, n).
     R : jax.Array | None, optional
-        Control weighting vector (m,) or diagonal matrix (m, m). Required if not terminal.
+        Control weights of shape (m,) or (N-1, m). Required if not terminal.
     q : jax.Array | None, optional
-        Linear state cost vector (n,). Defaults to zeros.
+        Linear state cost of shape (n,) or (N-1, n). Defaults to zeros.
     r : jax.Array | None, optional
-        Linear control cost vector (m,). Defaults to zeros.
+        Linear control cost of shape (m,) or (N-1, m). Defaults to zeros.
     c : float | jax.Array, optional
-        Constant cost scalar. Defaults to 0.0.
+        Constant cost of shape () or (N-1,). Defaults to 0.0.
     terminal : bool, optional
         Whether this is a terminal cost. Defaults to False.
     m : int | None, optional
@@ -57,14 +63,6 @@ class DiagonalCost(QuadraticCostFunction):
         m: int | None = None,
     ) -> None:
         Q_arr = jnp.asarray(Q)
-        if (
-            Q_arr.ndim == _EXPECTED_NDIM_2D
-            and Q_arr.shape[0] == Q_arr.shape[1]
-            and (R is None or jnp.asarray(R).ndim <= _EXPECTED_NDIM_1D)
-        ):
-            # If a 2D diagonal matrix was passed, extract diagonal vector
-            Q_arr = jnp.diag(Q_arr)
-
         n = int(Q_arr.shape[-1])
 
         if terminal:
@@ -76,8 +74,13 @@ class DiagonalCost(QuadraticCostFunction):
                 msg = "Control cost weights R must be provided for non-terminal cost."
                 raise ValueError(msg)
             R_arr = jnp.asarray(R)
-            if R_arr.ndim == _EXPECTED_NDIM_2D and R_arr.shape[0] == R_arr.shape[1]:
-                R_arr = jnp.diag(R_arr)
+            stacked_mismatch = Q_arr.ndim == _EXPECTED_NDIM_2D and R_arr.shape[0] != Q_arr.shape[0]
+            if R_arr.ndim != Q_arr.ndim or stacked_mismatch:
+                msg = (
+                    f"DiagonalCost weights must both be diagonal vectors stacked the same way, got Q of shape "
+                    f"{Q_arr.shape} and R of shape {R_arr.shape}. Use QuadraticCost for dense weights."
+                )
+                raise ValueError(msg)
             m_val = int(R_arr.shape[-1])
             r_arr = jnp.zeros_like(R_arr) if r is None else jnp.asarray(r, dtype=R_arr.dtype)
 
@@ -100,6 +103,21 @@ class DiagonalCost(QuadraticCostFunction):
     def is_blockdiag(self) -> bool:
         """Whether the Hessian is block diagonal."""
         return True
+
+    @property
+    def is_stacked(self) -> bool:
+        """Whether the parameters carry a leading horizon axis."""
+        return self.Q.ndim == _EXPECTED_NDIM_2D
+
+    @property
+    def H(self) -> None:  # noqa: N802
+        """Cross-coupling weights, always None because a diagonal cost couples nothing."""
+        return None
+
+    @staticmethod
+    def matvec(W: jax.Array, v: jax.Array) -> jax.Array:
+        """Multiply diagonal weights W of shape (..., n) by vectors v of shape (..., n)."""
+        return W * v
 
     def evaluate(
         self,
@@ -288,17 +306,15 @@ class DiagonalCost(QuadraticCostFunction):
         """
         if self.terminal:
             return QuadraticCost(
-                Q=jnp.diag(self.Q),
+                Q=diag_matrix(self.Q),
                 q=self.q,
                 c=self.c,
                 terminal=True,
                 m=self.m,
             )
-        H = jnp.zeros((self.m, self.n), dtype=self.Q.dtype)
         return QuadraticCost(
-            Q=jnp.diag(self.Q),
-            R=jnp.diag(self.R),
-            H=H,
+            Q=diag_matrix(self.Q),
+            R=diag_matrix(self.R),
             q=self.q,
             r=self.r,
             c=self.c,
@@ -318,17 +334,18 @@ class QuadraticCost(QuadraticCostFunction):
     Parameters
     ----------
     Q : jax.Array
-        State weighting matrix (n, n) or vector (n,).
+        State weights of shape (n, n) or (N-1, n, n), or a diagonal vector of shape (n,).
     R : jax.Array | None, optional
-        Control weighting matrix (m, m) or vector (m,). Required if not terminal.
+        Control weights of shape (m, m) or (N-1, m, m), or a diagonal vector of shape (m,).
+        Required if not terminal.
     H : jax.Array | None, optional
-        Cross-coupling weighting matrix (m, n). Defaults to zeros.
+        Cross-coupling weights of shape (m, n) or (N-1, m, n). Defaults to zeros.
     q : jax.Array | None, optional
-        Linear state cost vector (n,). Defaults to zeros.
+        Linear state cost of shape (n,) or (N-1, n). Defaults to zeros.
     r : jax.Array | None, optional
-        Linear control cost vector (m,). Defaults to zeros.
+        Linear control cost of shape (m,) or (N-1, m). Defaults to zeros.
     c : float | jax.Array, optional
-        Constant cost scalar. Defaults to 0.0.
+        Constant cost of shape () or (N-1,). Defaults to 0.0.
     terminal : bool, optional
         Whether this is a terminal cost. Defaults to False.
     m : int | None, optional
@@ -357,7 +374,7 @@ class QuadraticCost(QuadraticCostFunction):
     ) -> None:
         Q_arr = jnp.asarray(Q)
         if Q_arr.ndim == _EXPECTED_NDIM_1D:
-            Q_arr = jnp.diag(Q_arr)
+            Q_arr = diag_matrix(Q_arr)
 
         n = int(Q_arr.shape[-1])
 
@@ -373,10 +390,10 @@ class QuadraticCost(QuadraticCostFunction):
                 raise ValueError(msg)
             R_arr = jnp.asarray(R)
             if R_arr.ndim == _EXPECTED_NDIM_1D:
-                R_arr = jnp.diag(R_arr)
+                R_arr = diag_matrix(R_arr)
             m_val = int(R_arr.shape[-1])
             if H is None:
-                H_arr = jnp.zeros((m_val, n), dtype=Q_arr.dtype)
+                H_arr = jnp.zeros((*Q_arr.shape[:-2], m_val, n), dtype=Q_arr.dtype)
                 has_cross = False
             else:
                 H_arr = jnp.asarray(H, dtype=Q_arr.dtype)
@@ -399,16 +416,32 @@ class QuadraticCost(QuadraticCostFunction):
         self.has_cross_coupling = has_cross
 
     @property
-    def is_diag(self) -> bool:
-        """Whether the Hessian is strictly diagonal."""
-        return False
-
-    @property
     def is_blockdiag(self) -> bool:
         """Whether the Hessian is block diagonal (H = 0)."""
         if self.terminal:
             return True
         return not self.has_cross_coupling
+
+    @property
+    def is_stacked(self) -> bool:
+        """Whether the parameters carry a leading horizon axis."""
+        return self.Q.ndim == _EXPECTED_NDIM_3D
+
+    @staticmethod
+    def matvec(W: jax.Array, v: jax.Array) -> jax.Array:
+        """Multiply weight matrices W of shape (..., i, j) by vectors v of shape (..., j)."""
+        return jnp.einsum("...ij,...j->...i", W, v)
+
+    def to_quadratic(self) -> "QuadraticCost":
+        """Return this cost unchanged; it is already dense."""
+        return self
+
+    def stage_costs(self, X: jax.Array, U: jax.Array, t: jax.Array) -> jax.Array:
+        """Evaluate the stacked parameters against X (N-1, n), U (N-1, m), t (N-1,), giving (N-1,)."""
+        stage_c = super().stage_costs(X, U, t)
+        if self.has_cross_coupling:
+            stage_c = stage_c + jnp.sum(U * self.matvec(self.H, X), axis=-1)
+        return stage_c
 
     def evaluate(
         self,
@@ -645,6 +678,26 @@ class QuadraticCost(QuadraticCostFunction):
         raise TypeError(msg)
 
 
+def promote_weights(*weights: jax.Array) -> tuple[type[QuadraticCostFunction], tuple[jax.Array, ...]]:
+    """Bring weights to a common representation and choose the cost class that holds them.
+
+    Parameters
+    ----------
+    *weights : jax.Array
+        Weight arrays, each a diagonal vector of shape (n,) or a dense matrix of shape (n, n).
+
+    Returns
+    -------
+    tuple
+        DiagonalCost and the vectors unchanged if every weight is diagonal, otherwise
+        QuadraticCost and every weight embedded as a dense matrix.
+    """
+    arrs = tuple(jnp.asarray(W) for W in weights)
+    if all(W.ndim == _EXPECTED_NDIM_1D for W in arrs):
+        return DiagonalCost, arrs
+    return QuadraticCost, tuple(diag_matrix(W) if W.ndim == _EXPECTED_NDIM_1D else W for W in arrs)
+
+
 def LQRCost(  # noqa: N802
     Q: jax.Array,
     R: jax.Array,
@@ -658,44 +711,31 @@ def LQRCost(  # noqa: N802
     Cost formula:
     0.5 * (x - xf)^T Q (x - xf) + 0.5 * (u - uf)^T R (u - uf)
 
-    Returns DiagonalCost if Q and R are 1D vectors, QuadraticCost otherwise.
+    Returns DiagonalCost if Q and R are both diagonal vectors, QuadraticCost otherwise.
 
     Parameters
     ----------
     Q : jax.Array
-        State weighting vector (n,) or matrix (n, n).
+        State weights of shape (n,) if diagonal or (n, n) if dense.
     R : jax.Array
-        Control weighting vector (m,) or matrix (m, m).
+        Control weights of shape (m,) if diagonal or (m, m) if dense.
     xf : jax.Array
         Reference/goal state of shape (n,).
     uf : jax.Array | None, optional
         Reference/goal control of shape (m,). Defaults to zeros.
     terminal : bool, optional
         Whether this is a terminal cost. Defaults to False.
-
-    Returns
-    -------
-    QuadraticCostFunction
-        Constructed DiagonalCost or QuadraticCost.
     """
     xf_arr = jnp.asarray(xf)
-    n = int(xf_arr.shape[0])
-    Q_arr = jnp.asarray(Q)
-    R_arr = jnp.asarray(R)
-
+    cost_cls, (Q_arr, R_arr) = promote_weights(Q, R)
     m = int(R_arr.shape[-1])
     uf_arr = jnp.zeros(m, dtype=xf_arr.dtype) if uf is None else jnp.asarray(uf, dtype=xf_arr.dtype)
 
-    if Q_arr.ndim == _EXPECTED_NDIM_1D and R_arr.ndim == _EXPECTED_NDIM_1D:
-        q = -Q_arr * xf_arr
-        r = -R_arr * uf_arr
-        c = 0.5 * jnp.sum(Q_arr * (xf_arr**2)) + 0.5 * jnp.sum(R_arr * (uf_arr**2))
-        return DiagonalCost(Q=Q_arr, R=R_arr, q=q, r=r, c=c, terminal=terminal)
-
-    Q_mat = jnp.diag(Q_arr) if Q_arr.ndim == _EXPECTED_NDIM_1D else Q_arr
-    R_mat = jnp.diag(R_arr) if R_arr.ndim == _EXPECTED_NDIM_1D else R_arr
-    q = -Q_mat @ xf_arr
-    r = -R_mat @ uf_arr
-    c = 0.5 * jnp.dot(xf_arr, Q_mat @ xf_arr) + 0.5 * jnp.dot(uf_arr, R_mat @ uf_arr)
-    H = jnp.zeros((m, n), dtype=Q_mat.dtype)
-    return QuadraticCost(Q=Q_mat, R=R_mat, H=H, q=q, r=r, c=c, terminal=terminal)
+    return cost_cls(
+        Q=Q_arr,
+        R=R_arr,
+        q=-cost_cls.matvec(Q_arr, xf_arr),
+        r=-cost_cls.matvec(R_arr, uf_arr),
+        c=0.5 * cost_cls.quad_form(Q_arr, xf_arr) + 0.5 * cost_cls.quad_form(R_arr, uf_arr),
+        terminal=terminal,
+    )

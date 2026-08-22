@@ -1,5 +1,3 @@
-"""Environment and DLL loader helper for TrajectoryOptimization (trajopt)."""
-
 import contextlib
 import os
 import sys

@@ -1,5 +1,3 @@
-"""Conic sets, projections, and derivatives for trajectory optimization constraints."""
-
 from abc import abstractmethod
 
 import equinox as eqx
@@ -16,13 +14,13 @@ class AbstractCone(eqx.Module):
 
         Parameters
         ----------
-        x : jax.Array
-            Vector to project.
+        x
+            Vector of shape (n,).
 
         Returns
         -------
         jax.Array
-            Projected vector Pi(x).
+            Projection Pi(x) of shape (n,).
         """
 
     @abstractmethod
@@ -31,8 +29,8 @@ class AbstractCone(eqx.Module):
 
         Parameters
         ----------
-        x : jax.Array
-            Vector at which to evaluate the Jacobian.
+        x
+            Vector of shape (n,).
 
         Returns
         -------
@@ -41,16 +39,14 @@ class AbstractCone(eqx.Module):
         """
 
     def hessian(self, x: jax.Array, b: jax.Array) -> jax.Array:
-        """Evaluate the second-derivative contraction nabla^2 Pi(x)[b].
-
-        Derived via automatic differentiation of the projection Jacobian.
+        """Evaluate the second-derivative contraction nabla^2 Pi(x)[b] by autodiff of the Jacobian.
 
         Parameters
         ----------
-        x : jax.Array
-            Vector at which to evaluate the Hessian contraction.
-        b : jax.Array
-            Contraction vector.
+        x
+            Vector of shape (n,).
+        b
+            Contraction vector of shape (n,).
 
         Returns
         -------
@@ -61,23 +57,11 @@ class AbstractCone(eqx.Module):
         b_arr = jnp.asarray(b)
         return jax.jacobian(lambda x_: self.jacobian(x_).T @ b_arr)(x_arr)
 
-
 class ZeroCone(AbstractCone):
     """Zero cone representing equality constraints g(x) = 0."""
 
     def project(self, x: jax.Array) -> jax.Array:
-        """Project vector x onto the zero cone.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-
-        Returns
-        -------
-        jax.Array
-            Zero vector of matching shape and dtype.
-        """
+        """Project vector x of shape (n,) onto the zero cone, giving zeros of shape (n,)."""
         return jnp.zeros_like(x)
 
     def jacobian(self, x: jax.Array) -> jax.Array:
@@ -85,8 +69,8 @@ class ZeroCone(AbstractCone):
 
         Parameters
         ----------
-        x : jax.Array
-            Input vector.
+        x
+            Vector of shape (n,).
 
         Returns
         -------
@@ -96,44 +80,12 @@ class ZeroCone(AbstractCone):
         x_arr = jnp.asarray(x)
         n = x_arr.shape[0]
         return jnp.zeros((n, n), dtype=x_arr.dtype)
-
-    def hessian(self, x: jax.Array, b: jax.Array) -> jax.Array:
-        """Evaluate the Hessian contraction nabla^2 Pi(x)[b].
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-        b : jax.Array
-            Contraction vector.
-
-        Returns
-        -------
-        jax.Array
-            Zero matrix of shape (n, n).
-        """
-        del b
-        x_arr = jnp.asarray(x)
-        n = x_arr.shape[0]
-        return jnp.zeros((n, n), dtype=x_arr.dtype)
-
 
 class NegativeOrthant(AbstractCone):
     """Negative orthant representing inequality constraints h(x) <= 0."""
 
     def project(self, x: jax.Array) -> jax.Array:
-        """Project vector x onto the negative orthant.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-
-        Returns
-        -------
-        jax.Array
-            min(0, x).
-        """
+        """Project vector x of shape (n,) onto the negative orthant, giving min(0, x) of shape (n,)."""
         return jnp.minimum(0.0, jnp.asarray(x))
 
     def jacobian(self, x: jax.Array) -> jax.Array:
@@ -141,8 +93,8 @@ class NegativeOrthant(AbstractCone):
 
         Parameters
         ----------
-        x : jax.Array
-            Input vector.
+        x
+            Vector of shape (n,).
 
         Returns
         -------
@@ -152,43 +104,11 @@ class NegativeOrthant(AbstractCone):
         x_arr = jnp.asarray(x)
         return jnp.diag((x_arr <= 0.0).astype(x_arr.dtype))
 
-    def hessian(self, x: jax.Array, b: jax.Array) -> jax.Array:
-        """Evaluate the Hessian contraction nabla^2 Pi(x)[b].
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-        b : jax.Array
-            Contraction vector.
-
-        Returns
-        -------
-        jax.Array
-            Zero matrix of shape (n, n).
-        """
-        del b
-        x_arr = jnp.asarray(x)
-        n = x_arr.shape[0]
-        return jnp.zeros((n, n), dtype=x_arr.dtype)
-
-
 class PositiveOrthant(AbstractCone):
     """Positive orthant representing inequality constraints h(x) >= 0."""
 
     def project(self, x: jax.Array) -> jax.Array:
-        """Project vector x onto the positive orthant.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-
-        Returns
-        -------
-        jax.Array
-            max(0, x).
-        """
+        """Project vector x of shape (n,) onto the positive orthant, giving max(0, x) of shape (n,)."""
         return jnp.maximum(0.0, jnp.asarray(x))
 
     def jacobian(self, x: jax.Array) -> jax.Array:
@@ -196,8 +116,8 @@ class PositiveOrthant(AbstractCone):
 
         Parameters
         ----------
-        x : jax.Array
-            Input vector.
+        x
+            Vector of shape (n,).
 
         Returns
         -------
@@ -207,67 +127,23 @@ class PositiveOrthant(AbstractCone):
         x_arr = jnp.asarray(x)
         return jnp.diag((x_arr >= 0.0).astype(x_arr.dtype))
 
-    def hessian(self, x: jax.Array, b: jax.Array) -> jax.Array:
-        """Evaluate the Hessian contraction nabla^2 Pi(x)[b].
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector.
-        b : jax.Array
-            Contraction vector.
-
-        Returns
-        -------
-        jax.Array
-            Zero matrix of shape (n, n).
-        """
-        del b
-        x_arr = jnp.asarray(x)
-        n = x_arr.shape[0]
-        return jnp.zeros((n, n), dtype=x_arr.dtype)
-
-
 class SecondOrderCone(AbstractCone):
     """Second-order cone (Lorentz cone / ice cream cone): ||v||_2 <= s, where x = [v; s]."""
 
     eps: float = eqx.field(default=1e-10, static=True)
-
-    def status(self, x: jax.Array) -> str:
-        """Determine region status of concrete x relative to the cone.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector [v; s].
-
-        Returns
-        -------
-        str
-            "below", "inside", or "outside".
-        """
-        x_arr = jnp.asarray(x)
-        v = x_arr[:-1]
-        s = x_arr[-1]
-        a = jnp.linalg.norm(v)
-        if bool(a <= -s):
-            return "below"
-        if bool(a <= s):
-            return "inside"
-        return "outside"
 
     def project(self, x: jax.Array) -> jax.Array:
         """Project vector x onto the second-order cone.
 
         Parameters
         ----------
-        x : jax.Array
-            Input vector [v; s].
+        x
+            Vector [v; s] of shape (n,).
 
         Returns
         -------
         jax.Array
-            Projected vector.
+            Projection of shape (n,).
         """
         x_arr = jnp.asarray(x)
         v = x_arr[:-1]
@@ -294,8 +170,8 @@ class SecondOrderCone(AbstractCone):
 
         Parameters
         ----------
-        x : jax.Array
-            Input vector [v; s].
+        x
+            Vector [v; s] of shape (n,).
 
         Returns
         -------
@@ -336,24 +212,3 @@ class SecondOrderCone(AbstractCone):
                 J_outside,
             ),
         )
-
-    def hessian(self, x: jax.Array, b: jax.Array) -> jax.Array:
-        """Evaluate the second-derivative contraction nabla^2 Pi(x)[b].
-
-        Derived via automatic differentiation of the projection Jacobian.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input vector [v; s].
-        b : jax.Array
-            Contraction vector.
-
-        Returns
-        -------
-        jax.Array
-            Hessian contraction matrix of shape (n, n).
-        """
-        x_arr = jnp.asarray(x)
-        b_arr = jnp.asarray(b)
-        return jax.jacobian(lambda x_: self.jacobian(x_).T @ b_arr)(x_arr)

@@ -1,5 +1,3 @@
-"""Cost functions, quadratic objectives, and stacked trajectory cost evaluation."""
-
 from trajopt.costs.base import (
     CostFunction,
     QuadraticCostFunction,
@@ -11,7 +9,6 @@ from trajopt.costs.objective import (
     LQRObjective,
     Objective,
     TrackingObjective,
-    cost,
     update_reference,
 )
 from trajopt.costs.quadratic import (
@@ -30,6 +27,5 @@ __all__ = [
     "QuadraticCost",
     "QuadraticCostFunction",
     "TrackingObjective",
-    "cost",
     "update_reference",
 ]

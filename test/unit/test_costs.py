@@ -1,5 +1,3 @@
-"""Unit tests for cost functions and stacked objectives."""
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -13,7 +11,6 @@ from trajopt.costs import (
     Objective,
     QuadraticCost,
     TrackingObjective,
-    cost,
     update_reference,
 )
 from trajopt.trajectory import Trajectory
@@ -237,9 +234,9 @@ def test_lqr_objective_stacked_and_cost_evaluation() -> None:
     assert obj.q.shape == (N - 1, n)
     assert obj.r.shape == (N - 1, m)
     assert obj.c.shape == (N - 1,)
-    assert obj.Qf.shape == (n,)
-    assert obj.qf.shape == (n,)
-    assert obj.cf.shape == ()
+    assert obj.Q_f.shape == (n,)
+    assert obj.q_f.shape == (n,)
+    assert obj.c_f.shape == ()
 
     # Create dummy trajectory
     rng = np.random.default_rng(42)
@@ -250,7 +247,7 @@ def test_lqr_objective_stacked_and_cost_evaluation() -> None:
     traj = Trajectory(X=X, U=U, t=t, dt=dt)
 
     # Evaluate cost on trajectory
-    total_cost = cost(obj, traj)
+    total_cost = obj.cost(traj)
 
     # Calculate expected sum
     expected_stage = 0.0
@@ -264,9 +261,41 @@ def test_lqr_objective_stacked_and_cost_evaluation() -> None:
     np.testing.assert_allclose(total_cost, expected_total, rtol=1e-14, atol=1e-14)
 
     # Test JIT compilation of cost
-    jit_cost = jax.jit(cost)
+    jit_cost = jax.jit(Objective.cost)
     jit_val = jit_cost(obj, traj)
     np.testing.assert_allclose(jit_val, expected_total, rtol=1e-14, atol=1e-14)
+
+
+def test_mixed_diagonal_and_dense_weights() -> None:
+    n, m, N = 2, 2, 4
+    Q = jnp.array([1.0, 2.0])
+    R = jnp.array([[2.0, 0.7], [0.7, 3.0]])  # dense: the off-diagonal weight must survive
+    Qf = jnp.array([5.0, 6.0])
+    xf = jnp.array([0.5, -0.5])
+
+    obj = LQRObjective(Q, R, Qf, xf, N)
+    assert not obj.is_diag
+    assert obj.Q.shape == (N - 1, n, n)
+    assert obj.R.shape == (N - 1, m, m)
+    assert obj.Q_f.shape == (n, n)
+    np.testing.assert_allclose(obj.R[0], R, rtol=1e-14, atol=1e-14)
+
+    rng = np.random.default_rng(7)
+    X = jnp.array(rng.standard_normal((N, n)))
+    U = jnp.array(rng.standard_normal((N - 1, m)))
+    t = jnp.linspace(0.0, 1.0, N)
+    traj = Trajectory(X=X, U=U, t=t, dt=jnp.diff(t))
+
+    expected_total = 0.5 * jnp.sum(Qf * (X[-1] - xf) ** 2)
+    for k in range(N - 1):
+        dx = X[k] - xf
+        expected_total += 0.5 * jnp.sum(Q * dx**2) + 0.5 * U[k] @ (R @ U[k])
+
+    np.testing.assert_allclose(obj.cost(traj), expected_total, rtol=1e-12, atol=1e-12)
+
+    # A dense R is never truncated to its diagonal behind the user's back
+    with pytest.raises(ValueError, match="DiagonalCost weights"):
+        DiagonalCost(Q=Q, R=R)
 
 
 def test_tracking_objective_and_update_reference() -> None:
@@ -287,7 +316,7 @@ def test_tracking_objective_and_update_reference() -> None:
     assert obj.is_diag
 
     # Cost of traj_ref1 against itself must be 0.0
-    c_zero = cost(obj, traj_ref1)
+    c_zero = obj.cost(traj_ref1)
     np.testing.assert_allclose(c_zero, 0.0, atol=1e-14)
 
     # Update reference with a longer trajectory and non-zero start index
@@ -309,7 +338,7 @@ def test_tracking_objective_and_update_reference() -> None:
         dt=dt_long[start_idx : start_idx + N - 1],
     )
 
-    c_slice_zero = cost(obj_updated, target_slice)
+    c_slice_zero = obj_updated.cost(target_slice)
     np.testing.assert_allclose(c_slice_zero, 0.0, atol=1e-14)
 
     # Cost of a different trajectory against obj_updated
@@ -317,7 +346,7 @@ def test_tracking_objective_and_update_reference() -> None:
     U_test = jnp.array(rng.standard_normal((N - 1, m)))
     traj_test = Trajectory(X=X_test, U=U_test, t=t1, dt=dt1)
 
-    total_c = cost(obj_updated, traj_test)
+    total_c = obj_updated.cost(traj_test)
 
     expected_total = 0.0
     for k in range(N - 1):

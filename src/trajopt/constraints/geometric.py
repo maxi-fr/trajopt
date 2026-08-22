@@ -1,5 +1,3 @@
-"""Geometric, obstacle avoidance, collision, and norm constraints."""
-
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -300,25 +298,19 @@ class NormConstraint(StageConstraint):
         self.inds = inds_tuple
         self.inds_arr = jnp.asarray(inds_tuple, dtype=int)
 
+    def uses_control(self) -> bool:
+        """Whether any gathered index falls in the control block of z = [x; u]."""
+        return any(i >= self.n for i in self.inds)
+
     def evaluate(
         self,
         x: jax.Array | None = None,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate norm constraint."""
+        """Evaluate norm constraint of shape (p,) from z = [x; u] of shape (n + m,)."""
         del t
-        if x is not None and u is not None:
-            z = jnp.concatenate([x, u])
-        elif x is not None:
-            z = x
-        elif u is not None:
-            z = u
-        else:
-            msg = "At least one of x or u must be provided."
-            raise ValueError(msg)
-
-        y = z[self.inds_arr]
+        y = self.stage_vector(x, u)[self.inds_arr]
 
         if isinstance(self.cone, SecondOrderCone):
             return jnp.concatenate([y, jnp.array([self.val], dtype=y.dtype)])

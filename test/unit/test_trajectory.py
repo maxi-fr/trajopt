@@ -24,7 +24,7 @@ def test_trajectory_creation_and_properties() -> None:
     np.testing.assert_allclose(traj.states(), X)
     np.testing.assert_allclose(traj.controls(), U)
     np.testing.assert_allclose(traj.times(), t)
-    np.testing.assert_allclose(traj.step_durations(), dt)
+    np.testing.assert_allclose(traj.dt, dt)
 
 
 def test_trajectory_shape_validation() -> None:
@@ -178,7 +178,7 @@ def test_trajectory_shift_for_warmstarting() -> None:
 
     # Step durations shifted: dt[1], dt[2], duplicated dt[2]
     expected_dt = jnp.array([0.1, 0.1, 0.1])
-    np.testing.assert_allclose(shifted.step_durations(), expected_dt)
+    np.testing.assert_allclose(shifted.dt, expected_dt)
 
     # Times shifted: starts at t[1] (0.1) up to t[3] + dt[2] (0.4)
     expected_t = jnp.array([0.1, 0.2, 0.3, 0.4])
@@ -189,4 +189,4 @@ def test_trajectory_shift_for_warmstarting() -> None:
     expected_t_custom = jnp.array([0.1, 0.2, 0.3, 0.5])
     expected_dt_custom = jnp.array([0.1, 0.1, 0.2])
     np.testing.assert_allclose(shifted_custom_dt.times(), expected_t_custom)
-    np.testing.assert_allclose(shifted_custom_dt.step_durations(), expected_dt_custom)
+    np.testing.assert_allclose(shifted_custom_dt.dt, expected_dt_custom)

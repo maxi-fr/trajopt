@@ -1,5 +1,3 @@
-"""Linear and goal constraints for trajectory optimization."""
-
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -64,7 +62,7 @@ class GoalConstraint(StateConstraint):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate goal defect x[inds] - xf."""
+        """Evaluate goal defect x[inds] - xf of shape (p,) from x of shape (n,)."""
         del u, t
         if x is None:
             msg = "State vector x is required to evaluate GoalConstraint."
@@ -136,23 +134,16 @@ class LinearConstraint(StageConstraint):
         self.inds = inds_tuple
         self.inds_arr = jnp.asarray(inds_tuple, dtype=int)
 
+    def uses_control(self) -> bool:
+        """Whether any gathered index falls in the control block of z = [x; u]."""
+        return any(i >= self.n for i in self.inds)
+
     def evaluate(
         self,
         x: jax.Array | None = None,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate linear constraint residual A * z[inds] - b."""
+        """Evaluate residual A * z[inds] - b of shape (p,) from z = [x; u] of shape (n + m,)."""
         del t
-        if x is not None and u is not None:
-            z = jnp.concatenate([x, u])
-        elif x is not None:
-            z = x
-        elif u is not None:
-            z = u
-        else:
-            msg = "At least one of x or u must be provided."
-            raise ValueError(msg)
-
-        z_sub = z[self.inds_arr]
-        return self.A @ z_sub - self.b
+        return self.A @ self.stage_vector(x, u)[self.inds_arr] - self.b

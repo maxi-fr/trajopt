@@ -1,5 +1,3 @@
-"""Unit tests for Ipopt solver integration via cyipopt."""
-
 import numpy as np
 import pytest
 

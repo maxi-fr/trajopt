@@ -1,5 +1,3 @@
-"""ConstraintList for registering and fusing constraints across the horizon."""
-
 from collections.abc import Iterator, Sequence
 
 import equinox as eqx
@@ -7,8 +5,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.constraints.base import Constraint, ControlConstraint, StateConstraint
+from trajopt.constraints.base import Constraint
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
+
+BoxBound = (StateBound, ControlBound, BoundConstraint)
 
 
 class BuiltKnotConstraint(eqx.Module):
@@ -40,12 +40,11 @@ class BuiltKnotConstraint(eqx.Module):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate concatenated constraint vector at this knot point."""
-        if len(self.constraints) == 0 or self.p == 0:
+        """Evaluate the concatenated constraint vector of shape (p,) from x (n,) and u (m,)."""
+        if self.p == 0:
             return jnp.zeros(0, dtype=x.dtype)
-
-        evals = [c.evaluate(x, u if not self.is_terminal else None, t) for c in self.constraints]
-        return jnp.concatenate(evals)
+        uk = None if self.is_terminal else u
+        return jnp.concatenate([c.evaluate(x, uk, t) for c in self.constraints])
 
     def jacobian(
         self,
@@ -53,43 +52,86 @@ class BuiltKnotConstraint(eqx.Module):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluate concatenated Jacobians (dc/dx, dc/du) at this knot point."""
+        """Evaluate the concatenated Jacobian blocks from x (n,) and u (m,).
+
+        Returns
+        -------
+        tuple[jax.Array, jax.Array]
+            (dc/dx, dc/du) of shapes (p, n) and (p, m); the control block has width 0
+            at the terminal knot point, where no control exists.
+        """
         dtype = x.dtype
-        if len(self.constraints) == 0 or self.p == 0:
-            jx = jnp.zeros((0, self.n), dtype=dtype)
-            ju = jnp.zeros((0, 0 if self.is_terminal else self.m), dtype=dtype)
-            return jx, ju
+        if self.p == 0:
+            m_out = 0 if self.is_terminal else self.m
+            return jnp.zeros((0, self.n), dtype=dtype), jnp.zeros((0, m_out), dtype=dtype)
 
-        jx_list: list[jax.Array] = []
-        ju_list: list[jax.Array] = []
+        if self.is_terminal:
+            jx = jnp.vstack([c.jacobian_x(x, None, t) for c in self.constraints])
+            return jx, jnp.zeros((self.p, 0), dtype=dtype)
 
-        for c in self.constraints:
-            if isinstance(c, StateConstraint):
-                jx_c = c.jacobian_x(x, None, t)
-                jx_list.append(jx_c)
-                if not self.is_terminal:
-                    ju_list.append(jnp.zeros((c.p, self.m), dtype=dtype))
-            elif isinstance(c, ControlConstraint):
-                jx_list.append(jnp.zeros((c.p, self.n), dtype=dtype))
-                if not self.is_terminal:
-                    ju_c = c.jacobian_u(None, u, t)
-                    ju_list.append(ju_c)
-            else:
-                jx_c, ju_c = c.jacobian(x, u if not self.is_terminal else None, t)
-                jx_list.append(jx_c)
-                if not self.is_terminal:
-                    ju_list.append(ju_c)
+        blocks = [c.jacobian(x, u, t) for c in self.constraints]
+        return jnp.vstack([jx for jx, _ in blocks]), jnp.vstack([ju for _, ju in blocks])
 
-        jx = jnp.vstack(jx_list)
-        ju = jnp.zeros((self.p, 0), dtype=dtype) if self.is_terminal else jnp.vstack(ju_list)
 
-        return jx, ju
+class ConstraintGroup(eqx.Module):
+    """Knot points sharing one fused constraint structure, evaluated in a single vmap."""
+
+    evaluator: BuiltKnotConstraint
+    knots: tuple[int, ...] = eqx.field(static=True)
+
+    def evaluate(self, X: jax.Array, U: jax.Array, T: jax.Array) -> jax.Array:
+        """Evaluate this group's knot points in one batched pass.
+
+        Parameters
+        ----------
+        X : jax.Array
+            State trajectory of shape (N, n).
+        U : jax.Array
+            Control trajectory of shape (N-1, m).
+        T : jax.Array
+            Knot times of shape (N,).
+
+        Returns
+        -------
+        jax.Array
+            Constraint values of shape (len(knots), p).
+        """
+        ks = np.asarray(self.knots)
+        evaluator = self.evaluator
+        if evaluator.is_terminal:
+            return jax.vmap(lambda x, t: evaluator.evaluate(x, None, t))(X[ks], T[ks])
+        return jax.vmap(evaluator.evaluate)(X[ks], U[ks], T[ks])
+
+    def jacobian(self, X: jax.Array, U: jax.Array, T: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Evaluate this group's Jacobian blocks in one batched pass.
+
+        Parameters
+        ----------
+        X : jax.Array
+            State trajectory of shape (N, n).
+        U : jax.Array
+            Control trajectory of shape (N-1, m).
+        T : jax.Array
+            Knot times of shape (N,).
+
+        Returns
+        -------
+        tuple[jax.Array, jax.Array]
+            (dc/dx, dc/du) of shapes (len(knots), p, n) and (len(knots), p, m), the control
+            block having width 0 for the terminal group.
+        """
+        ks = np.asarray(self.knots)
+        evaluator = self.evaluator
+        if evaluator.is_terminal:
+            return jax.vmap(lambda x, t: evaluator.jacobian(x, None, t))(X[ks], T[ks])
+        return jax.vmap(evaluator.jacobian)(X[ks], U[ks], T[ks])
 
 
 class BuiltConstraintList(eqx.Module):
     """Fused constraint set across all horizon knot points."""
 
     knot_evaluators: tuple[BuiltKnotConstraint, ...]
+    groups: tuple[ConstraintGroup, ...]
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
@@ -108,6 +150,14 @@ class BuiltConstraintList(eqx.Module):
         self.N = int(N)
         self.p = tuple(k.p for k in self.knot_evaluators)
 
+        by_structure: dict[tuple, list[int]] = {}
+        for k, evaluator in enumerate(self.knot_evaluators):
+            key = (tuple(id(c) for c in evaluator.constraints), evaluator.is_terminal)
+            by_structure.setdefault(key, []).append(k)
+        self.groups = tuple(
+            ConstraintGroup(evaluator=self.knot_evaluators[ks[0]], knots=tuple(ks)) for ks in by_structure.values()
+        )
+
     def evaluate_knot(
         self,
         k: int,
@@ -115,7 +165,7 @@ class BuiltConstraintList(eqx.Module):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate fused constraint vector at knot point k."""
+        """Evaluate the fused constraint vector of shape (p_k,) at knot point k."""
         return self.knot_evaluators[k].evaluate(x, u, t)
 
     def jacobian_knot(
@@ -125,7 +175,7 @@ class BuiltConstraintList(eqx.Module):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluate fused Jacobians (dc/dx, dc/du) at knot point k."""
+        """Evaluate the fused Jacobians (dc/dx, dc/du) of shapes (p_k, n) and (p_k, m) at knot point k."""
         return self.knot_evaluators[k].jacobian(x, u, t)
 
     def evaluate(
@@ -133,8 +183,8 @@ class BuiltConstraintList(eqx.Module):
         X: jax.Array,
         U: jax.Array,
         T: jax.Array | None = None,
-    ) -> list[jax.Array]:
-        """Evaluate constraints across all horizon knot points.
+    ) -> tuple[jax.Array, ...]:
+        """Evaluate constraints over the horizon, one batched pass per structural group.
 
         Parameters
         ----------
@@ -143,28 +193,23 @@ class BuiltConstraintList(eqx.Module):
         U : jax.Array
             Control trajectory of shape (N-1, m).
         T : jax.Array | None, optional
-            Time array of shape (N,). Defaults to zeros.
+            Knot times of shape (N,). Defaults to zeros.
 
         Returns
         -------
-        list[jax.Array]
-            List of N constraint vectors c_k of shape (p_k,).
+        tuple[jax.Array, ...]
+            One array of shape (len(g.knots), g.evaluator.p) per group g in `groups`.
         """
-        results: list[jax.Array] = []
-        for k in range(self.N):
-            xk = X[k]
-            uk = U[k] if k < self.N - 1 else None
-            tk = T[k] if T is not None else 0.0
-            results.append(self.knot_evaluators[k].evaluate(xk, uk, tk))
-        return results
+        T_arr = jnp.zeros(self.N, dtype=X.dtype) if T is None else T
+        return tuple(g.evaluate(X, U, T_arr) for g in self.groups)
 
     def jacobian(
         self,
         X: jax.Array,
         U: jax.Array,
         T: jax.Array | None = None,
-    ) -> list[tuple[jax.Array, jax.Array]]:
-        """Evaluate Jacobians across all horizon knot points.
+    ) -> tuple[tuple[jax.Array, jax.Array], ...]:
+        """Evaluate Jacobians over the horizon, one batched pass per structural group.
 
         Parameters
         ----------
@@ -173,20 +218,16 @@ class BuiltConstraintList(eqx.Module):
         U : jax.Array
             Control trajectory of shape (N-1, m).
         T : jax.Array | None, optional
-            Time array of shape (N,). Defaults to zeros.
+            Knot times of shape (N,). Defaults to zeros.
 
         Returns
         -------
-        list[tuple[jax.Array, jax.Array]]
-            List of N tuples (dc_k/dx_k, dc_k/du_k) of shapes (p_k, n) and (p_k, m).
+        tuple[tuple[jax.Array, jax.Array], ...]
+            One (dc/dx, dc/du) pair per group g in `groups`, of shapes
+            (len(g.knots), g.evaluator.p, n) and (len(g.knots), g.evaluator.p, m).
         """
-        results: list[tuple[jax.Array, jax.Array]] = []
-        for k in range(self.N):
-            xk = X[k]
-            uk = U[k] if k < self.N - 1 else None
-            tk = T[k] if T is not None else 0.0
-            results.append(self.knot_evaluators[k].jacobian(xk, uk, tk))
-        return results
+        T_arr = jnp.zeros(self.N, dtype=X.dtype) if T is None else T
+        return tuple(g.jacobian(X, U, T_arr) for g in self.groups)
 
 
 class ConstraintList:
@@ -240,28 +281,22 @@ class ConstraintList:
         else:
             inds_tuple = tuple(int(i) for i in inds)
 
-        # Dimension checks
         if con.n != self.n:
             msg = f"State dimension mismatch: constraint n={con.n}, problem n={self.n}."
             raise ValueError(msg)
-        if con.m != self.m and not isinstance(con, StateConstraint):
+        if con.uses_control() and con.m != self.m:
             msg = f"Control dimension mismatch: constraint m={con.m}, problem m={self.m}."
             raise ValueError(msg)
 
-        # Horizon index checks
         for k in inds_tuple:
             if not (0 <= k < self.N):
                 msg = f"Index out of horizon [0, {self.N - 1}]: {k}."
                 raise ValueError(msg)
-            if k == self.N - 1 and (
-                isinstance(con, ControlConstraint)
-                or (
-                    isinstance(con, BoundConstraint)
-                    and len(con.i_max) + len(con.i_min) > 0
-                    and any(c_idx >= self.n for c_idx in list(con.i_max) + list(con.i_min))
+            if k == self.N - 1 and con.uses_control():
+                msg = (
+                    "Control constraint cannot be applied at terminal knot point N-1: "
+                    f"{type(con).__name__} reads the control block of z = [x; u]."
                 )
-            ):
-                msg = "Control constraint cannot be applied at terminal knot point N-1."
                 raise ValueError(msg)
 
         self.constraints.append(con)
@@ -276,100 +311,94 @@ class ConstraintList:
                 self.p[k] += con.p
 
     def num_constraints(self) -> np.ndarray:
-        """Return total constraint dimension at each knot point across the horizon."""
+        """Return total constraint dimension at each knot point, of shape (N,)."""
         return self.p.copy()
 
     def _apply_state_bound(
         self,
-        con: StateBound,
+        lo: np.ndarray,
+        hi: np.ndarray,
         k_inds: tuple[int, ...],
-        zL: np.ndarray,
-        zU: np.ndarray,
-        nm: int,
+        xL: np.ndarray,
+        xU: np.ndarray,
     ) -> None:
-        xL, xU = con.primal_bounds()
-        xmin_np = np.asarray(xL)
-        xmax_np = np.asarray(xU)
+        """Tighten the state limits at knot points k_inds, writing into xL and xU in place.
+
+        Parameters
+        ----------
+        lo, hi : np.ndarray
+            State limits of shape (n,).
+        k_inds : tuple[int, ...]
+            Knot points at which the bound is active.
+        xL, xU : np.ndarray
+            Output arrays of shape (N, n), mutated in place.
+        """
         for k in k_inds:
-            offset = k * nm
-            zL[offset : offset + self.n] = np.maximum(zL[offset : offset + self.n], xmin_np)
-            zU[offset : offset + self.n] = np.minimum(zU[offset : offset + self.n], xmax_np)
+            xL[k] = np.maximum(xL[k], lo)
+            xU[k] = np.minimum(xU[k], hi)
 
     def _apply_control_bound(
         self,
-        con: ControlBound,
+        lo: np.ndarray,
+        hi: np.ndarray,
         k_inds: tuple[int, ...],
-        zL: np.ndarray,
-        zU: np.ndarray,
-        nm: int,
+        uL: np.ndarray,
+        uU: np.ndarray,
     ) -> None:
-        uL, uU = con.primal_bounds()
-        umin_np = np.asarray(uL)
-        umax_np = np.asarray(uU)
-        for k in k_inds:
-            if k < self.N - 1:
-                offset = k * nm + self.n
-                zL[offset : offset + self.m] = np.maximum(zL[offset : offset + self.m], umin_np)
-                zU[offset : offset + self.m] = np.minimum(zU[offset : offset + self.m], umax_np)
+        """Tighten the control limits at knot points k_inds, writing into uL and uU in place.
 
-    def _apply_bound_con(
-        self,
-        con: BoundConstraint,
-        k_inds: tuple[int, ...],
-        zL: np.ndarray,
-        zU: np.ndarray,
-        nm: int,
-    ) -> None:
-        zL_con, zU_con = con.primal_bounds()
-        zmin_np = np.asarray(zL_con)
-        zmax_np = np.asarray(zU_con)
-        for k in k_inds:
-            offset = k * nm
-            if k < self.N - 1:
-                zL[offset : offset + nm] = np.maximum(zL[offset : offset + nm], zmin_np)
-                zU[offset : offset + nm] = np.minimum(zU[offset : offset + nm], zmax_np)
-            else:
-                zL[offset : offset + self.n] = np.maximum(zL[offset : offset + self.n], zmin_np[: self.n])
-                zU[offset : offset + self.n] = np.minimum(zU[offset : offset + self.n], zmax_np[: self.n])
-
-    def primal_bounds(self) -> tuple[np.ndarray, np.ndarray]:
-        """Compute solver primal variable bounds (zL, zU) across the trajectory horizon.
-
-        Primal layout: Z = [x_0, u_0, x_1, u_1, ..., x_{N-2}, u_{N-2}, x_{N-1}].
-        Length: N * n + (N - 1) * m.
+        Parameters
+        ----------
+        lo, hi : np.ndarray
+            Control limits of shape (m,).
+        k_inds : tuple[int, ...]
+            Knot points at which the bound is active; the terminal knot carries no control.
+        uL, uU : np.ndarray
+            Output arrays of shape (N-1, m), mutated in place.
         """
-        nm = self.n + self.m
-        total_dim = (self.N - 1) * nm + self.n
-        zL = np.full(total_dim, -np.inf)
-        zU = np.full(total_dim, np.inf)
+        for k in k_inds:
+            if k < self.N - 1:
+                uL[k] = np.maximum(uL[k], lo)
+                uU[k] = np.minimum(uU[k], hi)
+
+    def primal_bounds(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Collect the registered box bounds into per-knot solver variable limits.
+
+        Interleaving these into the flat NLP vector Z is owned by `transcription/`.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            (xL, xU) of shape (N, n) and (uL, uU) of shape (N-1, m).
+        """
+        xL = np.full((self.N, self.n), -np.inf)
+        xU = np.full((self.N, self.n), np.inf)
+        uL = np.full((self.N - 1, self.m), -np.inf)
+        uU = np.full((self.N - 1, self.m), np.inf)
 
         for con, k_inds in zip(self.constraints, self.inds, strict=True):
-            if isinstance(con, StateBound):
-                self._apply_state_bound(con, k_inds, zL, zU, nm)
-            elif isinstance(con, ControlBound):
-                self._apply_control_bound(con, k_inds, zL, zU, nm)
-            elif isinstance(con, BoundConstraint):
-                self._apply_bound_con(con, k_inds, zL, zU, nm)
+            if not isinstance(con, BoxBound):
+                continue
+            lo, hi = (np.asarray(b) for b in con.primal_bounds())
+            if con.uses_state():
+                self._apply_state_bound(lo[: self.n], hi[: self.n], k_inds, xL, xU)
+            if con.uses_control():
+                offset = lo.shape[0] - self.m
+                self._apply_control_bound(lo[offset:], hi[offset:], k_inds, uL, uU)
 
-        return zL, zU
+        return xL, xU, uL, uU
 
     def build(self) -> BuiltConstraintList:
         """Trace and fuse all registered constraints into a single BuiltConstraintList."""
-        knot_evaluators: list[BuiltKnotConstraint] = []
-
-        for k in range(self.N):
-            active_cons: list[Constraint] = []
-            for con, k_inds in zip(self.constraints, self.inds, strict=True):
-                if k in k_inds:
-                    active_cons.append(con)
-
-            evaluator = BuiltKnotConstraint(
-                constraints=active_cons,
+        knot_evaluators = [
+            BuiltKnotConstraint(
+                constraints=[con for con, k_inds in zip(self.constraints, self.inds, strict=True) if k in k_inds],
                 n=self.n,
                 m=self.m,
                 is_terminal=(k == self.N - 1),
             )
-            knot_evaluators.append(evaluator)
+            for k in range(self.N)
+        ]
 
         return BuiltConstraintList(
             knot_evaluators=knot_evaluators,

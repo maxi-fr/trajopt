@@ -1,5 +1,3 @@
-"""Indexed constraint wrapper for subsystem constraint composition."""
-
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -60,13 +58,17 @@ class IndexedConstraint(StageConstraint):
         self.ix_arr = jnp.asarray(ix_tuple, dtype=int)
         self.iu_arr = jnp.asarray(iu_tuple, dtype=int)
 
+    def uses_control(self) -> bool:
+        """Whether the wrapped constraint reads any of the mapped control indices."""
+        return len(self.iu) > 0 and self.constraint.uses_control()
+
     def evaluate(
         self,
         x: jax.Array | None = None,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate subsystem constraint on sliced inputs."""
+        """Evaluate the wrapped constraint of shape (p,) on x[ix] and u[iu]."""
         x_sub = x[self.ix_arr] if (x is not None and len(self.ix) > 0) else None
         u_sub = u[self.iu_arr] if (u is not None and len(self.iu) > 0) else None
         return self.constraint.evaluate(x_sub, u_sub, t)

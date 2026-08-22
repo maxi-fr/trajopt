@@ -1,46 +1,15 @@
-"""Explicit and implicit dynamics constraints for inter-stage continuity."""
-
 from abc import abstractmethod
 
-import equinox as eqx
 import jax
 
-from trajopt.cones import AbstractCone, ZeroCone
+from trajopt.cones import ZeroCone
+from trajopt.constraints.base import ConstraintShape
 from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics, IntegratorCallable
 from trajopt.dynamics.integrators import RK4
 
 
-class AbstractDynamicsConstraint(eqx.Module):
-    """Abstract base class for two-point / inter-stage dynamics constraints: c(x_k, u_k, x_{k+1}) = 0.
-
-    Parameters
-    ----------
-    n : int
-        State dimension.
-    m : int
-        Control dimension.
-    p : int
-        Output defect dimension (typically n).
-    cone : AbstractCone | None, optional
-        Conic set for constraint residual (default ZeroCone()).
-    """
-
-    n: int = eqx.field(static=True)
-    m: int = eqx.field(static=True)
-    p: int = eqx.field(static=True)
-    cone: AbstractCone = eqx.field(static=True)
-
-    def __init__(
-        self,
-        n: int,
-        m: int,
-        p: int,
-        cone: AbstractCone | None = None,
-    ) -> None:
-        self.n = int(n)
-        self.m = int(m)
-        self.p = int(p)
-        self.cone = ZeroCone() if cone is None else cone
+class AbstractDynamicsConstraint(ConstraintShape):
+    """Abstract base class for two-point / inter-stage dynamics constraints: c(x_k, u_k, x_{k+1}) = 0."""
 
     @abstractmethod
     def evaluate(
@@ -114,7 +83,7 @@ class DynamicsConstraint(AbstractDynamicsConstraint):
     ----------
     model : DiscreteDynamics | ContinuousDynamics
         Dynamics model. If ContinuousDynamics is provided, it is discretized using integrator.
-    integrator : IntegratorCallable | object | None, optional
+    integrator : IntegratorCallable | None, optional
         Integrator to use if model is continuous (default RK4).
     """
 
@@ -123,12 +92,12 @@ class DynamicsConstraint(AbstractDynamicsConstraint):
     def __init__(
         self,
         model: DiscreteDynamics | ContinuousDynamics,
-        integrator: IntegratorCallable | object | None = None,
+        integrator: IntegratorCallable | None = None,
     ) -> None:
         if isinstance(model, DiscreteDynamics):
             disc_model = model
         elif isinstance(model, ContinuousDynamics):
-            integ = RK4(model) if integrator is None else integrator
+            integ = RK4() if integrator is None else integrator
             disc_model = DiscretizedDynamics(model, integ)
         else:
             msg = f"Expected DiscreteDynamics or ContinuousDynamics, got {type(model).__name__}."

@@ -1,5 +1,3 @@
-"""Generic user-defined cost callable differentiated via automatic differentiation."""
-
 import inspect
 from collections.abc import Callable
 

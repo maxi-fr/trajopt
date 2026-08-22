@@ -1,5 +1,3 @@
-"""Cross-verification tests comparing Python Pendulum and DubinsCar models against Julia RobotZoo/RobotDynamics."""
-
 from typing import Any
 
 import jax.numpy as jnp

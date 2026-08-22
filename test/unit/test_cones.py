@@ -104,14 +104,12 @@ def test_second_order_cone_regions() -> None:
 
     # Inside cone: ||[1, 1]||_2 = sqrt(2) <= 2
     x_inside = jnp.array([1.0, 1.0, 2.0])
-    assert cone.status(x_inside) == "inside"
     np.testing.assert_allclose(cone.project(x_inside), x_inside)
     np.testing.assert_allclose(cone.jacobian(x_inside), jnp.eye(3))
     np.testing.assert_allclose(cone.hessian(x_inside, b), jnp.zeros((3, 3)))
 
     # Below dual cone: ||[1, 1]||_2 = sqrt(2) <= -(-2)
     x_below = jnp.array([1.0, 1.0, -2.0])
-    assert cone.status(x_below) == "below"
     np.testing.assert_allclose(cone.project(x_below), jnp.zeros(3))
     np.testing.assert_allclose(cone.jacobian(x_below), jnp.zeros((3, 3)))
     np.testing.assert_allclose(cone.hessian(x_below, b), jnp.zeros((3, 3)))
@@ -119,7 +117,6 @@ def test_second_order_cone_regions() -> None:
     # Outside cone: x = [2, 3, 1, 1], ||[2, 3, 1]|| = sqrt(14) ≈ 3.74 > 1
     x_outside = jnp.array([2.0, 3.0, 1.0, 1.0])
     b4 = jnp.array([0.2, 0.4, -0.1, 0.3])
-    assert cone.status(x_outside) == "outside"
     px_outside = cone.project(x_outside)
     assert not jnp.isnan(px_outside).any()
     J = cone.jacobian(x_outside)

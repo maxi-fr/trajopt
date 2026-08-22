@@ -1,5 +1,3 @@
-"""Unit tests for benchmark models: Cartpole, Pendulum, and DubinsCar."""
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
