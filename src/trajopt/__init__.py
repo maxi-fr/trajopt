@@ -96,15 +96,24 @@ from trajopt.trajectory import (
     KnotPoint,
     Trajectory,
 )
+from trajopt.transcription.clarabel import (
+    ClarabelResult,
+    solve_clarabel,
+)
 from trajopt.transcription.ipopt import (
     IpoptResult,
     solve_ipopt,
 )
 from trajopt.transcription.layout import (
+    compute_constraint_violation,
     constraint_bounds,
     primal_bounds,
     trajectory_to_z,
     z_to_trajectory,
+)
+from trajopt.transcription.osqp import (
+    OSQPResult,
+    solve_osqp,
 )
 from trajopt.transcription.sparsity import (
     hessian_sparsity_pattern,
@@ -132,6 +141,7 @@ __all__ = [
     "BuiltKnotConstraint",
     "Cartpole",
     "CircleConstraint",
+    "ClarabelResult",
     "CollisionConstraint",
     "Constraint",
     "ConstraintList",
@@ -164,6 +174,7 @@ __all__ = [
     "MPCState",
     "NegativeOrthant",
     "NormConstraint",
+    "OSQPResult",
     "Objective",
     "Pendulum",
     "PositiveOrthant",
@@ -184,6 +195,7 @@ __all__ = [
     "ZeroCone",
     "attitude_jacobian",
     "augmented_lagrangian_expansion",
+    "compute_constraint_violation",
     "constraint_bounds",
     "constraints_and_jac",
     "control_rate_cost",
@@ -212,7 +224,9 @@ __all__ = [
     "rollout",
     "rollout_states",
     "solve",
+    "solve_clarabel",
     "solve_ipopt",
+    "solve_osqp",
     "states",
     "to_hamilton",
     "trajectory_to_z",

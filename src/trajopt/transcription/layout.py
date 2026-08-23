@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant
-from trajopt.constraints.constraint_list import BuiltKnotConstraint
 
 if TYPE_CHECKING:
-    from trajopt.problem import Problem
+    from trajopt.constraints.base import Constraint
+    from trajopt.constraints.constraint_list import BuiltKnotConstraint
+    from trajopt.problem import MPCState, Problem
+    from trajopt.trajectory import Trajectory
 
 
 def trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
@@ -63,7 +68,7 @@ def z_to_trajectory(
     return X, U
 
 
-def primal_bounds(problem: "Problem") -> tuple[np.ndarray, np.ndarray]:
+def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     """Extract solver variable limits zL <= Z <= zU from the problem's box bounds.
 
     Parameters
@@ -120,7 +125,7 @@ def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray],
     return gL_list, gU_list
 
 
-def constraint_bounds(problem: "Problem") -> tuple[np.ndarray, np.ndarray]:
+def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     """Compute lower and upper bounds gL <= c(Z) <= gU for the transcribed constraint vector.
 
     Parameters
@@ -165,3 +170,246 @@ def constraint_bounds(problem: "Problem") -> tuple[np.ndarray, np.ndarray]:
     gL = np.concatenate(gL_list) if gL_list else np.empty(0, dtype=np.float64)
     gU = np.concatenate(gU_list) if gU_list else np.empty(0, dtype=np.float64)
     return gL, gU
+
+
+def _eval_stage_violations(  # noqa: PLR0913 -- Stage evaluation helper takes 6 parameters
+    knot_evaluators: tuple[BuiltKnotConstraint, ...],
+    X: jax.Array,
+    U: jax.Array,
+    *,
+    t_stage: jax.Array,
+    t_term: jax.Array,
+    xf_jax: jax.Array | None,
+) -> float:
+    """Compute maximum violation across all stage and terminal constraint objects."""
+    from trajopt.constraints.linear import GoalConstraint  # noqa: PLC0415 -- type check for goal constraint
+
+    N = len(X)
+    max_viol = 0.0
+
+    for k in range(N - 1):
+        if k < len(knot_evaluators):
+            ev = knot_evaluators[k]
+            for con in ev.constraints:
+                val = (
+                    con.evaluate(X[k], U[k], t_stage[k], xf=xf_jax)
+                    if isinstance(con, GoalConstraint) and xf_jax is not None
+                    else con.evaluate(X[k], U[k], t_stage[k])
+                )
+                proj = con.cone.project(val)
+                diff = float(np.max(np.abs(np.asarray(val, dtype=np.float64) - np.asarray(proj, dtype=np.float64))))
+                max_viol = max(max_viol, diff)
+
+    if len(knot_evaluators) > N - 1:
+        ev = knot_evaluators[N - 1]
+        for con in ev.constraints:
+            val = (
+                con.evaluate(X[-1], None, t_term, xf=xf_jax)
+                if isinstance(con, GoalConstraint) and xf_jax is not None
+                else con.evaluate(X[-1], None, t_term)
+            )
+            proj = con.cone.project(val)
+            diff = float(np.max(np.abs(np.asarray(val, dtype=np.float64) - np.asarray(proj, dtype=np.float64))))
+            max_viol = max(max_viol, diff)
+
+    return max_viol
+
+
+def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6 arguments
+    problem: Problem,
+    Z: jax.Array | np.ndarray,
+    x0: jax.Array | np.ndarray,
+    *,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    xf: jax.Array | np.ndarray | None = None,
+) -> float:
+    """Compute maximum constraint violation across all transcribed constraints and bounds.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance containing model, constraints, and horizon dimensions.
+    Z : jax.Array | np.ndarray
+        Flat primal trajectory vector of shape ``(N * n + (N - 1) * m,)``.
+    x0 : jax.Array | np.ndarray
+        Initial state condition of shape ``(n,)``.
+    t0 : float | jax.Array, optional
+        Initial timestamp scalar. Defaults to 0.0.
+    dt : float | jax.Array, optional
+        Time step duration (scalar or array of length N-1). Defaults to 0.05.
+    xf : jax.Array | np.ndarray | None, optional
+        Goal state vector of shape ``(n,)``. Defaults to None.
+
+    Returns
+    -------
+    float
+        Maximum constraint violation scalar.
+    """
+    from trajopt.transcription.transcription import _extract_discrete_model  # noqa: PLC0415 -- avoid circular import
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+
+    Z_arr = jnp.asarray(Z, dtype=jnp.float64)
+    X, U = z_to_trajectory(Z_arr, N, n, m)
+    dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
+    t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
+    t_term = t0 + jnp.sum(dt_arr)
+
+    discrete_model = _extract_discrete_model(problem)
+    built_constraints = problem.constraints
+    knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
+
+    # 1. Primal variable bounds
+    zL, zU = primal_bounds(problem)
+    Z_np = np.asarray(Z_arr, dtype=np.float64)
+    viol_lb = np.maximum(0.0, zL - Z_np)
+    viol_ub = np.maximum(0.0, Z_np - zU)
+    max_primal = max(float(np.max(viol_lb)), float(np.max(viol_ub))) if len(viol_lb) > 0 else 0.0
+
+    # 2. Initial state condition
+    viol_init = float(np.max(np.abs(np.asarray(X[0], dtype=np.float64) - np.asarray(x0, dtype=np.float64))))
+
+    # 3. Dynamics defects
+    def step_defect(
+        xk: jax.Array,
+        uk: jax.Array,
+        x_next: jax.Array,
+        tk: jax.Array,
+        dtk: jax.Array,
+    ) -> jax.Array:
+        return x_next - discrete_model.discrete_dynamics(xk, uk, tk, dtk)
+
+    dyn_defects = jax.vmap(step_defect)(X[:-1], U, X[1:], t_stage, dt_arr)
+    viol_dyn = float(np.max(np.abs(np.asarray(dyn_defects, dtype=np.float64))))
+
+    # 4. Stage and terminal constraints
+    xf_jax = None if xf is None else jnp.asarray(xf, dtype=jnp.float64)
+    viol_stage = _eval_stage_violations(
+        knot_evaluators,
+        X,
+        U,
+        t_stage=t_stage,
+        t_term=t_term,
+        xf_jax=xf_jax,
+    )
+
+    return max(max_primal, viol_init, viol_dyn, viol_stage)
+
+
+def parse_solver_initial_state(  # noqa: PLR0913 -- Initial state parser takes 7 parameters
+    problem: Problem,
+    x0: jax.Array | MPCState,
+    *,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    initial_trajectory: Trajectory | None = None,
+    initial_z: jax.Array | None = None,
+    xf: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
+    """Parse solver inputs into standard JAX array representations."""
+    from trajopt.problem import MPCState  # noqa: PLC0415 -- avoid circular import
+
+    N = int(problem.N)
+    m = int(problem.model.m)
+
+    if isinstance(x0, MPCState):
+        x0_arr = jnp.asarray(x0.x0, dtype=jnp.float64)
+        t0_arr = jnp.asarray(x0.t0, dtype=jnp.float64)
+        dt_arr = jnp.asarray(x0.dt, dtype=jnp.float64)
+        xf_val = jnp.asarray(x0.xf, dtype=jnp.float64) if x0.xf is not None else None
+        z0 = x0.Z
+    else:
+        x0_arr = jnp.asarray(x0, dtype=jnp.float64)
+        t0_arr = jnp.asarray(t0, dtype=jnp.float64)
+        dt_arr = (
+            jnp.asarray(dt, dtype=jnp.float64)
+            if isinstance(dt, (list, tuple, np.ndarray, jax.Array)) and len(dt) == N - 1
+            else jnp.full(N - 1, jnp.asarray(dt, dtype=jnp.float64))
+        )
+        xf_val = jnp.asarray(xf, dtype=jnp.float64) if xf is not None else None
+
+        if initial_z is not None:
+            z0 = jnp.asarray(initial_z, dtype=jnp.float64)
+        elif initial_trajectory is not None:
+            z0 = trajectory_to_z(initial_trajectory.X, initial_trajectory.U)
+        else:
+            X_init = jnp.repeat(x0_arr[None, :], N, axis=0)
+            U_init = jnp.zeros((N - 1, m), dtype=jnp.float64)
+            z0 = trajectory_to_z(X_init, U_init)
+
+    return x0_arr, t0_arr, dt_arr, xf_val, z0
+
+
+def extract_quadratic_cost(  # noqa: PLR0913 -- Cost extraction helper takes 8 parameters
+    problem: Problem,
+    N: int,
+    n: int,
+    m: int,
+    nz: int,
+    *,
+    t0_arr: jax.Array,
+    dt_arr: jax.Array,
+    xf_val: jax.Array | None,
+) -> tuple[sp.csc_matrix, np.ndarray]:
+    """Extract upper-triangular Hessian P_triu and linear gradient vector q."""
+    from trajopt.transcription.sparsity import hessian_sparsity_pattern  # noqa: PLC0415 -- avoid circular import
+    from trajopt.transcription.transcription import (  # noqa: PLC0415 -- avoid circular import
+        eval_grad_f,
+        eval_h,
+    )
+
+    z_zero = jnp.zeros(nz, dtype=jnp.float64)
+    q_jax = eval_grad_f(problem, z_zero, t0=t0_arr, dt=dt_arr, xf=xf_val)
+    q_vec = np.asarray(q_jax, dtype=np.float64)
+
+    h_rows, h_cols = hessian_sparsity_pattern(N, n, m)
+    h_vals_jax = eval_h(problem, z_zero, t0=t0_arr, dt=dt_arr, xf=xf_val)
+    h_vals = np.asarray(h_vals_jax, dtype=np.float64)
+
+    H_full = sp.coo_matrix((h_vals, (h_rows, h_cols)), shape=(nz, nz), dtype=np.float64).tocsc()
+    P_triu = sp.triu(H_full, format="csc")
+    return P_triu, q_vec
+
+
+def build_linear_constraint_block(  # noqa: PLR0913 -- Constraint block builder takes 6 arguments
+    con: Constraint,
+    n: int,
+    m: int,
+    *,
+    tk: jax.Array,
+    is_term: bool,
+    xf_val: jax.Array | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute linear Jacobian block and affine evaluation vector for a single constraint."""
+    from trajopt.constraints.linear import GoalConstraint  # noqa: PLC0415 -- type check for goal constraint
+
+    if is_term:
+        jx, _ = con.jacobian(jnp.zeros(n, dtype=jnp.float64), None, tk)
+        val0 = (
+            con.evaluate(jnp.zeros(n, dtype=jnp.float64), None, tk, xf=xf_val)
+            if isinstance(con, GoalConstraint) and xf_val is not None
+            else con.evaluate(jnp.zeros(n, dtype=jnp.float64), None, tk)
+        )
+        A_c_block = np.asarray(jx, dtype=np.float64)
+    else:
+        jx, ju = con.jacobian(jnp.zeros(n, dtype=jnp.float64), jnp.zeros(m, dtype=jnp.float64), tk)
+        val0 = (
+            con.evaluate(
+                jnp.zeros(n, dtype=jnp.float64),
+                jnp.zeros(m, dtype=jnp.float64),
+                tk,
+                xf=xf_val,
+            )
+            if isinstance(con, GoalConstraint) and xf_val is not None
+            else con.evaluate(
+                jnp.zeros(n, dtype=jnp.float64),
+                jnp.zeros(m, dtype=jnp.float64),
+                tk,
+            )
+        )
+        A_c_block = np.hstack([np.asarray(jx, dtype=np.float64), np.asarray(ju, dtype=np.float64)])
+
+    return A_c_block, np.asarray(val0, dtype=np.float64)

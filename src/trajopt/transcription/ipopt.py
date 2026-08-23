@@ -8,6 +8,7 @@ import numpy as np
 from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
+    compute_constraint_violation,
     constraint_bounds,
     primal_bounds,
     trajectory_to_z,
@@ -47,6 +48,10 @@ class IpoptResult(NamedTuple):
         Optimal flat primal vector.
     info : dict[str, Any]
         Raw Ipopt return info dictionary.
+    iterations : int, optional
+        Number of solver iterations. Defaults to 0.
+    constraint_violation : float, optional
+        Maximum constraint violation across all constraints. Defaults to 0.0.
     """
 
     trajectory: Trajectory
@@ -56,6 +61,8 @@ class IpoptResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    iterations: int = 0
+    constraint_violation: float = 0.0
 
 
 class _IpoptCallback:
@@ -82,6 +89,13 @@ class _IpoptCallback:
 
         self.jac_rows, self.jac_cols = jacobian_sparsity_pattern(N, n, m, p_seq)
         self.hess_rows, self.hess_cols = hessian_sparsity_pattern(N, n, m)
+        self.iteration_count = 0
+
+    def intermediate(self, *args: object) -> bool:
+        """Track solver iteration counter from Ipopt."""
+        if len(args) > 1 and isinstance(args[1], (int, float, str)):
+            self.iteration_count = int(args[1])
+        return True
 
     def objective(self, z: np.ndarray) -> float:
         """Evaluate scalar objective value J(z)."""
@@ -227,6 +241,16 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         dt=dt_arr,
     )
 
+    iter_count = int(cb.iteration_count)
+    viol = compute_constraint_violation(
+        problem,
+        Z_opt_jax,
+        x0_arr,
+        t0=t0_arr,
+        dt=dt_arr,
+        xf=xf_val,
+    )
+
     return IpoptResult(
         trajectory=opt_traj,
         success=success,
@@ -235,4 +259,6 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         cost=cost_val,
         Z=Z_opt_jax,
         info=info,
+        iterations=iter_count,
+        constraint_violation=viol,
     )

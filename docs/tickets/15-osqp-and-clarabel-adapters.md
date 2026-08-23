@@ -16,13 +16,13 @@ constraint's two forms).
 
 ## Acceptance criteria
 
-- [ ] An OSQP adapter accepts a transcribed problem and solves it, with its convex-quadratic
+- [x] An OSQP adapter accepts a transcribed problem and solves it, with its convex-quadratic
       restriction documented
-- [ ] A Clarabel adapter accepts a transcribed problem and solves it
-- [ ] The norm constraint's second-order-cone form reaches Clarabel as a cone constraint rather
+- [x] A Clarabel adapter accepts a transcribed problem and solves it
+- [x] The norm constraint's second-order-cone form reaches Clarabel as a cone constraint rather
       than being reformulated into an inequality
-- [ ] At least one solve exercises the second-order cone end to end, and its solution is verified
+- [x] At least one solve exercises the second-order cone end to end, and its solution is verified
       against the same problem expressed with the quadratic norm form through Ipopt
-- [ ] Solver selection does not change how a problem is defined
-- [ ] Each adapter reports convergence status, iteration count, and constraint violation through
+- [x] Solver selection does not change how a problem is defined
+- [x] Each adapter reports convergence status, iteration count, and constraint violation through
       a common interface

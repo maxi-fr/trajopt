@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import equinox as eqx
@@ -443,6 +443,7 @@ def solve(
     problem: Problem,
     state: MPCState,
     *,
+    solver: str | Callable[..., Any] = "ipopt",
     options: Mapping[str, Any] | None = None,
 ) -> MPCState:
     """Solve the optimal control problem and return an updated MPCState with optimal trajectory and multipliers.
@@ -453,20 +454,47 @@ def solve(
         Problem structure containing model, objective, constraints, and horizon.
     state : MPCState
         Current per-step state holding initial state, warm-start trajectory, and goal.
+    solver : str | Any, optional
+        Solver backend to use ("ipopt", "osqp", "clarabel") or a callable. Defaults to "ipopt".
     options : Mapping[str, Any] | None, optional
-        Solver options passed to Ipopt (e.g. max_iter, tol, print_level).
+        Solver options passed to backend (e.g. max_iter, tol, print_level, verbose).
 
     Returns
     -------
     MPCState
         New state containing optimal trajectory Z, dual multipliers lam, mu, and boundary conditions.
     """
-    from trajopt.transcription.ipopt import solve_ipopt  # noqa: PLC0415 -- avoid circular import
+    res: Any
+    if isinstance(solver, str):
+        solver_name = solver.strip().lower()
+        if solver_name == "ipopt":
+            from trajopt.transcription.ipopt import solve_ipopt  # noqa: PLC0415 -- avoid circular import
 
-    res = solve_ipopt(problem=problem, x0=state, options=options)
+            res = solve_ipopt(problem=problem, x0=state, options=options)
+        elif solver_name == "osqp":
+            from trajopt.transcription.osqp import solve_osqp  # noqa: PLC0415 -- avoid circular import
 
-    mult_g = res.info.get("mult_g")
-    lam = jnp.asarray(mult_g, dtype=state.Z.dtype) if mult_g is not None else state.lam
+            res = solve_osqp(problem=problem, x0=state, options=options)
+        elif solver_name == "clarabel":
+            from trajopt.transcription.clarabel import solve_clarabel  # noqa: PLC0415 -- avoid circular import
+
+            res = solve_clarabel(problem=problem, x0=state, options=options)
+        else:
+            msg = f"Unknown solver backend: '{solver}'. Expected 'ipopt', 'osqp', 'clarabel', or callable."
+            raise ValueError(msg)
+    elif callable(solver):
+        solver_fn: Any = solver
+        res = solver_fn(problem=problem, x0=state, options=options)
+    else:
+        msg = f"Invalid solver type: {type(solver).__name__}. Expected str or callable."
+        raise TypeError(msg)
+
+    mult_con = res.info.get("mult_g")
+    if mult_con is None:
+        mult_con = res.info.get("y")
+    if mult_con is None:
+        mult_con = res.info.get("z")
+    lam = jnp.asarray(mult_con, dtype=state.Z.dtype) if mult_con is not None else state.lam
 
     mult_x_L = res.info.get("mult_x_L")
     mult_x_U = res.info.get("mult_x_U")

@@ -1,0 +1,360 @@
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import scipy.sparse as sp
+
+from trajopt.cones import SecondOrderCone, ZeroCone
+from trajopt.dynamics.base import DiscreteDynamics
+from trajopt.problem import MPCState, Problem
+from trajopt.trajectory import Trajectory
+from trajopt.transcription.layout import (
+    build_linear_constraint_block,
+    compute_constraint_violation,
+    extract_quadratic_cost,
+    parse_solver_initial_state,
+    primal_bounds,
+    z_to_trajectory,
+)
+from trajopt.transcription.transcription import (
+    _extract_discrete_model,
+    eval_f,
+)
+
+_SUCCESS_STATUS_VALS = {1, 2}  # 1: solved, 2: solved inaccurate
+
+
+class OSQPResult(NamedTuple):
+    """Result of an OSQP trajectory optimization solve.
+
+    Parameters
+    ----------
+    trajectory : Trajectory
+        Optimal state and control trajectory.
+    success : bool
+        Whether the solver converged to optimality or within tolerance.
+    status : int
+        OSQP integer status value code.
+    message : str
+        Solver return status message.
+    cost : float
+        Final objective value.
+    Z : jax.Array
+        Optimal flat primal vector of shape ``(N * n + (N - 1) * m,)``.
+    info : dict[str, Any]
+        Raw OSQP return info dictionary.
+    iterations : int, optional
+        Number of solver iterations. Defaults to 0.
+    constraint_violation : float, optional
+        Maximum constraint violation across all constraints. Defaults to 0.0.
+    """
+
+    trajectory: Trajectory
+    success: bool
+    status: int
+    message: str
+    cost: float
+    Z: jax.Array
+    info: dict[str, Any]
+    iterations: int = 0
+    constraint_violation: float = 0.0
+
+
+def _extract_qp_dynamics(  # noqa: PLR0913 -- Dynamics extraction helper takes 8 parameters
+    discrete_model: DiscreteDynamics,
+    N: int,
+    n: int,
+    m: int,
+    nz: int,
+    *,
+    x0_arr: jax.Array,
+    t_stage: jax.Array,
+    dt_arr: jax.Array,
+) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
+    """Assemble initial condition and linear dynamics defect rows for OSQP."""
+    A_rows: list[sp.spmatrix] = []
+    l_vals: list[np.ndarray] = []
+    u_vals: list[np.ndarray] = []
+
+    # Initial condition: x_0 = x0_arr
+    A_init = sp.lil_matrix((n, nz), dtype=np.float64)
+    A_init[:, :n] = np.eye(n)
+    A_rows.append(A_init.tocsr())
+    x0_np = np.asarray(x0_arr, dtype=np.float64)
+    l_vals.append(x0_np)
+    u_vals.append(x0_np)
+
+    for k in range(N - 1):
+        tk = t_stage[k]
+        dtk = dt_arr[k]
+        Ak = np.asarray(
+            discrete_model.state_jacobian(
+                jnp.zeros(n, dtype=jnp.float64),
+                jnp.zeros(m, dtype=jnp.float64),
+                tk,
+                dtk,
+            ),
+            dtype=np.float64,
+        )
+        Bk = np.asarray(
+            discrete_model.control_jacobian(
+                jnp.zeros(n, dtype=jnp.float64),
+                jnp.zeros(m, dtype=jnp.float64),
+                tk,
+                dtk,
+            ),
+            dtype=np.float64,
+        )
+        dk = np.asarray(
+            discrete_model.discrete_dynamics(
+                jnp.zeros(n, dtype=jnp.float64),
+                jnp.zeros(m, dtype=jnp.float64),
+                tk,
+                dtk,
+            ),
+            dtype=np.float64,
+        )
+
+        A_dyn_k = sp.lil_matrix((n, nz), dtype=np.float64)
+        col_x_k = k * (n + m)
+        col_u_k = col_x_k + n
+        col_x_next = (k + 1) * (n + m)
+        A_dyn_k[:, col_x_k : col_x_k + n] = -Ak
+        A_dyn_k[:, col_u_k : col_u_k + m] = -Bk
+        A_dyn_k[:, col_x_next : col_x_next + n] = np.eye(n)
+        A_rows.append(A_dyn_k.tocsr())
+        l_vals.append(dk)
+        u_vals.append(dk)
+
+    return A_rows, l_vals, u_vals
+
+
+def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extraction helper takes 8 arguments
+    knot_evaluators: Sequence[Any],
+    N: int,
+    n: int,
+    m: int,
+    nz: int,
+    *,
+    t_stage: jax.Array,
+    t_term: jax.Array,
+    xf_val: jax.Array | None,
+) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
+    """Assemble stage and terminal linear constraint rows for OSQP."""
+    A_rows: list[sp.spmatrix] = []
+    l_vals: list[np.ndarray] = []
+    u_vals: list[np.ndarray] = []
+
+    for k in range(N):
+        if k >= len(knot_evaluators):
+            continue
+        ev = knot_evaluators[k]
+        tk = t_stage[k] if k < N - 1 else t_term
+        col_k = k * (n + m)
+        is_term = k == N - 1
+
+        for con in ev.constraints:
+            from trajopt.constraints.bounds import (  # noqa: PLC0415 -- type check for box bounds
+                BoundConstraint,
+                ControlBound,
+                StateBound,
+            )
+
+            if isinstance(con, (BoundConstraint, ControlBound, StateBound)):
+                continue
+
+            if isinstance(con.cone, SecondOrderCone):
+                msg = (
+                    "OSQP does not support SecondOrderCone constraints. "
+                    "Use Clarabel for second-order cone constraints or Ipopt for nonlinear formulations."
+                )
+                raise TypeError(msg)
+
+            dim_c = int(con.p)
+            if dim_c == 0:
+                continue
+
+            A_c_block, val0_np = build_linear_constraint_block(
+                con,
+                n,
+                m,
+                tk=tk,
+                is_term=is_term,
+                xf_val=xf_val,
+            )
+            A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
+            A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
+            A_rows.append(A_con.tocsr())
+
+            if isinstance(con.cone, ZeroCone):
+                l_vals.append(-val0_np)
+                u_vals.append(-val0_np)
+            else:
+                l_vals.append(np.full(dim_c, -np.inf, dtype=np.float64))
+                u_vals.append(-val0_np)
+
+    return A_rows, l_vals, u_vals
+
+
+def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
+    problem: Problem,
+    x0: jax.Array | MPCState,
+    *,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    initial_trajectory: Trajectory | None = None,
+    initial_z: jax.Array | None = None,
+    xf: jax.Array | None = None,
+    options: Mapping[str, Any] | None = None,
+) -> OSQPResult:
+    """Solve the transcribed optimal control problem using OSQP.
+
+    OSQP is a convex quadratic programming solver. It requires:
+    1. A convex quadratic or linear objective function.
+    2. Affine dynamics :math:`x_{k+1} = A_k x_k + B_k u_k + d_k`.
+    3. Linear equality, inequality, and variable box bound constraints.
+
+    Nonlinear dynamics or second-order cone constraints (e.g. SecondOrderCone) are not
+    supported natively by OSQP. Use Clarabel for second-order cone problems or Ipopt for
+    general nonlinear problems.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance containing model, objective, constraints, and horizon.
+    x0 : jax.Array | MPCState
+        Initial state condition of shape ``(n,)`` or an MPCState instance.
+    t0 : float | jax.Array, optional
+        Initial timestamp scalar. Defaults to 0.0.
+    dt : float | jax.Array, optional
+        Step duration (scalar or array of length N-1). Defaults to 0.05.
+    initial_trajectory : Trajectory | None, optional
+        Initial trajectory guess. Defaults to repeating x0 with zero controls.
+    initial_z : jax.Array | None, optional
+        Flat initial guess vector of shape ``(N * n + (N - 1) * m,)``.
+    xf : jax.Array | None, optional
+        Goal state vector of shape ``(n,)``. Defaults to None.
+    options : Mapping[str, Any] | None, optional
+        Solver options passed to OSQP (e.g. ``{"eps_abs": 1e-6, "eps_rel": 1e-6, "max_iter": 4000}``).
+
+    Returns
+    -------
+    OSQPResult
+        Optimization result including optimal trajectory, convergence flag, status, and cost.
+    """
+    import osqp  # noqa: PLC0415 -- osqp is an optional solver dependency
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    nz = N * n + (N - 1) * m
+
+    x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(
+        problem,
+        x0,
+        t0=t0,
+        dt=dt,
+        initial_trajectory=initial_trajectory,
+        initial_z=initial_z,
+        xf=xf,
+    )
+
+    t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
+    t_term = t0_arr + jnp.sum(dt_arr)
+
+    P_triu, q_vec = extract_quadratic_cost(
+        problem,
+        N,
+        n,
+        m,
+        nz,
+        t0_arr=t0_arr,
+        dt_arr=dt_arr,
+        xf_val=xf_val,
+    )
+
+    discrete_model = _extract_discrete_model(problem)
+    A_dyn, l_dyn, u_dyn = _extract_qp_dynamics(
+        discrete_model,
+        N,
+        n,
+        m,
+        nz,
+        x0_arr=x0_arr,
+        t_stage=t_stage,
+        dt_arr=dt_arr,
+    )
+
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    A_con, l_con, u_con = _extract_qp_stage_constraints(
+        knot_evaluators,
+        N,
+        n,
+        m,
+        nz,
+        t_stage=t_stage,
+        t_term=t_term,
+        xf_val=xf_val,
+    )
+
+    zL, zU = primal_bounds(problem)
+    A_bounds = sp.eye(nz, format="csr", dtype=np.float64)
+
+    A_mat = sp.vstack([*A_dyn, *A_con, A_bounds]).tocsc()
+    l_vec = np.concatenate([*l_dyn, *l_con, zL])
+    u_vec = np.concatenate([*u_dyn, *u_con, zU])
+
+    solver = osqp.OSQP()
+    solver_opts: dict[str, Any] = {"verbose": False}
+    if options:
+        solver_opts.update(options)
+
+    solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
+    if z0 is not None:
+        solver.warm_start(x=z0)
+
+    res = solver.solve()
+
+    status_val = int(getattr(res.info, "status_val", -1))
+    success = status_val in _SUCCESS_STATUS_VALS
+    status_msg = str(getattr(res.info, "status", "unknown"))
+    iter_count = int(getattr(res.info, "iter", 0))
+
+    Z_opt_np = np.asarray(res.x, dtype=np.float64) if res.x is not None else np.asarray(z0, dtype=np.float64)
+    Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
+    cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
+    viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
+
+    X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+    t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+
+    opt_traj = Trajectory(
+        X=X_opt,
+        U=U_opt,
+        t=t_opt,
+        dt=dt_arr,
+    )
+
+    info_dict = {
+        "status": status_msg,
+        "status_val": status_val,
+        "iter": iter_count,
+        "obj_val": getattr(res.info, "obj_val", cost_val),
+        "prim_res": getattr(res.info, "prim_res", 0.0),
+        "dual_res": getattr(res.info, "dual_res", 0.0),
+        "y": res.y,
+    }
+
+    return OSQPResult(
+        trajectory=opt_traj,
+        success=success,
+        status=status_val,
+        message=status_msg,
+        cost=cost_val,
+        Z=Z_opt_jax,
+        info=info_dict,
+        iterations=iter_count,
+        constraint_violation=viol,
+    )
