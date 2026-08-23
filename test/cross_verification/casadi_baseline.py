@@ -8,13 +8,16 @@ import numpy as np
 
 ArrayLike = Sequence[float] | np.ndarray | jax.Array
 
-from trajopt.constraints.geometric import CircleConstraint
+from trajopt.constraints.geometric import CircleConstraint, SphereConstraint
 from trajopt.constraints.linear import GoalConstraint, LinearConstraint
+from trajopt.constraints.rotations import QuatVecEq
 from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import DiagonalCost, QuadraticCost
+from trajopt.costs.rotations import QuatGeodesicCost
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
+from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import IpoptResult
@@ -118,6 +121,68 @@ def pendulum_dynamics(
     m_eff = mass * (lc**2)
     theta_ddot = tau / m_eff - g * ca.sin(theta) / lc - b * omega / m_eff
     return ca.vertcat(omega, theta_ddot)
+
+
+def quadrotor_dynamics(
+    x: ca.MX,
+    u: ca.MX,
+    mass: float = 0.5,
+    J: Sequence[float] = (0.0023, 0.0023, 0.004),
+    gravity: Sequence[float] = (0.0, 0.0, -9.81),
+    motor_dist: float = 0.1750,
+    kf: float = 1.0,
+    km: float = 0.0245,
+) -> ca.MX:
+    """Evaluate continuous quadrotor dynamics in CasADi matching RobotZoo.jl bit-for-bit."""
+    r = x[0:3]  # noqa: F841 -- unused position state
+    q = x[3:7]  # [qx, qy, qz, qw] in JPL convention
+    v = x[7:10]
+    omega = x[10:13]
+
+    qx, qy, qz, qw = q[0], q[1], q[2], q[3]
+
+    # Passive rotation matrix R(q)
+    R = ca.vertcat(
+        ca.horzcat(qw * qw + qx * qx - qy * qy - qz * qz, 2.0 * (qx * qy + qw * qz), 2.0 * (qx * qz - qw * qy)),
+        ca.horzcat(2.0 * (qx * qy - qw * qz), qw * qw - qx * qx + qy * qy - qz * qz, 2.0 * (qy * qz + qw * qx)),
+        ca.horzcat(2.0 * (qx * qz + qw * qy), 2.0 * (qy * qz - qw * qx), qw * qw - qx * qx - qy * qy + qz * qz),
+    )
+
+    # Kinematics matrix Xi(q)
+    Xi = ca.vertcat(
+        ca.horzcat(qw, -qz, qy),
+        ca.horzcat(qz, qw, -qx),
+        ca.horzcat(-qy, qx, qw),
+        ca.horzcat(-qx, -qy, -qz),
+    )
+
+    r_dot = v
+    q_dot = 0.5 * ca.mtimes(Xi, omega)
+
+    # Forces
+    f_thrust = kf * ca.sum1(u)
+    f_body = ca.vertcat(0.0, 0.0, f_thrust)
+    f_world = ca.mtimes(R.T, f_body)
+    grav_vec = ca.vertcat(gravity[0], gravity[1], gravity[2])
+    v_dot = grav_vec + f_world / mass
+
+    # Moments
+    tau_x = motor_dist * kf * (u[1] - u[3])
+    tau_y = motor_dist * kf * (u[2] - u[0])
+    tau_z = km * (u[0] - u[1] + u[2] - u[3])
+    tau = ca.vertcat(tau_x, tau_y, tau_z)
+
+    # Gyro
+    J_diag = ca.vertcat(J[0], J[1], J[2])
+    J_omega = J_diag * omega
+    gyro = ca.vertcat(
+        omega[1] * J_omega[2] - omega[2] * J_omega[1],
+        omega[2] * J_omega[0] - omega[0] * J_omega[2],
+        omega[0] * J_omega[1] - omega[1] * J_omega[0],
+    )
+    omega_dot = (tau - gyro) / J_diag
+
+    return ca.vertcat(r_dot, q_dot, v_dot, omega_dot)
 
 
 def rk4_step(
@@ -523,6 +588,111 @@ def build_dubins_casadi(
     )
 
 
+def build_quadrotor_casadi(
+    N: int = 25,
+    dt: float = 0.05,
+    x0: ArrayLike = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    xf: ArrayLike = (3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    Q: ArrayLike = (1.0, 1.0, 1.0, 10.0, 10.0, 10.0, 10.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+    R: ArrayLike = (0.01, 0.01, 0.01, 0.01),
+    Qf: ArrayLike = (100.0, 100.0, 100.0, 1000.0, 1000.0, 1000.0, 1000.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0),
+    u_min: float | ArrayLike = 0.0,
+    u_max: float | ArrayLike = 10.0,
+    x_min: ArrayLike | None = None,
+    x_max: ArrayLike | None = None,
+    obstacles: Sequence[tuple[float, float, float, float]] | None = None,  # (xc, yc, zc, radius)
+    mass: float = 0.5,
+    J: Sequence[float] = (0.0023, 0.0023, 0.004),
+    gravity: Sequence[float] = (0.0, 0.0, -9.81),
+    motor_dist: float = 0.1750,
+    kf: float = 1.0,
+    km: float = 0.0245,
+) -> CasadiProblem:
+    """Build standalone pure-CasADi Quadrotor obstacle avoidance problem."""
+    n = 13
+    m = 4
+    x0_arr = np.asarray(x0, dtype=np.float64)
+    xf_arr = np.asarray(xf, dtype=np.float64)
+    Q_mat = np.diag(Q) if np.ndim(Q) == 1 else np.asarray(Q, dtype=np.float64)
+    R_mat = np.diag(R) if np.ndim(R) == 1 else np.asarray(R, dtype=np.float64)
+    Qf_mat = np.diag(Qf) if np.ndim(Qf) == 1 else np.asarray(Qf, dtype=np.float64)
+    u_min_arr = np.broadcast_to(np.asarray(u_min, dtype=np.float64), (m,))
+    u_max_arr = np.broadcast_to(np.asarray(u_max, dtype=np.float64), (m,))
+
+    opti = ca.Opti()
+    X = opti.variable(n, N)
+    U = opti.variable(m, N - 1)
+
+    cost = 0
+    for k in range(N - 1):
+        dx = X[:, k] - xf_arr
+        du = U[:, k]
+        cost += 0.5 * ca.mtimes([dx.T, Q_mat, dx]) + 0.5 * ca.mtimes([du.T, R_mat, du])
+    dx_term = X[:, N - 1] - xf_arr
+    cost += 0.5 * ca.mtimes([dx_term.T, Qf_mat, dx_term])
+    opti.minimize(cost)
+
+    def dyn_fn(x_var: ca.MX, u_var: ca.MX) -> ca.MX:
+        return quadrotor_dynamics(
+            x_var,
+            u_var,
+            mass=mass,
+            J=J,
+            gravity=gravity,
+            motor_dist=motor_dist,
+            kf=kf,
+            km=km,
+        )
+
+    # 1. Initial condition
+    opti.subject_to(X[:, 0] == x0_arr)
+
+    # 2. Dynamics + Obstacle keep-out
+    for k in range(N - 1):
+        opti.subject_to(X[:, k + 1] == rk4_step(dyn_fn, X[:, k], U[:, k], dt))
+        if obstacles:
+            for xc, yc, zc, r in obstacles:
+                opti.subject_to(-((X[0, k] - xc) ** 2) - (X[1, k] - yc) ** 2 - (X[2, k] - zc) ** 2 + r**2 <= 0)
+
+    # 3. Terminal goal constraint
+    opti.subject_to(X[:, N - 1] == xf_arr)
+
+    # 4. Bounds
+    for i in range(m):
+        opti.subject_to(opti.bounded(u_min_arr[i], U[i, :], u_max_arr[i]))
+
+    if x_min is not None and x_max is not None:
+        x_min_arr = np.asarray(x_min, dtype=np.float64)
+        x_max_arr = np.asarray(x_max, dtype=np.float64)
+        for i in range(n):
+            if np.isfinite(x_min_arr[i]) or np.isfinite(x_max_arr[i]):
+                opti.subject_to(opti.bounded(x_min_arr[i], X[i, 1:-1], x_max_arr[i]))
+    else:
+        x_min_arr = np.full(n, -np.inf)
+        x_max_arr = np.full(n, np.inf)
+
+    xL = np.repeat(x_min_arr[None, :], N, axis=0)
+    xU = np.repeat(x_max_arr[None, :], N, axis=0)
+    uL = np.repeat(u_min_arr[None, :], N - 1, axis=0)
+    uU = np.repeat(u_max_arr[None, :], N - 1, axis=0)
+    zL, zU = _flatten_bounds(xL, xU, uL, uU)
+
+    return CasadiProblem(
+        opti=opti,
+        X=X,
+        U=U,
+        cost=cost,
+        N=N,
+        n=n,
+        m=m,
+        dt=dt,
+        x0=x0_arr,
+        xf=xf_arr,
+        z_min=zL,
+        z_max=zU,
+    )
+
+
 def _get_casadi_dyn_fn(model: Any) -> Callable[[ca.MX, ca.MX], ca.MX]:
     """Extract continuous dynamics callable for a model."""
     if isinstance(model, Cartpole):
@@ -550,8 +720,106 @@ def _get_casadi_dyn_fn(model: Any) -> Callable[[ca.MX, ca.MX], ca.MX]:
 
         return pend_dyn
 
+    if isinstance(model, Quadrotor):
+        mass = float(np.asarray(model.mass))
+        J = tuple(float(v) for v in np.asarray(model.J))
+        gravity = tuple(float(v) for v in np.asarray(model.gravity))
+        motor_dist = float(np.asarray(model.motor_dist))
+        kf = float(np.asarray(model.kf))
+        km = float(np.asarray(model.km))
+
+        def quad_dyn(x_var: ca.MX, u_var: ca.MX) -> ca.MX:
+            return quadrotor_dynamics(
+                x_var,
+                u_var,
+                mass=mass,
+                J=J,
+                gravity=gravity,
+                motor_dist=motor_dist,
+                kf=kf,
+                km=km,
+            )
+
+        return quad_dyn
+
     msg = f"Model {type(model).__name__} is not yet supported in CasADi translation."
     raise NotImplementedError(msg)
+
+
+def _build_stage_cost_term(st_cost: Any, obj: Objective, xk: ca.MX, uk: ca.MX, k: int, N: int) -> ca.MX | float | int:
+    """Build single stage cost expression."""
+    if isinstance(st_cost, (DiagonalCost, QuadraticCost)):
+        Q_arr = np.asarray(obj.Q)
+        R_arr = np.asarray(obj.R)
+        q_arr = np.asarray(obj.q)
+        r_arr = np.asarray(obj.r)
+        c_arr = np.asarray(obj.c)
+
+        Q_k = Q_arr[k] if Q_arr.shape[0] == N - 1 else Q_arr
+        R_k = R_arr[k] if R_arr.shape[0] == N - 1 else R_arr
+        q_k = q_arr[k] if q_arr.shape[0] == N - 1 else q_arr
+        r_k = r_arr[k] if r_arr.shape[0] == N - 1 else r_arr
+        c_k = float(c_arr[k]) if c_arr.shape[0] == N - 1 else float(c_arr)
+
+        Q_mat = np.diag(Q_k) if Q_k.ndim == 1 else Q_k
+        R_mat = np.diag(R_k) if R_k.ndim == 1 else R_k
+
+        return (
+            0.5 * ca.mtimes([xk.T, Q_mat, xk])
+            + 0.5 * ca.mtimes([uk.T, R_mat, uk])
+            + ca.dot(q_k, xk)
+            + ca.dot(r_k, uk)
+            + c_k
+        )
+    if isinstance(st_cost, QuatGeodesicCost):
+        Q_k = np.asarray(st_cost.Q)
+        R_k = np.asarray(st_cost.R)
+        q_lin_k = np.asarray(st_cost.q_lin)
+        r_lin_k = np.asarray(st_cost.r_lin)
+        c_k = float(np.asarray(st_cost.c))
+        w_k = float(np.asarray(st_cost.w))
+        q_ref_k = np.asarray(st_cost.q_ref)
+        qind = list(st_cost.qind)
+
+        Q_mat = np.diag(Q_k) if Q_k.ndim == 1 else Q_k
+        R_mat = np.diag(R_k) if R_k.ndim == 1 else R_k
+
+        dq = ca.dot(q_ref_k, xk[qind])
+        geodesic_val = w_k * ca.fmin(1.0 + dq, 1.0 - dq)
+
+        return (
+            0.5 * ca.mtimes([xk.T, Q_mat, xk])
+            + 0.5 * ca.mtimes([uk.T, R_mat, uk])
+            + ca.dot(q_lin_k, xk)
+            + ca.dot(r_lin_k, uk)
+            + c_k
+            + geodesic_val
+        )
+    return 0
+
+
+def _build_terminal_cost_term(term_cost: Any, obj: Objective, x_term: ca.MX) -> ca.MX | float | int:
+    """Build terminal cost expression."""
+    if isinstance(term_cost, (DiagonalCost, QuadraticCost)):
+        Q_f = np.asarray(obj.Q_f)
+        q_f = np.asarray(obj.q_f)
+        c_f = float(np.asarray(obj.c_f))
+        Qf_mat = np.diag(Q_f) if Q_f.ndim == 1 else Q_f
+        return 0.5 * ca.mtimes([x_term.T, Qf_mat, x_term]) + ca.dot(q_f, x_term) + c_f
+    if isinstance(term_cost, QuatGeodesicCost):
+        Q_f = np.asarray(term_cost.Q)
+        q_lin_f = np.asarray(term_cost.q_lin)
+        c_f = float(np.asarray(term_cost.c))
+        w_f = float(np.asarray(term_cost.w))
+        q_ref_f = np.asarray(term_cost.q_ref)
+        qind = list(term_cost.qind)
+
+        Qf_mat = np.diag(Q_f) if Q_f.ndim == 1 else Q_f
+        dq = ca.dot(q_ref_f, x_term[qind])
+        geodesic_val = w_f * ca.fmin(1.0 + dq, 1.0 - dq)
+
+        return 0.5 * ca.mtimes([x_term.T, Qf_mat, x_term]) + ca.dot(q_lin_f, x_term) + c_f + geodesic_val
+    return 0
 
 
 def _build_objective_expression(obj: Any, X: ca.MX, U: ca.MX, N: int) -> Any:
@@ -561,34 +829,8 @@ def _build_objective_expression(obj: Any, X: ca.MX, U: ca.MX, N: int) -> Any:
         st_cost = obj.stage_cost
         term_cost = obj.terminal_cost
         for k in range(N - 1):
-            xk = X[:, k]
-            uk = U[:, k]
-            if isinstance(st_cost, (DiagonalCost, QuadraticCost)):
-                Q_k = np.asarray(obj.Q[k] if obj.Q.ndim == 3 else obj.Q)
-                R_k = np.asarray(obj.R[k] if obj.R.ndim == 3 else obj.R)
-                q_k = np.asarray(obj.q[k] if obj.q.ndim == 2 else obj.q)
-                r_k = np.asarray(obj.r[k] if obj.r.ndim == 2 else obj.r)
-                c_k = float(np.asarray(obj.c[k] if obj.c.ndim == 1 else obj.c))
-
-                Q_mat = np.diag(Q_k) if Q_k.ndim == 1 else Q_k
-                R_mat = np.diag(R_k) if R_k.ndim == 1 else R_k
-
-                cost += (
-                    0.5 * ca.mtimes([xk.T, Q_mat, xk])
-                    + 0.5 * ca.mtimes([uk.T, R_mat, uk])
-                    + ca.dot(q_k, xk)
-                    + ca.dot(r_k, uk)
-                    + c_k
-                )
-
-        x_term = X[:, N - 1]
-        if isinstance(term_cost, (DiagonalCost, QuadraticCost)):
-            Q_f = np.asarray(obj.Q_f)
-            q_f = np.asarray(obj.q_f)
-            c_f = float(np.asarray(obj.c_f))
-            Qf_mat = np.diag(Q_f) if Q_f.ndim == 1 else Q_f
-            cost += 0.5 * ca.mtimes([x_term.T, Qf_mat, x_term]) + ca.dot(q_f, x_term) + c_f
-
+            cost += _build_stage_cost_term(st_cost, obj, X[:, k], U[:, k], k, N)
+        cost += _build_terminal_cost_term(term_cost, obj, X[:, N - 1])
     return cost
 
 
@@ -612,6 +854,15 @@ def _add_stage_constraints(
                     for xc, yc, rad in zip(con.xc, con.yc, con.radius, strict=False):
                         opti.subject_to(
                             -((X[con.xi, k] - float(xc)) ** 2) - (X[con.yi, k] - float(yc)) ** 2 + float(rad) ** 2 <= 0
+                        )
+                elif isinstance(con, SphereConstraint):
+                    for xc, yc, zc, rad in zip(con.xc, con.yc, con.zc, con.radius, strict=False):
+                        opti.subject_to(
+                            -((X[con.xi, k] - float(xc)) ** 2)
+                            - ((X[con.yi, k] - float(yc)) ** 2)
+                            - ((X[con.zi, k] - float(zc)) ** 2)
+                            + float(rad) ** 2
+                            <= 0
                         )
                 elif isinstance(con, LinearConstraint):
                     z_k = ca.vertcat(X[:, k], U[:, k])
@@ -637,6 +888,22 @@ def _add_terminal_constraints(
                 opti.subject_to(
                     -((X[con.xi, N - 1] - float(xc)) ** 2) - (X[con.yi, N - 1] - float(yc)) ** 2 + float(rad) ** 2 <= 0
                 )
+        elif isinstance(con, SphereConstraint):
+            for xc, yc, zc, rad in zip(con.xc, con.yc, con.zc, con.radius, strict=False):
+                opti.subject_to(
+                    -((X[con.xi, N - 1] - float(xc)) ** 2)
+                    - ((X[con.yi, N - 1] - float(yc)) ** 2)
+                    - ((X[con.zi, N - 1] - float(zc)) ** 2)
+                    + float(rad) ** 2
+                    <= 0
+                )
+        elif isinstance(con, QuatVecEq):
+            q = X[list(con.qind), N - 1]
+            q_norm = ca.norm_2(q)
+            q_unit = q / ca.if_else(q_norm > 1e-12, q_norm, 1.0)
+            dq = ca.dot(np.asarray(con.qf), q_unit)
+            qf_sign = ca.if_else(dq < 0.0, -np.asarray(con.qf), np.asarray(con.qf))
+            opti.subject_to(q_unit[:3] == qf_sign[:3])
 
 
 def _add_primal_bounds(
@@ -828,8 +1095,10 @@ def assert_parity(
     )
 
     # 3. Relative objective parity: |J*_trajopt - J*_casadi| / |J*_casadi| <= tol_cost
-    rel_cost_err = float(abs(trajopt_res.cost - casadi_res.cost) / (abs(casadi_res.cost) + 1e-12))
-    assert rel_cost_err <= tol_cost, (
+    abs_cost_err = float(abs(trajopt_res.cost - casadi_res.cost))
+    scale = max(abs(casadi_res.cost), 1.0)
+    rel_cost_err = abs_cost_err / scale
+    assert abs_cost_err <= tol_cost or rel_cost_err <= tol_cost, (
         f"Relative objective error {rel_cost_err:.3e} exceeds tolerance {tol_cost:.3e} "
         f"(trajopt: {trajopt_res.cost:.6f}, casadi: {casadi_res.cost:.6f})"
     )

@@ -7,17 +7,24 @@ from cross_verification.casadi_baseline import (
     build_cartpole_casadi,
     build_casadi_from_problem,
     build_dubins_casadi,
+    build_quadrotor_casadi,
 )
 
+from trajopt.benchmarks import (
+    cartpole_swingup_benchmark,
+    dubins_corridor_benchmark,
+    quadrotor_obstacle_benchmark,
+)
 from trajopt.constraints.bounds import ControlBound, StateBound
 from trajopt.constraints.constraint_list import ConstraintList
-from trajopt.constraints.geometric import CircleConstraint
+from trajopt.constraints.geometric import CircleConstraint, SphereConstraint
 from trajopt.constraints.linear import GoalConstraint
-from trajopt.costs.objective import LQRObjective
+from trajopt.costs.objective import LQRObjective, TrackingObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
+from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import solve_ipopt
@@ -440,6 +447,116 @@ def test_pendulum_casadi_parity() -> None:
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
     trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=opts)
     casadi_res = casadi_prob.solve(opts)
+
+    assert_parity(
+        trajopt_res,
+        casadi_res,
+        tol_state=1e-5,
+        tol_control=1e-5,
+        tol_cost=1e-5,
+        tol_feas=1e-4,
+        check_duals=False,
+    )
+
+
+def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
+    """Verify end-to-end parity on Quadrotor obstacle avoidance benchmark with spherical keep-out zones."""
+    pytest.importorskip("casadi")
+    pytest.importorskip("cyipopt")
+
+    prob, state, info = quadrotor_obstacle_benchmark(
+        N=25,
+        dt=0.05,
+        obstacles=((1.5, 1.5, 1.5, 0.5),),
+        u_max=10.0,
+    )
+    x0 = state.x0
+    dt = float(info["dt"])
+
+    casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
+    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
+
+    X_init = state.states()
+    U_init = state.controls()
+
+    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
+    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    casadi_res = casadi_prob.solve(
+        options=solver_opts,
+        initial_X=np.asarray(X_init),
+        initial_U=np.asarray(U_init),
+    )
+
+    assert_parity(
+        trajopt_res,
+        casadi_res,
+        tol_state=1e-5,
+        tol_control=1e-5,
+        tol_cost=1e-5,
+        tol_feas=1e-4,
+        check_duals=True,
+        tol_dual=1e-3,
+    )
+
+
+def test_dubins_corridor_benchmark_casadi_parity() -> None:
+    """Verify end-to-end parity on Dubins car corridor benchmark with trajectory tracking objective."""
+    pytest.importorskip("casadi")
+    pytest.importorskip("cyipopt")
+
+    prob, state, info = dubins_corridor_benchmark(
+        N=25,
+        dt=0.1,
+        y_corridor_bound=0.5,
+    )
+    x0 = state.x0
+    dt = float(info["dt"])
+
+    casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
+    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
+
+    X_init = state.states()
+    U_init = state.controls()
+
+    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
+    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    casadi_res = casadi_prob.solve(
+        options=solver_opts,
+        initial_X=np.asarray(X_init),
+        initial_U=np.asarray(U_init),
+    )
+
+    assert_parity(
+        trajopt_res,
+        casadi_res,
+        tol_state=1e-5,
+        tol_control=1e-5,
+        tol_cost=1e-5,
+        tol_feas=1e-4,
+        check_duals=False,
+    )
+
+
+def test_cartpole_benchmark_casadi_parity() -> None:
+    """Verify end-to-end parity on underactuated Cartpole swing-up benchmark with state position limits."""
+    pytest.importorskip("casadi")
+    pytest.importorskip("cyipopt")
+
+    prob, state, info = cartpole_swingup_benchmark(
+        N=25,
+        dt=0.05,
+        u_bound=20.0,
+        x_pos_bound=2.0,
+    )
+    x0 = state.x0
+    dt = float(info["dt"])
+
+    casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
+    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
+
+    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
+    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
         trajopt_res,

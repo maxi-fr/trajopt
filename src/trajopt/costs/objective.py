@@ -140,6 +140,13 @@ class Objective(eqx.Module):
         """Whether the stage cost Hessian is block diagonal."""
         return self.stage_cost.is_blockdiag
 
+    @property
+    def is_quadratic(self) -> bool:
+        """Whether both stage and terminal costs are quadratic."""
+        return isinstance(self.stage_cost, QuadraticCostFunction) and isinstance(
+            self.terminal_cost, QuadraticCostFunction
+        )
+
     def cost(self, traj: Trajectory) -> jax.Array:
         """Total cost sum_k l_k over the trajectory, as a scalar, in one batched pass."""
         stage_c = self.stage_cost.stage_costs(traj.X[:-1], traj.U, traj.t[:-1])
@@ -172,7 +179,12 @@ class Objective(eqx.Module):
             raise IndexError(msg)
         if k == self.N - 1:
             return self.terminal_cost
-        return jax.tree.map(lambda leaf: leaf[k], self.stage_cost)
+        return jax.tree.map(
+            lambda leaf: leaf[k]
+            if (hasattr(leaf, "shape") and len(leaf.shape) > 0 and leaf.shape[0] == self.N - 1)
+            else leaf,
+            self.stage_cost,
+        )
 
 
 def LQRObjective(  # noqa: N802, PLR0913, PLR0917

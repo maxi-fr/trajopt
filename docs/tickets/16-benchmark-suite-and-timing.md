@@ -21,15 +21,15 @@ the zero-recompile loop; 13 — RigidBody, Quadrotor, and error-state expansions
 
 ## Acceptance criteria
 
-- [ ] All three benchmark problems are formulated and solve to optimality
-- [ ] The quadrotor problem navigates around spherical keep-out zones while tracking an attitude
+- [x] All three benchmark problems are formulated and solve to optimality
+- [x] The quadrotor problem navigates around spherical keep-out zones while tracking an attitude
       reference
-- [ ] The Dubins problem enforces corridor constraints alongside a tracking objective
-- [ ] Each problem has a matching independent CasADi formulation and meets the state, control,
+- [x] The Dubins problem enforces corridor constraints alongside a tracking objective
+- [x] Each problem has a matching independent CasADi formulation and meets the state, control,
       objective, and dual parity tolerances
-- [ ] Timing is reported separately for transcription setup, per-iteration derivative evaluation,
+- [x] Timing is reported separately for transcription setup, per-iteration derivative evaluation,
       solver runtime, and closed-loop rate
-- [ ] Closed-loop measurement reports sustained frequency and latency jitter, not just a mean
-- [ ] Warm-start speedup over a receding horizon is quantified
-- [ ] Benchmarks run under the existing benchmark tooling and can be excluded from ordinary test
+- [x] Closed-loop measurement reports sustained frequency and latency jitter, not just a mean
+- [x] Warm-start speedup over a receding horizon is quantified
+- [x] Benchmarks run under the existing benchmark tooling and can be excluded from ordinary test
       runs

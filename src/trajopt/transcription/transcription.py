@@ -49,7 +49,7 @@ def _cost_fn(
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    if xf is not None and hasattr(problem.obj, "Q") and hasattr(problem.obj, "R") and hasattr(problem.obj, "Q_f"):
+    if xf is not None and getattr(problem.obj, "is_quadratic", False):
         Q = problem.obj.Q
         R = problem.obj.R
         Qf = problem.obj.Q_f
