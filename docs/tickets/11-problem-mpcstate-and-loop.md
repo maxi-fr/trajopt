@@ -22,18 +22,18 @@ invariant and the traced/static split).
 
 ## Acceptance criteria
 
-- [ ] Problem structure and per-step data are distinct types, with nothing that changes per step
+- [x] Problem structure and per-step data are distinct types, with nothing that changes per step
       living in the problem
-- [ ] Model parameters are traced values, so a mass or an obstacle radius can change between
+- [x] Model parameters are traced values, so a mass or an obstacle radius can change between
       solves without recompiling
-- [ ] Dimensions, horizon length, integrator choice, and constraint structure are compile-time
+- [x] Dimensions, horizon length, integrator choice, and constraint structure are compile-time
       metadata
-- [ ] Per-step operations return new values: updating the measurement, updating the goal, and
+- [x] Per-step operations return new values: updating the measurement, updating the goal, and
       shifting the trajectory forward for warm-starting
-- [ ] The goal state lives in exactly one place and is read as an argument by both the objective
+- [x] The goal state lives in exactly one place and is read as an argument by both the objective
       and the goal constraint, with nothing to keep in sync
-- [ ] A closed-loop cartpole run drives the system to its goal from a perturbed initial state
-- [ ] A test asserts the compilation counter stays at zero across 100 consecutive iterations that
+- [x] A closed-loop cartpole run drives the system to its goal from a perturbed initial state
+- [x] A test asserts the compilation counter stays at zero across 100 consecutive iterations that
       vary the measured state, the time, and the goal
-- [ ] Warm-starting from the shifted previous solution measurably reduces solver iterations
+- [x] Warm-starting from the shifted previous solution measurably reduces solver iterations
       compared with a cold start

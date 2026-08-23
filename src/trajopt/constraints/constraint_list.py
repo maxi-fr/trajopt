@@ -7,6 +7,7 @@ import numpy as np
 
 from trajopt.constraints.base import Constraint
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
+from trajopt.constraints.linear import GoalConstraint
 
 BoxBound = (StateBound, ControlBound, BoundConstraint)
 
@@ -39,12 +40,20 @@ class BuiltKnotConstraint(eqx.Module):
         x: jax.Array,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
+        *,
+        xf: jax.Array | None = None,
     ) -> jax.Array:
         """Evaluate the concatenated constraint vector of shape (p,) from x (n,) and u (m,)."""
         if self.p == 0:
             return jnp.zeros(0, dtype=x.dtype)
         uk = None if self.is_terminal else u
-        return jnp.concatenate([c.evaluate(x, uk, t) for c in self.constraints])
+        c_vals = []
+        for c in self.constraints:
+            if isinstance(c, GoalConstraint) and xf is not None:
+                c_vals.append(c.evaluate(x, uk, t, xf=xf))
+            else:
+                c_vals.append(c.evaluate(x, uk, t))
+        return jnp.concatenate(c_vals)
 
     def jacobian(
         self,
@@ -189,9 +198,11 @@ class BuiltConstraintList(eqx.Module):
         x: jax.Array,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
+        *,
+        xf: jax.Array | None = None,
     ) -> jax.Array:
         """Evaluate the fused constraint vector of shape (p_k,) at knot point k."""
-        return self.knot_evaluators[k].evaluate(x, u, t)
+        return self.knot_evaluators[k].evaluate(x, u, t, xf=xf)
 
     def jacobian_knot(
         self,

@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.problem import Problem
+from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     constraint_bounds,
@@ -67,11 +67,13 @@ class _IpoptCallback:
         x0: jax.Array,
         t0: float | jax.Array,
         dt: float | jax.Array,
+        xf: jax.Array | None = None,
     ) -> None:
         self.problem = problem
         self.x0 = x0
         self.t0 = t0
         self.dt = dt
+        self.xf = xf
 
         N = int(problem.N)
         n = int(problem.model.n)
@@ -83,19 +85,21 @@ class _IpoptCallback:
 
     def objective(self, z: np.ndarray) -> float:
         """Evaluate scalar objective value J(z)."""
-        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt))
+        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt, self.xf))
 
     def gradient(self, z: np.ndarray) -> np.ndarray:
         """Evaluate objective gradient nabla J(z)."""
-        return np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64)
+        return np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt, self.xf), dtype=np.float64)
 
     def constraints(self, z: np.ndarray) -> np.ndarray:
         """Evaluate constraint vector c(z)."""
-        return np.asarray(eval_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt), dtype=np.float64)
+        return np.asarray(eval_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64)
 
     def jacobian(self, z: np.ndarray) -> np.ndarray:
         """Evaluate sparse constraint Jacobian values."""
-        return np.asarray(eval_jac_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt), dtype=np.float64)
+        return np.asarray(
+            eval_jac_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64
+        )
 
     def jacobianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         """Return build-time constraint Jacobian sparsity pattern (rows, cols)."""
@@ -111,6 +115,7 @@ class _IpoptCallback:
                 dt=self.dt,
                 obj_factor=obj_factor,
                 lam=jnp.asarray(lagrange),
+                xf=self.xf,
             ),
             dtype=np.float64,
         )
@@ -120,14 +125,15 @@ class _IpoptCallback:
         return self.hess_rows, self.hess_cols
 
 
-def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 7 arguments
+def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     problem: Problem,
-    x0: jax.Array,
+    x0: jax.Array | MPCState,
     *,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
     initial_trajectory: Trajectory | None = None,
     initial_z: jax.Array | None = None,
+    xf: jax.Array | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> IpoptResult:
     """Solve the transcribed optimal control problem using Ipopt via cyipopt.
@@ -136,8 +142,8 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 7 arguments
     ----------
     problem : Problem
         Problem instance containing model, objective, constraints, and horizon.
-    x0 : jax.Array
-        Initial state condition of shape (n,).
+    x0 : jax.Array | MPCState
+        Initial state condition of shape (n,) or an MPCState instance.
     t0 : float | jax.Array, optional
         Initial timestamp. Defaults to 0.0.
     dt : float | jax.Array, optional
@@ -146,6 +152,8 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 7 arguments
         Initial trajectory guess. Defaults to repeating x0 with zero controls.
     initial_z : jax.Array | None, optional
         Flat initial guess vector of shape (N * n + (N - 1) * m,).
+    xf : jax.Array | None, optional
+        Goal state vector. Defaults to None.
     options : Mapping[str, Any] | None, optional
         Solver options passed to cyipopt (e.g. {"max_iter": 200, "tol": 1e-4, "print_level": 0}).
 
@@ -160,25 +168,32 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 7 arguments
     n = int(problem.model.n)
     m = int(problem.model.m)
 
-    x0_arr = jnp.asarray(x0, dtype=jnp.float64)
-    t0_val = float(t0)
-    dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
-
-    # Initial guess
-    if initial_z is not None:
-        z0 = np.asarray(initial_z, dtype=np.float64)
-    elif initial_trajectory is not None:
-        z0 = np.asarray(trajectory_to_z(initial_trajectory.X, initial_trajectory.U), dtype=np.float64)
+    if isinstance(x0, MPCState):
+        # x0 is an MPCState instance
+        x0_arr = jnp.asarray(x0.x0, dtype=jnp.float64)
+        t0_arr = jnp.asarray(x0.t0, dtype=jnp.float64)
+        dt_arr = jnp.broadcast_to(jnp.asarray(x0.dt, dtype=jnp.float64), (N - 1,))
+        xf_val = x0.xf
+        z0 = np.asarray(x0.Z, dtype=np.float64)
     else:
-        X0 = jnp.repeat(x0_arr[None, :], N, axis=0)
-        U0 = jnp.zeros((N - 1, m), dtype=jnp.float64)
-        z0 = np.asarray(trajectory_to_z(X0, U0), dtype=np.float64)
+        x0_arr = jnp.asarray(x0, dtype=jnp.float64)
+        t0_arr = jnp.asarray(t0, dtype=jnp.float64)
+        dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
+        xf_val = None if xf is None else jnp.asarray(xf, dtype=jnp.float64)
+        if initial_z is not None:
+            z0 = np.asarray(initial_z, dtype=np.float64)
+        elif initial_trajectory is not None:
+            z0 = np.asarray(trajectory_to_z(initial_trajectory.X, initial_trajectory.U), dtype=np.float64)
+        else:
+            X0 = jnp.repeat(x0_arr[None, :], N, axis=0)
+            U0 = jnp.zeros((N - 1, m), dtype=jnp.float64)
+            z0 = np.asarray(trajectory_to_z(X0, U0), dtype=np.float64)
 
     # Bounds
     zL, zU = primal_bounds(problem)
     gL, gU = constraint_bounds(problem)
 
-    cb = _IpoptCallback(problem=problem, x0=x0_arr, t0=t0_val, dt=dt_arr)
+    cb = _IpoptCallback(problem=problem, x0=x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
     problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
     nlp = problem_cls(
@@ -203,7 +218,7 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 7 arguments
 
     Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
     X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
-    t_opt = t0_val + jnp.concatenate([jnp.zeros(1), jnp.cumsum(dt_arr)])
+    t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
     opt_traj = Trajectory(
         X=X_opt,

@@ -1,10 +1,14 @@
+from typing import TYPE_CHECKING
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant
 from trajopt.constraints.constraint_list import BuiltKnotConstraint
-from trajopt.problem import Problem
+
+if TYPE_CHECKING:
+    from trajopt.problem import Problem
 
 
 def trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
@@ -59,7 +63,7 @@ def z_to_trajectory(
     return X, U
 
 
-def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+def primal_bounds(problem: "Problem") -> tuple[np.ndarray, np.ndarray]:
     """Extract solver variable limits zL <= Z <= zU from the problem's box bounds.
 
     Parameters
@@ -116,7 +120,7 @@ def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray],
     return gL_list, gU_list
 
 
-def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+def constraint_bounds(problem: "Problem") -> tuple[np.ndarray, np.ndarray]:
     """Compute lower and upper bounds gL <= c(Z) <= gU for the transcribed constraint vector.
 
     Parameters

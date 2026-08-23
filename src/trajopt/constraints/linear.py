@@ -34,7 +34,7 @@ class GoalConstraint(StateConstraint):
     def __init__(
         self,
         n: int,
-        xf: jax.Array | Sequence[float],
+        xf: jax.Array | Sequence[float] | None = None,
         inds: Sequence[int] | None = None,
         m: int = 0,
     ) -> None:
@@ -44,12 +44,15 @@ class GoalConstraint(StateConstraint):
         inds_tuple = tuple(range(n_int)) if inds is None else tuple(int(i) for i in inds)
 
         p = len(inds_tuple)
-        xf_arr = np.asarray(xf, dtype=float)
-        if len(xf_arr) == n_int and p != n_int:
-            xf_arr = xf_arr[list(inds_tuple)]
-        elif len(xf_arr) != p:
-            msg = f"Goal state xf length ({len(xf_arr)}) does not match indices length ({p})."
-            raise ValueError(msg)
+        if xf is None:
+            xf_arr = np.zeros(p, dtype=float)
+        else:
+            xf_arr = np.asarray(xf, dtype=float)
+            if len(xf_arr) == n_int and p != n_int:
+                xf_arr = xf_arr[list(inds_tuple)]
+            elif len(xf_arr) != p:
+                msg = f"Goal state xf length ({len(xf_arr)}) does not match indices length ({p})."
+                raise ValueError(msg)
 
         super().__init__(n=n_int, m=m_int, p=p, cone=ZeroCone())
         self.xf = jnp.asarray(xf_arr)
@@ -61,13 +64,16 @@ class GoalConstraint(StateConstraint):
         x: jax.Array | None = None,
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
+        *,
+        xf: jax.Array | None = None,
     ) -> jax.Array:
         """Evaluate goal defect x[inds] - xf of shape (p,) from x of shape (n,)."""
         del u, t
         if x is None:
             msg = "State vector x is required to evaluate GoalConstraint."
             raise ValueError(msg)
-        return x[self.inds_arr] - self.xf
+        target = self.xf if xf is None else (xf[self.inds_arr] if len(xf) == self.n else xf)
+        return x[self.inds_arr] - target
 
 
 class LinearConstraint(StageConstraint):

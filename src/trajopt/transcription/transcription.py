@@ -37,6 +37,7 @@ def _cost_fn(
     Z: jax.Array,
     t0: float | jax.Array,
     dt: float | jax.Array,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate total trajectory cost scalar J(Z)."""
     N = int(problem.N)
@@ -47,6 +48,20 @@ def _cost_fn(
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
+
+    if xf is not None and hasattr(problem.obj, "Q") and hasattr(problem.obj, "R") and hasattr(problem.obj, "Q_f"):
+        Q = problem.obj.Q
+        R = problem.obj.R
+        Qf = problem.obj.Q_f
+        if problem.obj.is_diag:
+            stage_x = 0.5 * jnp.sum(Q * ((X[:-1] - xf) ** 2), axis=-1)
+            stage_u = 0.5 * jnp.sum(R * (U**2), axis=-1)
+            term_c = 0.5 * jnp.sum(Qf * ((X[-1] - xf) ** 2))
+        else:
+            stage_x = 0.5 * jnp.einsum("ki,kij,kj->k", X[:-1] - xf, Q, X[:-1] - xf)
+            stage_u = 0.5 * jnp.einsum("ki,kij,kj->k", U, R, U)
+            term_c = 0.5 * jnp.einsum("i,ij,j->", X[-1] - xf, Qf, X[-1] - xf)
+        return jnp.sum(stage_x + stage_u) + term_c
 
     stage_costs = problem.obj.stage_cost.stage_costs(X[:-1], U, t_stage)
     term_cost = problem.obj.terminal_cost.evaluate(X[-1], None, t_term)
@@ -59,6 +74,7 @@ def cost_and_grad(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    xf: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate objective value J(Z) and its gradient nabla J(Z).
 
@@ -72,13 +88,15 @@ def cost_and_grad(
         Initial time. Defaults to 0.0.
     dt : float | jax.Array, optional
         Time step duration. Defaults to 0.05.
+    xf : jax.Array | None, optional
+        Goal state vector. Defaults to None.
 
     Returns
     -------
     tuple[jax.Array, jax.Array]
         Scalar cost J(Z) and gradient nabla J(Z) of shape (N * n + (N - 1) * m,).
     """
-    return jax.value_and_grad(lambda z: _cost_fn(problem, z, t0, dt))(Z)
+    return jax.value_and_grad(lambda z: _cost_fn(problem, z, t0, dt, xf))(Z)
 
 
 @eqx.filter_jit
@@ -87,9 +105,10 @@ def eval_f(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate objective value J(Z) as a scalar."""
-    return _cost_fn(problem, Z, t0, dt)
+    return _cost_fn(problem, Z, t0, dt, xf)
 
 
 @eqx.filter_jit
@@ -98,18 +117,21 @@ def eval_grad_f(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate objective gradient nabla J(Z) of shape (N * n + (N - 1) * m,)."""
-    return jax.grad(lambda z: _cost_fn(problem, z, t0, dt))(Z)
+    return jax.grad(lambda z: _cost_fn(problem, z, t0, dt, xf))(Z)
 
 
 @eqx.filter_jit
-def constraints_and_jac(
+def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
     problem: Problem,
     Z: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate constraint vector c(Z) and sparse constraint Jacobian values.
 
@@ -125,11 +147,13 @@ def constraints_and_jac(
         Initial time. Defaults to 0.0.
     dt : float | jax.Array, optional
         Time step duration. Defaults to 0.05.
+    xf : jax.Array | None, optional
+        Goal state vector. Defaults to None.
 
     Returns
     -------
     tuple[jax.Array, jax.Array]
-        Constraint vector c(Z) of shape (P,) and Jacobian nonzeros of shape (nnz_jac,).
+        Constraint vector c(Z) of shape (P,) and sparse Jacobian nonzeros of shape (nnz_jac,).
     """
     N = int(problem.N)
     n = int(problem.model.n)
@@ -147,12 +171,15 @@ def constraints_and_jac(
     c_init = X[0] - x0
     jac_init = jnp.eye(n, dtype=Z.dtype).reshape(-1)
 
-    # 2. Dynamics defects and stage jacobians
+    # 2. Dynamics defects
     def step_dyn(
-        xk: jax.Array, uk: jax.Array, x_next: jax.Array, tk: jax.Array, dtk: jax.Array
+        xk: jax.Array,
+        uk: jax.Array,
+        x_next: jax.Array,
+        tk: jax.Array,
+        dtk: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        fd = discrete_model.discrete_dynamics(xk, uk, tk, dtk)
-        defect = x_next - fd
+        defect = x_next - discrete_model.discrete_dynamics(xk, uk, tk, dtk)
         Ak = discrete_model.state_jacobian(xk, uk, tk, dtk)
         Bk = discrete_model.control_jacobian(xk, uk, tk, dtk)
         J_ku = -jnp.hstack([Ak, Bk])
@@ -171,7 +198,7 @@ def constraints_and_jac(
 
         if k < len(knot_evaluators) and knot_evaluators[k].p > 0:
             evaluator = knot_evaluators[k]
-            val_k = evaluator.evaluate(X[k], U[k], t_stage[k])
+            val_k = evaluator.evaluate(X[k], U[k], t_stage[k], xf=xf)
             jx_k, ju_k = evaluator.jacobian(X[k], U[k], t_stage[k])
             j_k = jnp.hstack([jx_k, ju_k])
             c_list.append(val_k)
@@ -179,7 +206,7 @@ def constraints_and_jac(
 
     if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
         evaluator = knot_evaluators[N - 1]
-        val_term = evaluator.evaluate(X[-1], None, t_term)
+        val_term = evaluator.evaluate(X[-1], None, t_term, xf=xf)
         jx_term, _ = evaluator.jacobian(X[-1], None, t_term)
         c_list.append(val_term)
         jac_list.append(jx_term.reshape(-1))
@@ -189,12 +216,14 @@ def constraints_and_jac(
     return c_all, jac_all
 
 
-def _constraints_fn(
+def _constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
     problem: Problem,
     Z: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate constraint vector c(Z) of shape (P,) without computing Jacobians."""
     N = int(problem.N)
@@ -228,36 +257,40 @@ def _constraints_fn(
     for k in range(N - 1):
         c_list.append(dyn_defects[k])
         if k < len(knot_evaluators) and knot_evaluators[k].p > 0:
-            c_list.append(knot_evaluators[k].evaluate(X[k], U[k], t_stage[k]))
+            c_list.append(knot_evaluators[k].evaluate(X[k], U[k], t_stage[k], xf=xf))
 
     if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
-        c_list.append(knot_evaluators[N - 1].evaluate(X[-1], None, t_term))
+        c_list.append(knot_evaluators[N - 1].evaluate(X[-1], None, t_term, xf=xf))
 
     return jnp.concatenate(c_list)
 
 
 @eqx.filter_jit
-def eval_g(
+def eval_g(  # noqa: PLR0913 -- Constraint callback takes 6 arguments
     problem: Problem,
     Z: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate constraint vector c(Z) of shape (P,)."""
-    return _constraints_fn(problem, Z, x0, t0, dt)
+    return _constraints_fn(problem, Z, x0, t0, dt, xf=xf)
 
 
 @eqx.filter_jit
-def eval_jac_g(
+def eval_jac_g(  # noqa: PLR0913 -- Constraint Jacobian callback takes 6 arguments
     problem: Problem,
     Z: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate sparse constraint Jacobian values of shape (nnz_jac,)."""
-    _, jac_val = constraints_and_jac(problem, Z, x0, t0, dt)
+    _, jac_val = constraints_and_jac(problem, Z, x0, t0, dt, xf=xf)
     return jac_val
 
 
@@ -313,7 +346,7 @@ def _term_lagrangian_hessian(  # noqa: PLR0913 -- Terminal knot Lagrangian takes
 
 
 @eqx.filter_jit
-def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 6 arguments
+def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     problem: Problem,
     Z: jax.Array,
     *,
@@ -321,6 +354,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 6 arguments
     dt: float | jax.Array = 0.05,
     obj_factor: float | jax.Array = 1.0,
     lam: jax.Array | None = None,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the block-diagonal Lagrangian Hessian.
 
@@ -338,12 +372,15 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 6 arguments
         Objective scale factor sigma_f. Defaults to 1.0.
     lam : jax.Array | None, optional
         Constraint multiplier vector of shape (P,). Defaults to zeros.
+    xf : jax.Array | None, optional
+        Goal state vector. Defaults to None.
 
     Returns
     -------
     jax.Array
         Lower-triangular nonzeros of the Lagrangian Hessian of shape (nnz_hess,).
     """
+    del xf
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -424,7 +461,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 6 arguments
 
 
 @eqx.filter_jit
-def eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 6 arguments
+def eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 7 arguments
     problem: Problem,
     Z: jax.Array,
     *,
@@ -432,6 +469,7 @@ def eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 6 arguments
     dt: float | jax.Array = 0.05,
     obj_factor: float | jax.Array = 1.0,
     lam: jax.Array | None = None,
+    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the Lagrangian Hessian."""
-    return hessian(problem, Z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam)
+    return hessian(problem, Z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, xf=xf)
