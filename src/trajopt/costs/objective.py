@@ -180,9 +180,9 @@ class Objective(eqx.Module):
         if k == self.N - 1:
             return self.terminal_cost
         return jax.tree.map(
-            lambda leaf: leaf[k]
-            if (hasattr(leaf, "shape") and len(leaf.shape) > 0 and leaf.shape[0] == self.N - 1)
-            else leaf,
+            lambda leaf: (
+                leaf[k] if (hasattr(leaf, "shape") and len(leaf.shape) > 0 and leaf.shape[0] == self.N - 1) else leaf
+            ),
             self.stage_cost,
         )
 

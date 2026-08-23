@@ -20,12 +20,12 @@ specification as a whole for the feature claims it makes.
 
 ## Acceptance criteria
 
-- [ ] Every code example in the README executes as written against the current API
-- [ ] The quick-start example solves a small trajectory optimization problem end to end rather
+- [x] Every code example in the README executes as written against the current API
+- [x] The quick-start example solves a small trajectory optimization problem end to end rather
       than demonstrating an isolated primitive
-- [ ] The named type checker matches the one actually configured in the project
-- [ ] Test invocation paths match the real test layout
-- [ ] Dependency groups described in the README match those declared in the project metadata
-- [ ] The architecture section links to the specification at its current location
-- [ ] A test or lint step executes the README examples, so this class of drift is caught rather
+- [x] The named type checker matches the one actually configured in the project
+- [x] Test invocation paths match the real test layout
+- [x] Dependency groups described in the README match those declared in the project metadata
+- [x] The architecture section links to the specification at its current location
+- [x] A test or lint step executes the README examples, so this class of drift is caught rather
       than rediscovered

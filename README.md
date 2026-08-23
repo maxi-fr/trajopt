@@ -91,7 +91,7 @@ uv sync --all-extras
 Available dependency groups in `pyproject.toml`:
 
 - `solvers`: Includes `cyipopt`, `osqp`, and `clarabel`.
-- `dev`: Includes `ruff`, `mypy`, `pytest`, and `pytest-benchmark`.
+- `dev`: Includes development tools (`ruff`, `ty`, `pytest`, `pytest-benchmark`, `pytest-xdist`, `marimo`, `casadi`, `pre-commit`).
 - `test`: Includes `juliacall` for cross-verification.
 
 ---
@@ -117,45 +117,48 @@ Pkg.instantiate()
 
 ## Quick Start (Python)
 
-### Conic Projections & Constraints
+### Trajectory Optimization with Ipopt
 
 ```python
-import numpy as np
-from trajopt.cones import SecondOrderCone, NegativeOrthant
-
-# Create a 3D Second-Order Cone (Lorentz cone: ||x[0:2]||_2 <= x[2])
-soc = SecondOrderCone(dim=3)
-v = np.array([3.0, 4.0, 2.0])
-
-# Project point onto cone
-proj = soc.project(v)
-print("Projection:", proj)
-
-# Compute projection Jacobian / derivative
-jac = soc.jacobian(v)
-print("Jacobian shape:", jac.shape)
-```
-
-### Solving with Ipopt
-
-```python
-import trajopt  # Automatically configures Ipopt DLL paths on Windows
-import cyipopt
+import jax.numpy as jnp
 import numpy as np
 
+from trajopt.constraints.bounds import ControlBound
+from trajopt.constraints.constraint_list import ConstraintList
+from trajopt.constraints.linear import GoalConstraint
+from trajopt.costs.objective import LQRObjective
+from trajopt.dynamics.integrators import RK4
+from trajopt.models.pendulum import Pendulum
+from trajopt.problem import MPCState, Problem, controls, solve, states
 
-# Minimize 2D Rosenbrock function
-def objective(x):
-    return (1.0 - x[0]) ** 2 + 100.0 * (x[1] - x[0] ** 2) ** 2
+# 1. Define model and problem dimensions
+model = Pendulum()
+n, m, N = model.n, model.m, 21
+dt = 0.05
 
+# 2. Define objective (LQR tracking towards upright equilibrium [pi, 0])
+xf = jnp.array([np.pi, 0.0])
+Q = jnp.diag(jnp.array([10.0, 1.0]))
+R = jnp.diag(jnp.array([0.1]))
+Qf = jnp.diag(jnp.array([100.0, 10.0]))
+obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
 
-def gradient(x):
-    return np.array([-2.0 * (1.0 - x[0]) - 400.0 * x[0] * (x[1] - x[0] ** 2), 200.0 * (x[1] - x[0] ** 2)])
+# 3. Add constraints (torque limits and terminal goal)
+constraints = ConstraintList(n=n, m=m, N=N)
+constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
+constraints.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
 
+# 4. Build problem and initialize MPC state
+prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
+x0 = jnp.array([0.0, 0.0])
+state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
 
-res = cyipopt.minimize_ipopt(objective, [0.0, 0.0], jac=gradient)
-print("Converged:", res.success)
-print("Optimal Solution:", res.x)
+# 5. Solve the trajectory optimization problem with Ipopt
+opt_state = solve(prob, state)
+X = states(opt_state)
+U = controls(opt_state)
+
+print(f"Optimal final state: {np.asarray(X[-1])}")
 ```
 
 ---
@@ -166,17 +169,23 @@ Run the test suite with `pytest`:
 
 ```bash
 # Run unit tests
-uv run pytest tests_py/unit
+uv run pytest test/unit
 
-# Run all tests (including Julia cross-verification if Julia runtime is present)
+# Run all tests (deselecting Julia cross-verification if Julia runtime is absent)
+uv run pytest -m "not julia"
+
+# Run full test suite including Julia cross-verification
 uv run pytest
 ```
 
-Run code formatting and type checking:
+Run type checking and linting:
 
 ```bash
+# Type checking
+uv run ty check
+
+# Code formatting and linting
 uv run ruff check .
-uv run mypy python/trajopt
 ```
 
 ---
@@ -185,7 +194,7 @@ uv run mypy python/trajopt
 
 For a detailed technical overview of discrete optimal control representations, expansion engines, rotation groups on $\mathrm{SO}(3)$, and NLP transcriptions, refer to:
 
-- [Trajectory Optimization Technical Specification](TRAJECTORY_OPTIMIZATION_SPEC.md)
+- [Trajectory Optimization Technical Specification](docs/TRAJECTORY_OPTIMIZATION_SPEC.md)
 - [TrajectoryOptimization.jl Documentation](https://RoboticExplorationLab.github.io/TrajectoryOptimization.jl/stable)
 
 ---
