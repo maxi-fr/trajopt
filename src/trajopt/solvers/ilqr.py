@@ -1,10 +1,15 @@
+from typing import NamedTuple
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 
+from trajopt.costs.objective import Objective
+from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.solvers.options import SolverOptions
+from trajopt.solvers.options import SolverOptions, TerminationStatus
+from trajopt.trajectory import Trajectory
 
 
 class DynamicRegularization(eqx.Module):
@@ -226,4 +231,289 @@ def backward_pass(
         dV=final_sweep.dV,
         regularization=final_reg,
         failed=final_sweep.failed,
+    )
+
+
+class RolloutResult(eqx.Module):
+    """Closed-loop rollout output: the simulated trajectory and its first guard failure.
+
+    Parameters
+    ----------
+    X : jax.Array
+        Rolled-out states of shape (N, n).
+    U : jax.Array
+        Rolled-out controls of shape (N-1, m).
+    failed : jax.Array
+        Whether `‖x‖∞` or `‖u‖∞` exceeded `max_state_value` / `max_control_value`, or went
+        NaN, at any knot, as a bool scalar.
+    status : jax.Array
+        `TerminationStatus.STATE_LIMIT` or `CONTROL_LIMIT` for the first knot that failed, or
+        `UNSOLVED` if none did, as an int32 scalar (matching `Altro.rollout!`'s reuse of
+        `UNSOLVED` to mean "no limit hit").
+    """
+
+    X: jax.Array
+    U: jax.Array
+    failed: jax.Array
+    status: jax.Array
+
+
+def rollout_closed_loop(  # noqa: PLR0913, PLR0917 -- model, nominal, gains, alpha, and options are all load-bearing
+    model: AbstractModel,
+    nominal: Trajectory,
+    K: jax.Array,
+    d: jax.Array,
+    alpha: jax.Array | float,
+    options: SolverOptions,
+) -> RolloutResult:
+    """Closed-loop rollout `u_k = ubar_k + K_k @ dx_k + alpha*d_k`, matching `Altro.rollout!`.
+
+    `dx_k` is `model.state_diff(xbar_k, x_nom_k)`: the error between the trajectory being
+    rolled out and `nominal` (Altro's `Z`, fixed for the whole line search), not the previous
+    knot's state. A `lax.scan` cannot stop early on a guard violation the way `rollout!` does
+    (reference §7.3 item 5), so every knot is always computed; `failed`/`status` latch onto the
+    first knot that violates a guard and later knots' garbage values are meant to be discarded
+    by the caller, not trusted.
+
+    Parameters
+    ----------
+    model : AbstractModel
+        Dynamics model; continuous models are discretized with RK4.
+    nominal : Trajectory
+        Reference trajectory `Z` supplying `X`, `U`, `t`, `dt` for the feedback law and guards'
+        step timing. Only `X[0]` seeds the rollout; the rest of `nominal.X` feeds `state_diff`.
+    K : jax.Array
+        Feedback gains of shape `(N-1, m, ne)`.
+    d : jax.Array
+        Feedforward terms of shape `(N-1, m)`.
+    alpha : jax.Array | float
+        Line-search step length scaling the feedforward term.
+    options : SolverOptions
+        Supplies `max_state_value` and `max_control_value`.
+
+    Returns
+    -------
+    RolloutResult
+        The rolled-out `X`, `U`, and the first guard failure, if any.
+    """
+    discrete_model = model.discretize()
+    X_nom, U_nom, t, dt = nominal.X, nominal.U, nominal.t, nominal.dt
+    x0 = X_nom[0]
+
+    def step(
+        carry: tuple[jax.Array, jax.Array, jax.Array],
+        inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+        xbar_k, failed, status = carry
+        x_nom_k, u_nom_k, K_k, d_k, t_k, dt_k = inputs
+
+        dx_k = discrete_model.state_diff(xbar_k, x_nom_k)
+        u_k = u_nom_k + K_k @ dx_k + alpha * d_k
+        x_next = discrete_model.discrete_dynamics(xbar_k, u_k, t_k, dt_k)
+
+        max_x = jnp.max(jnp.abs(x_next))
+        state_bad = (max_x > options.max_state_value) | jnp.isnan(max_x)
+        max_u = jnp.max(jnp.abs(u_k))
+        control_bad = (max_u > options.max_control_value) | jnp.isnan(max_u)
+
+        this_status = jnp.where(
+            state_bad,
+            jnp.int32(TerminationStatus.STATE_LIMIT),
+            jnp.where(control_bad, jnp.int32(TerminationStatus.CONTROL_LIMIT), jnp.int32(TerminationStatus.UNSOLVED)),
+        )
+        new_failed = failed | state_bad | control_bad
+        new_status = jnp.where(failed, status, this_status)
+
+        return (x_next, new_failed, new_status), (x_next, u_k)
+
+    init_carry = (x0, jnp.asarray(False), jnp.int32(TerminationStatus.UNSOLVED))  # noqa: FBT003 -- traced bool scalar
+    (_, failed, status), (X_rest, U_out) = jax.lax.scan(
+        step,
+        init_carry,
+        (X_nom[:-1], U_nom, K, d, t[:-1], dt),
+    )
+    X_out = jnp.concatenate([x0[None], X_rest], axis=0)
+    return RolloutResult(X=X_out, U=U_out, failed=failed, status=status)
+
+
+class ForwardPassResult(eqx.Module):
+    """Output of the iLQR line search, matching `Altro.forwardpass!`.
+
+    Parameters
+    ----------
+    trajectory : Trajectory
+        The accepted `Z̄` on success, or the restored `Z` (`nominal`) when no step is taken
+        (the expected-decrease-too-small exit, or line-search exhaustion).
+    alpha : jax.Array
+        The accepted step length, or 0 when no step is taken.
+    J : jax.Array
+        The accepted cost, `J_prev` when no step is taken, or NaN when the final cost still
+        exceeds `J_prev` (`COST_INCREASE`).
+    expected : jax.Array
+        The last-computed expected decrease `-alpha*(dV[0] + alpha*dV[1])`.
+    z : jax.Array
+        The last-computed Armijo-style ratio `(J_prev - J) / expected`.
+    ls_failed : jax.Array
+        Whether the search exhausted `options.iterations_linesearch` without accepting a step.
+    status : jax.Array
+        `TerminationStatus.COST_INCREASE` if the final cost exceeds `J_prev`, else `UNSOLVED`.
+    regularization : DynamicRegularization
+        Regularization state after the search (increased on a no-step or exhaustion exit).
+    """
+
+    trajectory: Trajectory
+    alpha: jax.Array
+    J: jax.Array
+    expected: jax.Array
+    z: jax.Array
+    ls_failed: jax.Array
+    status: jax.Array
+    regularization: DynamicRegularization
+
+
+class _LineSearchCarry(NamedTuple):
+    i: jax.Array
+    alpha: jax.Array
+    done: jax.Array
+    ls_failed: jax.Array
+    J: jax.Array
+    z: jax.Array
+    expected: jax.Array
+    X: jax.Array
+    U: jax.Array
+    rho: jax.Array
+    drho: jax.Array
+
+
+def _line_search_step(  # noqa: PLR0913, PLR0917 -- one iteration needs the full line-search context
+    carry: _LineSearchCarry,
+    model: AbstractModel,
+    obj: Objective,
+    nominal: Trajectory,
+    K: jax.Array,
+    d: jax.Array,
+    dV: jax.Array,
+    J_prev: jax.Array,
+    options: SolverOptions,
+) -> _LineSearchCarry:
+    """One iteration of `Altro.forwardpass!`'s line search loop, all four exits included.
+
+    Reproduces the control flow exactly rather than as mutually exclusive branches: a rollout
+    guard failure only decays `alpha` and skips everything else (finding J's "continue" quirk);
+    otherwise cost, the expected decrease, and the Armijo-style ratio `z` are always
+    recomputed, the no-step and iteration-exhaustion checks are independent (both can fire on
+    the same iteration and each bumps regularization, per reference §7.3 item 3), and only
+    acceptance or exhaustion (not a guard failure) ends the search.
+    """
+    reg = DynamicRegularization(rho=carry.rho, drho=carry.drho)
+    rollout = rollout_closed_loop(model, nominal, K, d, carry.alpha, options)
+    good = ~rollout.failed
+
+    J_roll = obj.cost(Trajectory(X=rollout.X, U=rollout.U, t=nominal.t, dt=nominal.dt))
+    expected_c = -carry.alpha * (dV[0] + carry.alpha * dV[1])
+
+    no_step = good & (expected_c > 0) & (expected_c < options.expected_decrease_tolerance)
+    z_c = jnp.where(no_step, jnp.inf, jnp.where(expected_c > 0, (J_prev - J_roll) / expected_c, -1.0))
+
+    accept = good & (z_c >= options.line_search_lower_bound) & (z_c <= options.line_search_upper_bound)
+    is_max_iter = carry.i + 1 == options.iterations_linesearch
+    exhausted = good & ~accept & is_max_iter
+
+    reg_after_no_step = jax.tree.map(
+        lambda new, old: jnp.where(no_step, new, old), increase_regularization(reg, options), reg
+    )
+    reg_after_exhaustion = jax.tree.map(
+        lambda new, old: jnp.where(exhausted, new, old),
+        increase_regularization(reg_after_no_step, options),
+        reg_after_no_step,
+    )
+    final_reg = DynamicRegularization(
+        rho=jnp.where(exhausted, reg_after_exhaustion.rho + options.bp_reg_fp, reg_after_exhaustion.rho),
+        drho=reg_after_exhaustion.drho,
+    )
+
+    should_exit = good & (no_step | accept | exhausted)
+
+    new_alpha = jnp.where(
+        should_exit, jnp.where(accept, carry.alpha, 0.0), carry.alpha * options.line_search_decrease_factor
+    )
+    new_J = jnp.where(should_exit, jnp.where(accept, J_roll, J_prev), carry.J)
+    new_X = jnp.where(should_exit, jnp.where(accept, rollout.X, nominal.X), carry.X)
+    new_U = jnp.where(should_exit, jnp.where(accept, rollout.U, nominal.U), carry.U)
+    new_ls_failed = carry.ls_failed | exhausted
+    new_done = carry.done | should_exit
+
+    return _LineSearchCarry(
+        i=carry.i + 1,
+        alpha=new_alpha,
+        done=new_done,
+        ls_failed=new_ls_failed,
+        J=new_J,
+        z=jnp.where(good, z_c, carry.z),
+        expected=jnp.where(good, expected_c, carry.expected),
+        X=new_X,
+        U=new_U,
+        rho=jnp.where(good, final_reg.rho, carry.rho),
+        drho=jnp.where(good, final_reg.drho, carry.drho),
+    )
+
+
+def forward_pass(  # noqa: PLR0913, PLR0917 -- model, objective, nominal, policy, dV, J_prev, reg, options all needed
+    model: AbstractModel,
+    obj: Objective,
+    nominal: Trajectory,
+    K: jax.Array,
+    d: jax.Array,
+    dV: jax.Array,
+    J_prev: jax.Array,
+    regularization: DynamicRegularization,
+    options: SolverOptions,
+) -> ForwardPassResult:
+    """Line search over `alpha` for the affine policy `(K, d)`, matching `Altro.forwardpass!`.
+
+    Runs `rollout_closed_loop` under `lax.while_loop`, up to `options.iterations_linesearch`
+    times, halving `alpha` between attempts. See `_line_search_step` for the four exits (guard
+    retry, no-step, acceptance, exhaustion) and reference §4.3 / §7.3 item 3 for why this is not
+    a plain Armijo backtrack: the acceptance ratio `z = (J_prev - J) / expected` has both a
+    lower and an upper bound. If the final cost still exceeds `J_prev` -- including the
+    guard-exhaustion quirk where every rollout fails and `J` never leaves `Inf` (finding J) --
+    the returned cost is NaN and `status` is `COST_INCREASE`; ticket 27's convergence check must
+    treat that NaN as non-convergence, not as success.
+    """
+
+    def cond(carry: _LineSearchCarry) -> jax.Array:
+        return (~carry.done) & (carry.i < options.iterations_linesearch)
+
+    def body(carry: _LineSearchCarry) -> _LineSearchCarry:
+        return _line_search_step(carry, model, obj, nominal, K, d, dV, J_prev, options)
+
+    init = _LineSearchCarry(
+        i=jnp.int32(0),
+        alpha=jnp.asarray(1.0, dtype=J_prev.dtype),
+        done=jnp.asarray(False),  # noqa: FBT003 -- traced bool scalar
+        ls_failed=jnp.asarray(False),  # noqa: FBT003 -- traced bool scalar
+        J=jnp.asarray(jnp.inf, dtype=J_prev.dtype),
+        z=jnp.asarray(jnp.inf, dtype=J_prev.dtype),
+        expected=jnp.asarray(jnp.inf, dtype=J_prev.dtype),
+        X=nominal.X,
+        U=nominal.U,
+        rho=regularization.rho,
+        drho=regularization.drho,
+    )
+
+    final = jax.lax.while_loop(cond, body, init)
+
+    cost_increase = J_prev < final.J
+    reported_J = jnp.where(cost_increase, jnp.nan, final.J)
+    status = jnp.where(cost_increase, jnp.int32(TerminationStatus.COST_INCREASE), jnp.int32(TerminationStatus.UNSOLVED))
+
+    return ForwardPassResult(
+        trajectory=Trajectory(X=final.X, U=final.U, t=nominal.t, dt=nominal.dt),
+        alpha=final.alpha,
+        J=reported_J,
+        expected=final.expected,
+        z=final.z,
+        ls_failed=final.ls_failed,
+        status=status,
+        regularization=DynamicRegularization(rho=final.rho, drho=final.drho),
     )
