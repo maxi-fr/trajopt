@@ -24,9 +24,18 @@ the zero-recompile loop; 13 — RigidBody, Quadrotor, and error-state expansions
 - [x] All three benchmark problems are formulated and solve to optimality
 - [x] The quadrotor problem navigates around spherical keep-out zones while tracking an attitude
       reference
-- [x] The Dubins problem enforces corridor constraints alongside a tracking objective
+- [x] The Dubins problem enforces corridor constraints alongside a tracking objective, and the
+      corridor is active rather than merely satisfied: the tracking reference bulges laterally
+      past it, so several knots sit on the wall carrying nonzero multipliers. The cartpole's
+      cart position limit is tightened until it binds for the same reason
 - [x] Each problem has a matching independent CasADi formulation and meets the state, control,
-      objective, and dual parity tolerances
+      objective, and dual parity tolerances. Dual parity is asserted block by block over the rows
+      the two formulations share — the initial condition, the dynamics costates, and the path and
+      terminal constraint rows. Box bounds are excluded: trajopt hands them to Ipopt as variable
+      limits, whose multipliers arrive as `mu` rather than `mult_g`, while the CasADi baseline
+      gives them general constraint rows, collapsed to a knot-invariant envelope and ordered by
+      variable rather than by knot. Those rows are a different set, not a permutation of the same
+      one
 - [x] Timing is reported separately for transcription setup, per-iteration derivative evaluation,
       solver runtime, and closed-loop rate
 - [x] Closed-loop measurement reports sustained frequency and latency jitter, not just a mean

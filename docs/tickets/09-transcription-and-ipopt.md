@@ -23,7 +23,9 @@ primal vector is not the storage of record).
       interleaving is owned by the transcription layer alone — trajectory storage stays
       struct-of-arrays
 - [x] The constraint vector composes the initial-state condition, the dynamics defects, and the
-      stage constraints in a documented order
+      stage constraints in a documented order. Box bounds are absent from it: `ConstraintList.build`
+      hoists them into the primal variable limits, since a duplicated bound row has gradient `e_i`
+      — the same as the variable bound already active — and so degenerates the active set
 - [x] The sparsity pattern is computed at build time as a pure function of the dimensions, using
       host arrays rather than traced ones
 - [x] Per-knot Jacobian blocks are treated as dense; structural zeros inside a block are not

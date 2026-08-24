@@ -30,12 +30,6 @@ def ham_mul(a: Sequence[float] | np.ndarray | jax.Array, b: Sequence[float] | np
     return np.array([*(wa * vb + wb * va + np.cross(va, vb)), wa * wb - float(np.dot(va, vb))])
 
 
-def ham_conj(a: Sequence[float] | np.ndarray | jax.Array) -> np.ndarray:
-    """Hamilton conjugate [-v, w]."""
-    arr = np.asarray(a, float)
-    return np.array([-arr[0], -arr[1], -arr[2], arr[3]])
-
-
 def ham_matrix(a: Sequence[float] | np.ndarray | jax.Array) -> np.ndarray:
     """Active rotation matrix of a unit Hamilton quaternion, scalar-last."""
     v, w = np.asarray(a, float)[:3], float(np.asarray(a, float)[3])
@@ -133,6 +127,11 @@ def test_jpl_product_and_associativity():
     q2 = jpl_axis_angle([0.0, 1.0, 0.0], 0.8)
     q3 = jpl_axis_angle([0.0, 0.0, 1.0], -0.3)
     np.testing.assert_allclose(((q1 * q2) * q3).to_array(), (q1 * (q2 * q3)).to_array(), atol=1e-15)
+
+    # The passive matrix and the JPL product are a matched pair: R(a (x) b) == R(a) R(b).
+    # Under the opposite (Hamilton) pairing this order reverses, so the check discriminates.
+    for a, b in random_pairs(seed=11, count=20):
+        np.testing.assert_allclose((a * b).to_rot_mat(), a.to_rot_mat() @ b.to_rot_mat(), atol=1e-14)
 
 
 def test_jpl_conjugate_and_inverse():
@@ -336,3 +335,77 @@ def test_quaternion_autodiff():
     g = grad_fn(q0.to_array(), target)
     assert g.shape == (4,)
     assert not jnp.any(jnp.isnan(g))
+
+
+# --------------------------------------------------------------------------------------
+# Attitude Jacobian: left JPL vs right Hamilton perturbation
+# Derived in docs/attitude_jacobian_perturbation.md
+# --------------------------------------------------------------------------------------
+
+# Scalar-last to scalar-first re-index, the rho of the derivation, acting on rows.
+T_QUAT = np.array([[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]])
+
+# All four components nonzero and distinct, so the order-preserving rival is refuted by 1.006.
+Q_INFORMATIVE = np.array([0.2, -0.5, 0.3, 0.78]) / np.linalg.norm([0.2, -0.5, 0.3, 0.78])
+
+# Rotations.jl `∇differential(QuatRotation(rho q))` at Q_INFORMATIVE, read off a live run.
+NABLA_DIFFERENTIAL_JL = np.array(
+    [
+        [-0.20117019055664218, 0.5029254763916055, -0.30175528583496325],
+        [0.7845637431709044, -0.30175528583496325, -0.5029254763916055],
+        [0.30175528583496325, 0.7845637431709044, -0.20117019055664218],
+        [0.5029254763916055, 0.20117019055664218, 0.7845637431709044],
+    ]
+)
+
+
+def _rival_xi(q_arr: np.ndarray) -> np.ndarray:
+    """Build the order-preserving rival to Xi(q), a right rather than left JPL perturbation."""
+    v, w = q_arr[:3], q_arr[3]
+    skew = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+    return np.vstack([w * np.eye(3) - skew, -v[None, :]])
+
+
+def test_attitude_jacobian_matches_julia_right_hamilton_perturbation():
+    """Assert T Xi(q) equals Rotations.∇differential(rho q), the derivation's shipping statement."""
+    q = Quaternion.from_array(jnp.asarray(Q_INFORMATIVE))
+    np.testing.assert_allclose(T_QUAT @ np.asarray(q.xi()), NABLA_DIFFERENTIAL_JL, atol=1e-15)
+
+    # With the error map folded in, the same one half stands on both sides.
+    np.testing.assert_allclose(T_QUAT @ np.asarray(attitude_jacobian(q)), 0.5 * NABLA_DIFFERENTIAL_JL, atol=1e-15)
+
+
+def test_attitude_jacobian_test_case_refutes_the_order_preserving_rival():
+    """Assert the chosen quaternion separates the left-perturbation Jacobian from the right-perturbation one."""
+    rival = _rival_xi(Q_INFORMATIVE)
+    separation = np.max(np.abs(T_QUAT @ rival - NABLA_DIFFERENTIAL_JL))
+    assert separation > 1.0  # twelve orders of magnitude above the 1e-12 the cross-test asserts at
+
+
+def test_attitude_jacobian_identity_quaternion_is_degenerate():
+    """Pin the identity rotation as uninformative, so it is never mistaken for evidence.
+
+    At v = 0 the two perturbation hypotheses differ by 2 [v]_x = 0 and coincide exactly, so this
+    quaternion passes against a wrong implementation. It is asserted here only to stay labelled.
+    """
+    q_identity = np.array([0.0, 0.0, 0.0, 1.0])
+    xi_shipped = np.asarray(Quaternion.from_array(jnp.asarray(q_identity)).xi())
+    np.testing.assert_array_equal(xi_shipped, _rival_xi(q_identity))
+
+
+def test_attitude_jacobian_one_half_is_the_error_map_derivative():
+    """Assert G(q) = 0.5 Xi(q) is d q / d(delta theta) under this port's own error map."""
+    q = Quaternion.from_array(jnp.asarray(Q_INFORMATIVE))
+
+    def q_of_theta(theta: np.ndarray) -> np.ndarray:
+        a = jnp.asarray(theta) / 2.0
+        dq = Quaternion(a, jnp.sqrt(1.0 - a @ a))
+        return np.asarray((dq * q).to_array())
+
+    eps = 1e-6
+    columns = [(q_of_theta(eps * e) - q_of_theta(-eps * e)) / (2.0 * eps) for e in np.eye(3)]
+    np.testing.assert_allclose(np.column_stack(columns), np.asarray(attitude_jacobian(q)), atol=1e-9)
+
+    # The error map that fixes the factor: delta theta = 2 vec(q (x) q_ref^-1).
+    delta_theta = np.asarray(error_map(Quaternion(q.vec, q.scalar), q))
+    np.testing.assert_allclose(delta_theta, np.zeros(3), atol=1e-15)

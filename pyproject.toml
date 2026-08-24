@@ -46,6 +46,7 @@ testpaths = ["test"]
 markers = [
     "julia: tests requiring Julia runtime and juliacall cross-verification (deselect with '-m \"not julia\"')",
     "benchmark: benchmark timing and performance tests (deselect with '-m \"not benchmark\"')",
+    "slow: correctness tests dominated by full nonlinear solves (deselect with '-m \"not slow\"')",
 ]
 
 [tool.uv]

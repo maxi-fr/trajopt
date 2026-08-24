@@ -40,8 +40,10 @@ geodesic quaternion cost), section 11 (expansions), section 14 (models).
 - [x] The left-versus-right perturbation relation between the Python and Julia attitude Jacobians
       is derived symbolically and verified numerically on a non-degenerate pair, before the
       attitude-Jacobian cross-test asserts anything
+      — `docs/attitude_jacobian_perturbation.md`, written after the cross-test rather than before
+      it; the cross-test now cites it instead of restating it
 - [x] A quadrotor model is implemented with every parameter matched to RobotZoo, including the
-      motor mixing matrix
+      motor mixing matrix and the `max(0, kf * w)` rotor-force clamp
 - [x] The quadrotor cross-test converts both the state vector and the Jacobians, since RobotZoo
       stores its quaternion in the opposite convention and ordering
 - [x] The expansion engine applies the attitude Jacobian sandwich to dynamics, cost, and

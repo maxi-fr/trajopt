@@ -10,10 +10,11 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     compute_constraint_violation,
     constraint_bounds,
+    parse_solver_initial_state,
     primal_bounds,
-    trajectory_to_z,
     z_to_trajectory,
 )
+from trajopt.transcription.result import split_bound_duals, warm_start_duals
 from trajopt.transcription.sparsity import (
     hessian_sparsity_pattern,
     jacobian_sparsity_pattern,
@@ -27,6 +28,7 @@ from trajopt.transcription.transcription import (
 )
 
 _SUCCESS_STATUSES = {0, 1}  # 0: Solve_Succeeded, 1: Solved_To_Acceptable_Level
+_EMPTY = np.zeros(0, dtype=np.float64)
 
 
 class IpoptResult(NamedTuple):
@@ -52,6 +54,11 @@ class IpoptResult(NamedTuple):
         Number of solver iterations. Defaults to 0.
     constraint_violation : float, optional
         Maximum constraint violation across all constraints. Defaults to 0.0.
+    lam : np.ndarray, optional
+        Constraint duals in canonical row order, of shape ``(P,)``. Defaults to empty.
+    mu : np.ndarray, optional
+        Signed bound duals ``mult_x_U - mult_x_L`` of shape ``(N * n + (N - 1) * m,)``.
+        Defaults to empty.
     """
 
     trajectory: Trajectory
@@ -63,6 +70,8 @@ class IpoptResult(NamedTuple):
     info: dict[str, Any]
     iterations: int = 0
     constraint_violation: float = 0.0
+    lam: np.ndarray = _EMPTY
+    mu: np.ndarray = _EMPTY
 
 
 class _IpoptCallback:
@@ -127,7 +136,9 @@ class _IpoptCallback:
                 jnp.asarray(z),
                 t0=self.t0,
                 dt=self.dt,
-                obj_factor=obj_factor,
+                # As a Python float this is static under filter_jit, so each objective scaling
+                # factor Ipopt picks would compile the Hessian afresh.
+                obj_factor=jnp.asarray(obj_factor, dtype=jnp.float64),
                 lam=jnp.asarray(lagrange),
                 xf=self.xf,
             ),
@@ -182,26 +193,18 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     n = int(problem.model.n)
     m = int(problem.model.m)
 
-    if isinstance(x0, MPCState):
-        # x0 is an MPCState instance
-        x0_arr = jnp.asarray(x0.x0, dtype=jnp.float64)
-        t0_arr = jnp.asarray(x0.t0, dtype=jnp.float64)
-        dt_arr = jnp.broadcast_to(jnp.asarray(x0.dt, dtype=jnp.float64), (N - 1,))
-        xf_val = x0.xf
-        z0 = np.asarray(x0.Z, dtype=np.float64)
-    else:
-        x0_arr = jnp.asarray(x0, dtype=jnp.float64)
-        t0_arr = jnp.asarray(t0, dtype=jnp.float64)
-        dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
-        xf_val = None if xf is None else jnp.asarray(xf, dtype=jnp.float64)
-        if initial_z is not None:
-            z0 = np.asarray(initial_z, dtype=np.float64)
-        elif initial_trajectory is not None:
-            z0 = np.asarray(trajectory_to_z(initial_trajectory.X, initial_trajectory.U), dtype=np.float64)
-        else:
-            X0 = jnp.repeat(x0_arr[None, :], N, axis=0)
-            U0 = jnp.zeros((N - 1, m), dtype=jnp.float64)
-            z0 = np.asarray(trajectory_to_z(X0, U0), dtype=np.float64)
+    x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(
+        problem,
+        x0,
+        t0=t0,
+        dt=dt,
+        initial_trajectory=initial_trajectory,
+        initial_z=initial_z,
+        xf=xf,
+    )
+    dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
+    z0 = np.asarray(z0_jax, dtype=np.float64)
+    lam0, mu0 = warm_start_duals(problem, x0) if isinstance(x0, MPCState) else (None, None)
 
     # Bounds
     zL, zU = primal_bounds(problem)
@@ -224,7 +227,16 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         for k, v in options.items():
             nlp.add_option(k, v)
 
-    z_opt, info = nlp.solve(z0)
+    if lam0 is not None and mu0 is not None:
+        # Ipopt only honours the supplied multipliers with the warm-start option set; the
+        # push factors keep it from shoving them back off the bounds it just accepted.
+        nlp.add_option("warm_start_init_point", "yes")
+        nlp.add_option("warm_start_bound_push", 1e-9)
+        nlp.add_option("warm_start_mult_bound_push", 1e-9)
+        mult_x_L, mult_x_U = split_bound_duals(mu0)
+        z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
+    else:
+        z_opt, info = nlp.solve(z0)
     status = int(info.get("status", -1))
     success = status in _SUCCESS_STATUSES
     message = str(info.get("status_msg", ""))
@@ -251,6 +263,11 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         xf=xf_val,
     )
 
+    lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
+    mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
+    mult_x_U_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
+    mu_out = mult_x_U_out - mult_x_L_out
+
     return IpoptResult(
         trajectory=opt_traj,
         success=success,
@@ -261,4 +278,6 @@ def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         info=info,
         iterations=iter_count,
         constraint_violation=viol,
+        lam=lam_out,
+        mu=mu_out,
     )

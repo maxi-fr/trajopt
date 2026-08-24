@@ -505,14 +505,8 @@ def test_quadrotor_continuous_dynamics_and_jacobians_cross(jl_to: Any) -> None:
         # 1c. Angular velocity derivative omega_dot
         np.testing.assert_allclose(xdot_py[10:13], xdot_jl[10:13], rtol=1e-14, atol=1e-14)
 
-        # 1d. Quaternion kinematics qdot:
-        # In Python (JPL): qdot_py = 0.5 * Xi(q) @ omega_py
-        # In Julia (Hamilton scalar-first): qdot_jl = Rotations.kinematics(q_jl, omega_jl)
-        # Relation: T_quat @ qdot_py = -qdot_jl or qdot_jl?
-        # Note: h = T @ q => hdot = T @ qdot_py.
-        # But Rotations.kinematics(h, omega) in Julia uses right multiplication 0.5 * h * [0; omega]
-        # or left multiplication 0.5 * [0; omega] * h?
-        # Let's check relation: T_quat @ xdot_py[3:7] vs xdot_jl[3:7]
+        # 1d. Quaternion kinematics: the storage bridge carries qdot across unchanged,
+        # T_quat @ qdot_py == qdot_jl.
         np.testing.assert_allclose(T_quat @ xdot_py[3:7], xdot_jl[3:7], rtol=1e-14, atol=1e-14)
 
         # 2. Continuous Jacobians comparison (tol 1e-12)
@@ -533,10 +527,11 @@ def test_quadrotor_continuous_dynamics_and_jacobians_cross(jl_to: Any) -> None:
 def test_quadrotor_sandwiched_dynamics_expansion_cross(jl_to: Any) -> None:
     r"""Assert RK4 Quadrotor error-state dynamics expansion matches Julia TrajectoryOptimization at 1e-12.
 
-    Relation between error-state expansions:
-    A_bar_jl = E(q_next) @ A_bar_py @ E(q_k)^T
-    B_bar_jl = E(q_next) @ B_bar_py
-    where E(q) = blockdiag(I3, -R(q)^T, I3, I3)
+    The Julia rotation block is 0.5 * Rotations.∇differential(q), a right Hamilton
+    perturbation, against this port's 0.5 * Xi(q), a left JPL one. The two are the same map
+    because the storage re-index reverses the product order; the one half is the derivative of
+    the error map delta_theta = 2 vec(dq). Both are derived, and separated from their rivals on a
+    non-degenerate quaternion, in docs/attitude_jacobian_perturbation.md.
     """
     jl = jl_to
     jl.seval("""
@@ -641,3 +636,55 @@ def test_quadrotor_sandwiched_dynamics_expansion_cross(jl_to: Any) -> None:
         # the error-state vectors are in identical coordinates:
         np.testing.assert_allclose(A_bar_py, A_bar_jl, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(B_bar_py, B_bar_jl, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.julia
+def test_quadrotor_negative_control_clamp_cross(jl_to: Any) -> None:
+    """Assert the port matches RobotZoo where a rotor is commanded negative and the clamp engages.
+
+    Every other quadrotor cross-test samples u > 0, where the clamp is inactive; this one samples
+    the region that separates a clamped model from an unclamped one.
+    """
+    jl = jl_to
+    jl.seval("using RobotZoo, RobotDynamics, StaticArrays, LinearAlgebra")
+
+    jl_model = jl.seval("RobotZoo.Quadrotor()")
+    py_model = Quadrotor()
+
+    T_quat = np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    T_13 = np.block(
+        [
+            [np.eye(3), np.zeros((3, 4)), np.zeros((3, 3)), np.zeros((3, 3))],
+            [np.zeros((4, 3)), T_quat, np.zeros((4, 3)), np.zeros((4, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)), np.zeros((3, 4)), np.zeros((3, 3)), np.eye(3)],
+        ]
+    )
+
+    jl_eval_dyn = jl.seval("""
+    function (model, x, u)
+        RobotDynamics.dynamics(model, SVector{13,Float64}(x...), SVector{4,Float64}(u...))
+    end
+    """)
+
+    rng = np.random.default_rng(311)
+    for _ in range(20):
+        q_raw = rng.standard_normal(4)
+        x_py = np.concatenate(
+            [rng.standard_normal(3), q_raw / np.linalg.norm(q_raw), rng.standard_normal(3), rng.standard_normal(3)]
+        )
+        # At least one rotor is driven negative, so max(0, kf w) bites on every sample.
+        u = rng.uniform(-2.0, 2.0, size=4)
+        u[rng.integers(4)] = -abs(u[0]) - 0.5
+
+        xdot_py = np.array(py_model.dynamics(jnp.array(x_py), jnp.array(u)))
+        xdot_jl = np.array(jl_eval_dyn(jl_model, T_13 @ x_py, u))
+
+        np.testing.assert_allclose(T_13 @ xdot_py, xdot_jl, rtol=1e-14, atol=1e-14)

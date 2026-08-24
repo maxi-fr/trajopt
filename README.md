@@ -1,15 +1,18 @@
 # TrajectoryOptimization (`trajopt`)
 
-A high-performance framework for formulating, evaluating, and solving discrete-time optimal control and trajectory optimization problems in **Python** (powered by JAX) and **Julia** ([`TrajectoryOptimization.jl`](https://github.com/RoboticExplorationLab/TrajectoryOptimization.jl)).
+A high-performance framework for formulating, evaluating, and solving discrete-time optimal control and trajectory optimization problems in **Python**, powered by JAX and Equinox.
+
+Inspired by the Julia library [`TrajectoryOptimization.jl`](https://github.com/RoboticExplorationLab/TrajectoryOptimization.jl), `trajopt` is built from scratch around JAX's compilation model and vectorized differentiation.
 
 ---
 
 ## Features
 
+- **Fast Automatic Differentiation & Expansion Engine:** Dedicated expansion engine (`trajopt.expansions`) powered by JAX and Equinox (`eqx.Module`, `eqx.filter_jit`) computing analytical-accuracy first- and second-order derivatives (cost Hessians, dynamics Jacobians, and constraint Jacobians) with zero manual derivative bookkeeping.
 - **Conic Constraint Formulation:** Unifies equality, inequality (orthant), and second-order cone (SOC) constraints via projection operations and explicit Jacobians.
-- **Fast Automatic Differentiation:** Uses JAX in Python and ForwardDiff in Julia for zero-overhead first- and second-order expansions of dynamics, costs, and constraints.
-- **Solver Integrations:** Direct NLP transcriptions and interfaces for **Ipopt** (`cyipopt`), **OSQP**, and **Clarabel**, alongside specialized Augmented Lagrangian trajectory solvers (ALTRO).
-- **Cross-Verification:** Built-in test suite cross-verifying Python implementations against Julia reference implementations.
+- **Manifold Kinematics on $\mathrm{SO}(3)$:** Native 3D rotation and attitude dynamics using JPL quaternions and error-state representations ($\delta\theta = 2\operatorname{vec}(q_{\text{err}})$) for rigid bodies and quadrotors.
+- **Multiple Solver Integrations:** Direct NLP transcriptions and solver adapters for **Ipopt** (`cyipopt`), **OSQP**, and **Clarabel**.
+- **Cross-Verification & Parity:** Rigorous test suite validating numerical parity against the Julia reference implementation and an independent CasADi baseline.
 
 ---
 
@@ -54,13 +57,7 @@ export PKG_CONFIG_PATH="$(brew --prefix ipopt)/lib/pkgconfig:$PKG_CONFIG_PATH"
 
 ### 2. Configure Environment (`.env`)
 
-Copy `.env.example` to `.env` and set the path to your Ipopt installation:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` for your system (e.g. on Windows):
+Copy `.env.example` to `.env` (or create `.env`) and set the path to your Ipopt installation:
 
 ```ini
 # Ipopt installation directory (Windows / Custom source builds)
@@ -75,10 +72,10 @@ PKG_CONFIG_PATH="C:/Ipopt/Ipopt-3.14.19-win64-msvs2022-md/lib/pkgconfig"
 
 ### 3. Sync & Install with `uv`
 
-Run `uv sync` to create the virtual environment and build `cyipopt`:
+Run `uv sync` to create the virtual environment and install dependencies:
 
 ```powershell
-# On Windows:
+# On Windows (ensures Cython build tools are available before compiling cyipopt):
 uv pip install Cython setuptools wheel
 uv sync --all-extras
 ```
@@ -88,36 +85,25 @@ uv sync --all-extras
 uv sync --all-extras
 ```
 
-Available dependency groups in `pyproject.toml`:
+#### Dependency Groups & Extras
 
-- `solvers`: Includes `cyipopt`, `osqp`, and `clarabel`.
-- `dev`: Includes development tools (`ruff`, `ty`, `pytest`, `pytest-benchmark`, `pytest-xdist`, `marimo`, `casadi`, `pre-commit`).
-- `test`: Includes `juliacall` for cross-verification.
+Optional extras in `pyproject.toml` (`[project.optional-dependencies]`, installed with `--all-extras` or `--extra <name>`):
 
----
+- `solvers`: `cyipopt`, `osqp`, `clarabel`.
+- `test`: `juliacall` (for cross-verification against the Julia reference).
+- `dev`: `ruff`, `ty`, `pytest`, `pytest-benchmark`, `pytest-xdist`, `marimo`, `validate-pyproject`.
 
-## Installation (Julia)
+Default development tools (`[dependency-groups] dev`, installed by default with `uv sync`):
 
-To use the Julia implementation:
-
-```julia
-using Pkg
-Pkg.add("TrajectoryOptimization")
-```
-
-Or for local development:
-
-```julia
-using Pkg
-Pkg.activate(".")
-Pkg.instantiate()
-```
+- `casadi` (independent baseline for cross-verification), `pre-commit`.
 
 ---
 
 ## Quick Start (Python)
 
 ### Trajectory Optimization with Ipopt
+
+The following example solves a swing-up problem for a non-linear pendulum with torque bounds and a terminal goal state:
 
 ```python
 import jax.numpy as jnp
@@ -165,41 +151,48 @@ print(f"Optimal final state: {np.asarray(X[-1])}")
 
 ## Testing & Quality Checks
 
-Run the test suite with `pytest`:
+Run the targeted unit tests with `pytest`:
 
 ```bash
 # Run unit tests
-uv run pytest test/unit
+uv run pytest test/unit -x
 
-# Run all tests (deselecting Julia cross-verification if Julia runtime is absent)
+# Run all tests excluding Julia cross-verification (if Julia runtime is not installed)
 uv run pytest -m "not julia"
 
 # Run full test suite including Julia cross-verification
 uv run pytest
 ```
 
-Run type checking and linting:
+Run type checking, formatting, and pre-commit checks:
 
 ```bash
-# Type checking
+# Type checking (via ty)
 uv run ty check
 
 # Code formatting and linting
-uv run ruff check .
+uv run ruff check --fix
+
+# Pre-commit gate
+uv run pre-commit run --all-files
 ```
+
+---
+
+## Roadmap
+
+The core v1 architecture establishes the expansion engine, dynamics integration, conic constraint catalog, and external solver transcriptions (Ipopt, OSQP, Clarabel). Future milestones include:
+
+- **Native iLQR & DDP:** Iterative Linear Quadratic Regulator and Differential Dynamic Programming algorithms consuming the shared expansion engine.
+- **Native ALTRO:** Augmented Lagrangian Trajectory Optimizer for fast constrained trajectory optimization.
+- **Sequential Quadratic Programming (SQP):** Direct SQP solver with line-search filter and active-set strategy.
+- **Closed-Loop Simulation Harness:** Environment wrappers for receding-horizon MPC simulation and hardware-in-the-loop testing.
 
 ---
 
 ## Architecture & Documentation
 
-For a detailed technical overview of discrete optimal control representations, expansion engines, rotation groups on $\mathrm{SO}(3)$, and NLP transcriptions, refer to:
+For a detailed mathematical and technical specification covering discrete optimal control representations, expansion engines, rotation manifolds on $\mathrm{SO}(3)$, and NLP transcriptions, refer to:
 
 - [Trajectory Optimization Technical Specification](docs/TRAJECTORY_OPTIMIZATION_SPEC.md)
-- [TrajectoryOptimization.jl Documentation](https://RoboticExplorationLab.github.io/TrajectoryOptimization.jl/stable)
-
----
-
-## References
-
-- Howell, T. A., Jackson, B. E., and Manchester, Z. (2019). *ALTRO: A Fast Solver for Constrained Trajectory Optimization*. IROS 2019. [[PDF]](https://rexlab.stanford.edu/papers/altro-iros.pdf)
-- Wächter, A., and Biegler, L. T. (2006). *On the implementation of an interior-point filter line-search algorithm for large-scale nonlinear programming*. Mathematical Programming.
+- [TrajectoryOptimization.jl Reference Documentation](https://RoboticExplorationLab.github.io/TrajectoryOptimization.jl/stable)

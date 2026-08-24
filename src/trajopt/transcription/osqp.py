@@ -6,24 +6,27 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from trajopt.cones import SecondOrderCone, ZeroCone
+from trajopt.cones import NegativeOrthant, SecondOrderCone, ZeroCone
+from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, _extract_discrete_model
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     build_linear_constraint_block,
     compute_constraint_violation,
     extract_quadratic_cost,
+    operating_point_z,
     parse_solver_initial_state,
     primal_bounds,
     z_to_trajectory,
 )
+from trajopt.transcription.result import blocked_to_canonical, warm_start_duals
 from trajopt.transcription.transcription import (
-    _extract_discrete_model,
     eval_f,
 )
 
 _SUCCESS_STATUS_VALS = {1, 2}  # 1: solved, 2: solved inaccurate
+_EMPTY = np.zeros(0, dtype=np.float64)
 
 
 class OSQPResult(NamedTuple):
@@ -49,6 +52,10 @@ class OSQPResult(NamedTuple):
         Number of solver iterations. Defaults to 0.
     constraint_violation : float, optional
         Maximum constraint violation across all constraints. Defaults to 0.0.
+    lam : np.ndarray, optional
+        Constraint duals in canonical row order, of shape ``(P,)``. Defaults to empty.
+    mu : np.ndarray, optional
+        Signed bound duals of shape ``(N * n + (N - 1) * m,)``. Defaults to empty.
     """
 
     trajectory: Trajectory
@@ -60,6 +67,8 @@ class OSQPResult(NamedTuple):
     info: dict[str, Any]
     iterations: int = 0
     constraint_violation: float = 0.0
+    lam: np.ndarray = _EMPTY
+    mu: np.ndarray = _EMPTY
 
 
 def _extract_qp_dynamics(  # noqa: PLR0913 -- Dynamics extraction helper takes 8 parameters
@@ -72,6 +81,8 @@ def _extract_qp_dynamics(  # noqa: PLR0913 -- Dynamics extraction helper takes 8
     x0_arr: jax.Array,
     t_stage: jax.Array,
     dt_arr: jax.Array,
+    X_op: jax.Array,
+    U_op: jax.Array,
 ) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
     """Assemble initial condition and linear dynamics defect rows for OSQP."""
     A_rows: list[sp.spmatrix] = []
@@ -89,33 +100,13 @@ def _extract_qp_dynamics(  # noqa: PLR0913 -- Dynamics extraction helper takes 8
     for k in range(N - 1):
         tk = t_stage[k]
         dtk = dt_arr[k]
-        Ak = np.asarray(
-            discrete_model.state_jacobian(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
-        Bk = np.asarray(
-            discrete_model.control_jacobian(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
-        dk = np.asarray(
-            discrete_model.discrete_dynamics(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
+        x_op = X_op[k]
+        u_op = U_op[k]
+        Ak = np.asarray(discrete_model.state_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
+        Bk = np.asarray(discrete_model.control_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
+        f_op = np.asarray(discrete_model.discrete_dynamics(x_op, u_op, tk, dtk), dtype=np.float64)
+        # f(x, u) ~ f(x_op, u_op) + A (x - x_op) + B (u - u_op), collected into the constant
+        dk = f_op - Ak @ np.asarray(x_op, dtype=np.float64) - Bk @ np.asarray(u_op, dtype=np.float64)
 
         A_dyn_k = sp.lil_matrix((n, nz), dtype=np.float64)
         col_x_k = k * (n + m)
@@ -141,6 +132,7 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
     t_stage: jax.Array,
     t_term: jax.Array,
     xf_val: jax.Array | None,
+    z_op: jax.Array,
 ) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
     """Assemble stage and terminal linear constraint rows for OSQP."""
     A_rows: list[sp.spmatrix] = []
@@ -154,14 +146,9 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
         tk = t_stage[k] if k < N - 1 else t_term
         col_k = k * (n + m)
         is_term = k == N - 1
+        z_op_k = z_op[col_k : col_k + (n if is_term else n + m)]
 
         for con in ev.constraints:
-            from trajopt.constraints.bounds import (  # noqa: PLC0415 -- type check for box bounds
-                BoundConstraint,
-                ControlBound,
-                StateBound,
-            )
-
             if isinstance(con, (BoundConstraint, ControlBound, StateBound)):
                 continue
 
@@ -183,6 +170,7 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
                 tk=tk,
                 is_term=is_term,
                 xf_val=xf_val,
+                z_op_k=z_op_k,
             )
             A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
             A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
@@ -191,11 +179,39 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
             if isinstance(con.cone, ZeroCone):
                 l_vals.append(-val0_np)
                 u_vals.append(-val0_np)
-            else:
+            elif isinstance(con.cone, NegativeOrthant):
                 l_vals.append(np.full(dim_c, -np.inf, dtype=np.float64))
                 u_vals.append(-val0_np)
+            else:
+                msg = (
+                    f"OSQP adapter does not support cone {type(con.cone).__name__} on constraint {type(con).__name__}."
+                )
+                raise TypeError(msg)
 
     return A_rows, l_vals, u_vals
+
+
+def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the state, and the row map
+    solver: Any,  # noqa: ANN401 -- osqp.OSQP is an untyped C-extension
+    problem: Problem,
+    x0: jax.Array | MPCState,
+    *,
+    z0: jax.Array | None,
+    canonical_rows: np.ndarray,
+    n_rows: int,
+) -> None:
+    """Seed OSQP with the previous primal and, when the MPCState carries them, dual iterates."""
+    if z0 is not None:
+        solver.warm_start(x=z0)
+
+    lam0, mu0 = warm_start_duals(problem, x0) if isinstance(x0, MPCState) else (None, None)
+    if lam0 is None or mu0 is None:
+        return
+
+    y0 = np.empty(n_rows, dtype=np.float64)
+    y0[canonical_rows] = lam0
+    y0[len(canonical_rows) :] = mu0
+    solver.warm_start(y=y0)
 
 
 def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
@@ -207,18 +223,26 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     initial_trajectory: Trajectory | None = None,
     initial_z: jax.Array | None = None,
     xf: jax.Array | None = None,
+    operating_point: Trajectory | jax.Array | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> OSQPResult:
     """Solve the transcribed optimal control problem using OSQP.
 
-    OSQP is a convex quadratic programming solver. It requires:
-    1. A convex quadratic or linear objective function.
-    2. Affine dynamics :math:`x_{k+1} = A_k x_k + B_k u_k + d_k`.
-    3. Linear equality, inequality, and variable box bound constraints.
+    OSQP is a convex quadratic programming solver, so this adapter hands it one convex
+    approximation of the problem, expanded about ``operating_point`` (the origin by default):
+    the dynamics linearized to :math:`x_{k+1} = A_k x_k + B_k u_k + d_k`, the constraints
+    linearized, and the cost taken to second order. The approximation is exact — and the result
+    is the true optimum — when the dynamics are affine, the cost quadratic and the constraints
+    linear, whatever the operating point.
 
-    Nonlinear dynamics or second-order cone constraints (e.g. SecondOrderCone) are not
-    supported natively by OSQP. Use Clarabel for second-order cone problems or Ipopt for
-    general nonlinear problems.
+    Otherwise this is linearized MPC: the returned trajectory optimizes the approximation, not
+    the nonlinear problem, and ``success`` reports the QP's convergence. ``constraint_violation``
+    is measured against the true nonlinear dynamics and is the number that says how far the two
+    have drifted apart; drive it down by re-solving with the operating point set to the previous
+    solution.
+
+    Second-order cone constraints (e.g. SecondOrderCone) are rejected — use Clarabel for those,
+    or Ipopt to solve the nonlinear problem directly.
 
     Parameters
     ----------
@@ -236,6 +260,9 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         Flat initial guess vector of shape ``(N * n + (N - 1) * m,)``.
     xf : jax.Array | None, optional
         Goal state vector of shape ``(n,)``. Defaults to None.
+    operating_point : Trajectory | jax.Array | None, optional
+        Point about which the dynamics, constraints and cost are expanded, as a trajectory or a
+        flat vector of shape ``(N * n + (N - 1) * m,)``. Defaults to None, meaning the origin.
     options : Mapping[str, Any] | None, optional
         Solver options passed to OSQP (e.g. ``{"eps_abs": 1e-6, "eps_rel": 1e-6, "max_iter": 4000}``).
 
@@ -264,6 +291,9 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
     t_term = t0_arr + jnp.sum(dt_arr)
 
+    z_op = operating_point_z(problem, operating_point)
+    X_op, U_op = z_to_trajectory(z_op, N, n, m)
+
     P_triu, q_vec = extract_quadratic_cost(
         problem,
         N,
@@ -273,6 +303,7 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         t0_arr=t0_arr,
         dt_arr=dt_arr,
         xf_val=xf_val,
+        z_op=z_op,
     )
 
     discrete_model = _extract_discrete_model(problem)
@@ -285,6 +316,8 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         x0_arr=x0_arr,
         t_stage=t_stage,
         dt_arr=dt_arr,
+        X_op=X_op,
+        U_op=U_op,
     )
 
     knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
@@ -297,12 +330,14 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         t_stage=t_stage,
         t_term=t_term,
         xf_val=xf_val,
+        z_op=z_op,
     )
 
     zL, zU = primal_bounds(problem)
     A_bounds = sp.eye(nz, format="csr", dtype=np.float64)
 
     A_mat = sp.vstack([*A_dyn, *A_con, A_bounds]).tocsc()
+    canonical_rows = blocked_to_canonical(problem)
     l_vec = np.concatenate([*l_dyn, *l_con, zL])
     u_vec = np.concatenate([*u_dyn, *u_con, zU])
 
@@ -312,8 +347,7 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         solver_opts.update(options)
 
     solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
-    if z0 is not None:
-        solver.warm_start(x=z0)
+    _warm_start(solver, problem, x0, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
 
     res = solver.solve()
 
@@ -337,6 +371,10 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         dt=dt_arr,
     )
 
+    y_out = np.asarray(res.y, dtype=np.float64) if res.y is not None else np.zeros(A_mat.shape[0])
+    lam_out = y_out[canonical_rows]
+    mu_out = y_out[len(canonical_rows) :]
+
     info_dict = {
         "status": status_msg,
         "status_val": status_val,
@@ -357,4 +395,6 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         info=info_dict,
         iterations=iter_count,
         constraint_violation=viol,
+        lam=lam_out,
+        mu=mu_out,
     )

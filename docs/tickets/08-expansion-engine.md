@@ -14,6 +14,15 @@ Euclidean models the error dimension equals the state dimension and that Jacobia
 identity, which the compiler folds away — so this ticket builds the Euclidean path while
 establishing the interface the manifold path will fill in.
 
+The engine stays deliberately unconsumed through v1. The NLP transcription is not refactored
+onto it and should not be: the engine returns error coordinates (`A_bar = G^T A G`, sized `ne`)
+while Ipopt's primal vector is in state coordinates sized `n`, and the engine's augmented
+Lagrangian Hessian uses cone projections of shifted constraint values where Ipopt's is the plain
+Lagrangian. Making the NLP hold error coordinates would mean expanding about a reference
+trajectory each iteration, which is an SQP outer loop — v2 work. The only derivative code the
+two already share is `discrete_model.state_jacobian` / `control_jacobian`, which lives on the
+model and is called by both.
+
 **Blocked by:** 06 — Stacked objective and cost evaluation; 07 — Constraint catalog and fused
 ConstraintList.
 
@@ -37,3 +46,8 @@ projections, used by the augmented Lagrangian term).
       function
 - [x] Cross-verification against Julia covers whichever expansion quantities have a direct Julia
       counterpart
+- [x] A Euclidean case, where the error dimension equals the state dimension and the attitude
+      Jacobian is the identity, asserts the engine agrees with the transcription's gradient,
+      Lagrangian Hessian blocks, and dynamics Jacobians. Until a native solver consumes the
+      engine, the closed-form `DiagonalCost` and `QuadraticCost` paths have no oracle but
+      themselves, and the transcription — exercised on every Ipopt solve — is that oracle

@@ -368,7 +368,9 @@ def test_cross_augmented_lagrangian_expansion(jl_to: Any) -> None:
 
     lam_list = []
     for k in range(N):
-        p_k = built_cons.p[k]
+        # Box bounds live outside `p` since `build` hoists them into primal limits, but the
+        # augmented Lagrangian still penalises them, so they carry multipliers here as in Julia.
+        p_k = built_cons.p[k] + built_cons.bound_evaluators[k].p
         lam_list.append(jnp.array(rng.standard_normal(p_k)))
 
     al_exp_py = augmented_lagrangian_expansion(built_cons, traj_py, base_exp, lam=lam_list, mu=mu)

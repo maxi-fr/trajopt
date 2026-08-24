@@ -18,23 +18,46 @@ from trajopt.benchmarks import (
     run_all_benchmarks,
     run_benchmark,
 )
-from trajopt.transcription.ipopt import solve_ipopt
+from trajopt.transcription.ipopt import IpoptResult, solve_ipopt
+from trajopt.transcription.layout import z_to_trajectory
+
+# Every test here runs at least one full benchmark solve, and the file is the slowest in
+# the suite by a wide margin. The dev loop is `-m "not slow and not benchmark"`.
+pytestmark = pytest.mark.slow
 
 
-def test_cartpole_swingup_benchmark_solves_to_optimality() -> None:
-    """Verify underactuated Cartpole swing-up benchmark solves to optimality respecting bounds."""
+def _bound_activity(
+    res: IpoptResult,
+    N: int,
+    n: int,
+    m: int,
+    index: int,
+    bound: float,
+    tol: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the values and bound duals of state `index` at the knots pressed onto +/- `bound`.
+
+    A constraint that is merely satisfied and one that shapes the solution look identical in the
+    trajectory alone, so the multiplier is what separates them: `res.mu` carries the signed
+    variable-bound duals ``mult_x_U - mult_x_L`` laid out like Z, and only an active bound
+    carries a nonzero one.
+    """
+    X = np.asarray(res.trajectory.X)
+    mu_X, _ = z_to_trajectory(jnp.asarray(res.mu), N, n, m)
+    on_bound = np.abs(np.abs(X[:, index]) - bound) <= tol
+    return X[on_bound, index], np.asarray(mu_X)[on_bound, index]
+
+
+def test_cartpole_swingup_benchmark_drives_the_cart_onto_its_position_limit() -> None:
+    """Verify the Cartpole swing-up solves to optimality with the cart position limit active."""
     pytest.importorskip("cyipopt")
 
-    prob, state, info = cartpole_swingup_benchmark(
-        N=25,
-        dt=0.05,
-        u_bound=20.0,
-        x_pos_bound=2.0,
-    )
+    prob, state, info = cartpole_swingup_benchmark(N=25, dt=0.05, u_bound=20.0)
     assert info["name"] == "cartpole_swingup"
     assert prob.model.n == 4
     assert prob.model.m == 1
 
+    p_bound = float(info["x_pos_bound"])
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
     res = solve_ipopt(prob, state, options=opts)
 
@@ -46,8 +69,14 @@ def test_cartpole_swingup_benchmark_solves_to_optimality() -> None:
     U = np.asarray(res.trajectory.U)
 
     # Cart position limit
-    assert np.all(X[:, 0] >= -2.0 - 1e-4)
-    assert np.all(X[:, 0] <= 2.0 + 1e-4)
+    assert np.all(X[:, 0] >= -p_bound - 1e-4)
+    assert np.all(X[:, 0] <= p_bound + 1e-4)
+
+    # ... and the swing-up is shaped by it rather than merely permitted by it: at least one knot
+    # sits on the limit carrying a nonzero multiplier, so relaxing it would change the optimum.
+    on_bound, duals = _bound_activity(res, prob.N, prob.model.n, prob.model.m, index=0, bound=p_bound)
+    assert len(on_bound) > 0, f"cart never reaches |p| = {p_bound}; max |p| was {np.max(np.abs(X[:, 0])):.4f}"
+    assert np.max(np.abs(duals)) > 1.0, f"cart position limit is inert: bound duals {duals}"
 
     # Actuation limits
     assert np.all(U >= -20.0 - 1e-4)
@@ -104,8 +133,8 @@ def test_quadrotor_obstacle_benchmark_solves_to_optimality() -> None:
     assert abs(np.dot(q_opt, q_ref)) >= 0.99
 
 
-def test_dubins_corridor_benchmark_solves_to_optimality() -> None:
-    """Verify nonholonomic Dubins car enforces corridor constraints alongside tracking objective."""
+def test_dubins_corridor_benchmark_pins_the_tracked_trajectory_to_the_corridor_wall() -> None:
+    """Verify the Dubins car rides the lateral corridor bound its tracking reference bulges past."""
     pytest.importorskip("cyipopt")
 
     prob, state, info = dubins_corridor_benchmark(
@@ -118,6 +147,8 @@ def test_dubins_corridor_benchmark_solves_to_optimality() -> None:
     assert info["name"] == "dubins_corridor_tracking"
     assert prob.model.n == 3
     assert prob.model.m == 2
+    y_bound = float(info["corridor_bound"])
+    assert float(info["y_ref_bulge"]) > y_bound, "reference must leave the corridor for it to bind"
 
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
     res = solve_ipopt(prob, state, options=opts)
@@ -129,8 +160,14 @@ def test_dubins_corridor_benchmark_solves_to_optimality() -> None:
     U = np.asarray(res.trajectory.U)
 
     # Lateral corridor bounds |y| <= 0.5
-    assert np.all(X[:, 1] >= -0.5 - 1e-4)
-    assert np.all(X[:, 1] <= 0.5 + 1e-4)
+    assert np.all(X[:, 1] >= -y_bound - 1e-4)
+    assert np.all(X[:, 1] <= y_bound + 1e-4)
+
+    # The tracking objective pulls y out to the bulge and the corridor stops it, so the wall is
+    # load-bearing: several knots sit on it with nonzero multipliers.
+    on_bound, duals = _bound_activity(res, prob.N, prob.model.n, prob.model.m, index=1, bound=y_bound)
+    assert len(on_bound) >= 2, f"corridor never binds; max |y| was {np.max(np.abs(X[:, 1])):.4f}"
+    assert np.max(np.abs(duals)) > 1.0, f"corridor bound is inert: bound duals {duals}"
 
     # Control bounds
     assert np.all(U[:, 0] >= 0.0 - 1e-4)
@@ -147,7 +184,7 @@ def test_timing_breakdown_measurements() -> None:
     """Verify timing measurement functions report positive durations for setup, derivatives, and solver."""
     pytest.importorskip("cyipopt")
 
-    prob, state, _ = cartpole_swingup_benchmark(N=20, dt=0.05)
+    prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
 
     # 1. Setup timing
     t_setup = measure_transcription_setup(prob, state, num_runs=5)
@@ -158,11 +195,11 @@ def test_timing_breakdown_measurements() -> None:
     deriv_times = measure_derivative_evaluations(prob, state, num_evals=5)
     assert "grad_f" in deriv_times
     assert "jac_g" in deriv_times
-    assert "hess_L" in deriv_times
+    assert "hess_l" in deriv_times
     assert "total_derivative" in deriv_times
     assert deriv_times["grad_f"] > 0.0
     assert deriv_times["jac_g"] > 0.0
-    assert deriv_times["hess_L"] > 0.0
+    assert deriv_times["hess_l"] > 0.0
     assert deriv_times["total_derivative"] >= deriv_times["grad_f"] + deriv_times["jac_g"]
 
     # 3. Solver runtime
@@ -176,7 +213,7 @@ def test_closed_loop_mpc_measurement_and_jitter() -> None:
     """Verify closed-loop MPC reports sustained frequency, latency jitter, and warm-start speedup."""
     pytest.importorskip("cyipopt")
 
-    prob, state, _ = cartpole_swingup_benchmark(N=20, dt=0.05)
+    prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
     num_steps = 10
 
     stats: ClosedLoopStats = measure_closed_loop_mpc(

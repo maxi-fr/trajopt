@@ -5,31 +5,9 @@ import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
-from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics
-from trajopt.dynamics.integrators import RK4
-from trajopt.problem import Problem
+from trajopt.dynamics.base import DiscreteDynamics
+from trajopt.problem import Problem, _extract_discrete_model
 from trajopt.transcription.layout import z_to_trajectory
-
-
-def _extract_discrete_model(problem: Problem | AbstractModel) -> DiscreteDynamics:
-    """Extract or construct a DiscreteDynamics model from problem."""
-    if isinstance(problem, Problem):
-        model = problem.model
-        integrator = problem.integrator
-    elif isinstance(problem, AbstractModel):
-        model = problem
-        integrator = None
-    else:
-        msg = f"Cannot extract dynamics model from {type(problem).__name__}"
-        raise TypeError(msg)
-
-    if isinstance(model, DiscreteDynamics):
-        return model
-    if isinstance(model, ContinuousDynamics):
-        integ = integrator if integrator is not None else RK4()
-        return DiscretizedDynamics(continuous_dynamics=model, integrator=integ)
-    msg = f"Model {type(model).__name__} is neither DiscreteDynamics nor ContinuousDynamics"
-    raise TypeError(msg)
 
 
 def _cost_fn(
@@ -39,7 +17,7 @@ def _cost_fn(
     dt: float | jax.Array,
     xf: jax.Array | None = None,
 ) -> jax.Array:
-    """Evaluate total trajectory cost scalar J(Z)."""
+    """Evaluate total trajectory cost scalar J(Z), retargeting a goal-regulating objective to xf."""
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -49,22 +27,12 @@ def _cost_fn(
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    if xf is not None and getattr(problem.obj, "is_quadratic", False):
-        Q = problem.obj.Q
-        R = problem.obj.R
-        Qf = problem.obj.Q_f
-        if problem.obj.is_diag:
-            stage_x = 0.5 * jnp.sum(Q * ((X[:-1] - xf) ** 2), axis=-1)
-            stage_u = 0.5 * jnp.sum(R * (U**2), axis=-1)
-            term_c = 0.5 * jnp.sum(Qf * ((X[-1] - xf) ** 2))
-        else:
-            stage_x = 0.5 * jnp.einsum("ki,kij,kj->k", X[:-1] - xf, Q, X[:-1] - xf)
-            stage_u = 0.5 * jnp.einsum("ki,kij,kj->k", U, R, U)
-            term_c = 0.5 * jnp.einsum("i,ij,j->", X[-1] - xf, Qf, X[-1] - xf)
-        return jnp.sum(stage_x + stage_u) + term_c
+    # A goal-regulating objective follows the run-time goal; every other objective carries a
+    # reference of its own, and xf is there for the goal constraint alone.
+    obj = problem.obj.with_goal(xf) if (xf is not None and problem.obj.regulates_to_goal) else problem.obj
 
-    stage_costs = problem.obj.stage_cost.stage_costs(X[:-1], U, t_stage)
-    term_cost = problem.obj.terminal_cost.evaluate(X[-1], None, t_term)
+    stage_costs = obj.stage_cost.stage_costs(X[:-1], U, t_stage)
+    term_cost = obj.terminal_cost.evaluate(X[-1], None, t_term)
     return jnp.sum(stage_costs) + term_cost
 
 
@@ -380,7 +348,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     jax.Array
         Lower-triangular nonzeros of the Lagrangian Hessian of shape (nnz_hess,).
     """
-    del xf
+    del xf  # retargeting rewrites only the linear terms, which the Hessian does not see
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)

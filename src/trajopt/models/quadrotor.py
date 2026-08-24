@@ -21,15 +21,16 @@ class Quadrotor(RigidBody):
 
     Control:
         u = [w1, w2, w3, w4]
-        Rotor thrust forces / squared motor speeds of shape (4,)
+        Rotor thrust forces / squared motor speeds of shape (4,). Each rotor force is clamped at
+        max(0, kf * w_i), as in RobotZoo, so the model is non-differentiable at w_i = 0.
 
     Parameters
     ----------
     mass : float | jax.Array, optional
         Mass of the quadrotor in kg. Defaults to 0.5.
     J : Sequence[float] | jax.Array, optional
-        Principal moments of inertia [Jx, Jy, Jz] in kg*m^2 or (3, 3) inertia tensor.
-        Defaults to (0.0023, 0.0023, 0.004).
+        Principal moments of inertia [Jx, Jy, Jz] in kg*m^2 of shape (3,), or a diagonal
+        (3, 3) tensor. Defaults to (0.0023, 0.0023, 0.004).
     gravity : Sequence[float] | jax.Array, optional
         Gravitational acceleration vector in world frame of shape (3,).
         Defaults to (0.0, 0.0, -9.81).
@@ -62,19 +63,36 @@ class Quadrotor(RigidBody):
         self.mass = jnp.asarray(mass, dtype=float)
         J_arr = jnp.asarray(J, dtype=float)
         if J_arr.ndim == _TENSOR_NDIM:
-            self.J = jnp.diag(J_arr) if J_arr.shape == (3, 3) else J_arr
-            self.J_inv = 1.0 / self.J
-        else:
-            self.J = J_arr
-            self.J_inv = 1.0 / J_arr
+            # Only a diagonal tensor survives the elementwise inverse below, so reject the rest
+            # rather than silently discarding the off-diagonal terms.
+            if J_arr.shape != (3, 3) or not bool(jnp.all(J_arr == jnp.diag(jnp.diag(J_arr)))):
+                msg = (
+                    f"J must be a (3,) vector of principal moments or a diagonal (3, 3) tensor, got shape {J_arr.shape}"
+                )
+                raise ValueError(msg)
+            J_arr = jnp.diag(J_arr)
+        self.J = J_arr
+        self.J_inv = 1.0 / J_arr
         self.gravity = jnp.asarray(gravity, dtype=float)
         self.motor_dist = jnp.asarray(motor_dist, dtype=float)
         self.kf = jnp.asarray(kf, dtype=float)
         self.km = jnp.asarray(km, dtype=float)
 
+    def rotor_forces(self, u: jax.Array) -> jax.Array:
+        """Compute per-rotor thrust forces max(0, kf * u) of shape (4,).
+
+        A rotor cannot pull, so RobotZoo clamps each force at zero and this port follows it. The
+        clamp is inactive wherever u >= 0, which the benchmark's ControlBound enforces; below
+        zero it is what separates the two implementations, and it puts a kink in the dynamics.
+        """
+        return jnp.maximum(0.0, self.kf * u)
+
     @property
     def motor_mixing_matrix(self) -> jax.Array:
-        """Motor mixing matrix mapping controls u to [Fz, tau_x, tau_y, tau_z] of shape (4, 4)."""
+        """Motor mixing matrix mapping controls u to [Fz, tau_x, tau_y, tau_z] of shape (4, 4).
+
+        The unclamped map, so it agrees with `forces` and `moments` only for u >= 0.
+        """
         kf = self.kf
         km = self.km
         L = self.motor_dist
@@ -102,7 +120,7 @@ class Quadrotor(RigidBody):
         jax.Array
             Total force in world frame of shape (3,).
         """
-        f_thrust = self.kf * jnp.sum(u)
+        f_thrust = jnp.sum(self.rotor_forces(u))
         f_body = jnp.array([0.0, 0.0, f_thrust], dtype=u.dtype)
         q = Quaternion.from_array(x[3:7])
         r_mat = q.to_rot_mat()
@@ -126,11 +144,12 @@ class Quadrotor(RigidBody):
         """
         del x
         L = self.motor_dist
-        kf = self.kf
-        km = self.km
-        tau_x = L * kf * (u[1] - u[3])
-        tau_y = L * kf * (u[2] - u[0])
-        tau_z = km * (u[0] - u[1] + u[2] - u[3])
+        # Roll and pitch come from the clamped rotor forces; yaw is a reaction torque taken
+        # straight from the motor commands, unclamped. RobotZoo splits them the same way.
+        f = self.rotor_forces(u)
+        tau_x = L * (f[1] - f[3])
+        tau_y = L * (f[2] - f[0])
+        tau_z = self.km * (u[0] - u[1] + u[2] - u[3])
         return jnp.array([tau_x, tau_y, tau_z], dtype=u.dtype)
 
     def dynamics(

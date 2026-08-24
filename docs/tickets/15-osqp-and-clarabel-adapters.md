@@ -26,3 +26,9 @@ constraint's two forms).
 - [x] Solver selection does not change how a problem is defined
 - [x] Each adapter reports convergence status, iteration count, and constraint violation through
       a common interface
+- [x] Each adapter also reports its duals through that interface, normalised by the adapter into
+      one canonical row order and one sign convention, so the caller never sniffs a
+      backend-specific key out of the raw solver info
+- [x] Those duals warm-start the next solve where the backend has an API for it, measurably
+      cutting iterations. Clarabel has no such API, and the resulting no-op is asserted rather
+      than assumed

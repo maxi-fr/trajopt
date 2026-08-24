@@ -2,12 +2,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from cross_verification.casadi_baseline import (
+    assert_dual_block_parity,
     assert_parity,
     assert_setups_match,
     build_cartpole_casadi,
     build_casadi_from_problem,
     build_dubins_casadi,
-    build_quadrotor_casadi,
 )
 
 from trajopt.benchmarks import (
@@ -28,6 +28,10 @@ from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import solve_ipopt
+
+# Every test here solves the same problem twice, once per formulation. Unlike the Julia
+# cross-verification files these carry no `julia` marker to deselect them by.
+pytestmark = pytest.mark.slow
 
 
 def test_cartpole_swingup_casadi_parity() -> None:
@@ -479,6 +483,9 @@ def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
     X_init = state.states()
     U_init = state.controls()
 
+    # The quaternion block of the terminal Hessian is exactly singular, so Ipopt leans on inertia
+    # correction and cannot drive this problem past roughly 1e-8; the duals are compared at the
+    # accuracy it does reach rather than at one it does not.
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
     trajopt_res = solve_ipopt(prob, state, options=solver_opts)
     casadi_res = casadi_prob.solve(
@@ -494,9 +501,12 @@ def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
         tol_control=1e-5,
         tol_cost=1e-5,
         tol_feas=1e-4,
-        check_duals=True,
-        tol_dual=1e-3,
+        # The two dual vectors have different lengths (361 against 457) because the formulations
+        # split constraint rows from variable bounds differently, so the whole-vector comparison
+        # cannot run. The block comparison below is the one that applies.
+        check_duals=False,
     )
+    assert_dual_block_parity(prob, trajopt_res, casadi_res, tol_dual=1e-4)
 
 
 def test_dubins_corridor_benchmark_casadi_parity() -> None:
@@ -518,7 +528,10 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
     X_init = state.states()
     U_init = state.controls()
 
-    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
+    # Duals converge later than primals, and at 1e-8 the costates still differ in the fourth
+    # significant figure while the trajectories agree to 1e-10. Tightening the solve is what
+    # makes a dual comparison measure the formulations rather than the stopping rule.
+    solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
     trajopt_res = solve_ipopt(prob, state, options=solver_opts)
     casadi_res = casadi_prob.solve(
         options=solver_opts,
@@ -535,6 +548,7 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
         tol_feas=1e-4,
         check_duals=False,
     )
+    assert_dual_block_parity(prob, trajopt_res, casadi_res, tol_dual=1e-4)
 
 
 def test_cartpole_benchmark_casadi_parity() -> None:
@@ -542,19 +556,16 @@ def test_cartpole_benchmark_casadi_parity() -> None:
     pytest.importorskip("casadi")
     pytest.importorskip("cyipopt")
 
-    prob, state, info = cartpole_swingup_benchmark(
-        N=25,
-        dt=0.05,
-        u_bound=20.0,
-        x_pos_bound=2.0,
-    )
+    # The benchmark's own cart position limit, which binds, rather than a slack one that would
+    # leave the whole bound path out of the comparison.
+    prob, state, info = cartpole_swingup_benchmark(N=25, dt=0.05, u_bound=20.0)
     x0 = state.x0
     dt = float(info["dt"])
 
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
-    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
+    solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
     trajopt_res = solve_ipopt(prob, state, options=solver_opts)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
@@ -567,3 +578,4 @@ def test_cartpole_benchmark_casadi_parity() -> None:
         tol_feas=1e-4,
         check_duals=False,
     )
+    assert_dual_block_parity(prob, trajopt_res, casadi_res, tol_dual=1e-4)

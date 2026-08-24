@@ -91,7 +91,8 @@ class ClosedLoopStats(NamedTuple):
     sustained_frequency_hz : float
         Sustained closed-loop MPC control frequency in Hz (1 / mean_latency_s).
     warmstart_speedup : float
-        Speedup factor of warm-started MPC steps relative to the cold-start solve.
+        Ratio of cold-start to warm-start solve time, both measured at the same MPC step so the
+        two solves face the same problem and differ only in their initial guess.
     total_duration_s : float
         Total elapsed wall-clock duration of the closed-loop run in seconds.
     """
@@ -141,7 +142,7 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
     x0: Sequence[float] | jax.Array = (0.0, 0.01, 0.0, 0.0),
     xf: Sequence[float] | jax.Array = (0.0, np.pi, 0.0, 0.0),
     u_bound: float = 20.0,
-    x_pos_bound: float = 2.0,
+    x_pos_bound: float = 0.4,
 ) -> tuple[Problem, MPCState, dict[str, Any]]:
     """Build the underactuated Cartpole swing-up benchmark problem with state and control limits.
 
@@ -158,7 +159,8 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
     u_bound : float, optional
         Control actuator limit |u| <= u_bound. Defaults to 20.0.
     x_pos_bound : float, optional
-        Cart position limit |p| <= x_pos_bound. Defaults to 2.0.
+        Cart position limit |p| <= x_pos_bound. Defaults to 0.4, tight enough that the swing-up
+        drives the cart onto the limit rather than merely satisfying it.
 
     Returns
     -------
@@ -194,6 +196,7 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
         "xf": xf_arr,
         "dt": dt,
         "N": N,
+        "x_pos_bound": x_pos_bound,
     }
     return prob, state, info
 
@@ -287,6 +290,7 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
     x0: Sequence[float] | jax.Array = (0.0, 0.0, 0.0),
     xf: Sequence[float] | jax.Array = (2.0, 0.0, 0.0),
     y_corridor_bound: float = 0.5,
+    y_ref_bulge: float = 1.0,
     v_max: float = 2.0,
     omega_max: float = 1.5,
 ) -> tuple[Problem, MPCState, dict[str, Any]]:
@@ -304,6 +308,11 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
         Goal state. Defaults to (2.0, 0.0, 0.0).
     y_corridor_bound : float, optional
         Corridor lateral bound |y| <= y_corridor_bound. Defaults to 0.5.
+    y_ref_bulge : float, optional
+        Peak lateral offset of the tracking reference, y_ref = y_ref_bulge * sin(pi * s).
+        Defaults to 1.0, which exceeds the corridor and so pulls the tracked trajectory onto
+        the lateral bound instead of leaving it inert. Zero gives a reference straight down
+        the corridor centreline, which no lateral bound can bind on.
     v_max : float, optional
         Maximum linear velocity. Defaults to 2.0.
     omega_max : float, optional
@@ -323,7 +332,17 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
     t_arr = jnp.linspace(0.0, (N - 1) * dt, N)
     dt_arr = jnp.full((N - 1,), dt, dtype=jnp.float64)
 
-    X_ref = jnp.zeros((N, n), dtype=jnp.float64).at[:, 0].set(jnp.linspace(float(x0_arr[0]), float(xf_arr[0]), N))
+    # A half sine vanishing at both ends, so the reference still starts at x0 and ends at xf
+    # while bulging past the corridor in between.
+    s_arc = jnp.linspace(0.0, 1.0, N)
+    y_ref = y_ref_bulge * jnp.sin(jnp.pi * s_arc)
+    X_ref = (
+        jnp.zeros((N, n), dtype=jnp.float64)
+        .at[:, 0]
+        .set(jnp.linspace(float(x0_arr[0]), float(xf_arr[0]), N))
+        .at[:, 1]
+        .set(y_ref)
+    )
     v_ref = float((xf_arr[0] - x0_arr[0]) / ((N - 1) * dt))
     U_ref = jnp.ones((N - 1, m), dtype=jnp.float64) * jnp.array([v_ref, 0.0])
     ref_traj = Trajectory(X=X_ref, U=U_ref, t=t_arr, dt=dt_arr)
@@ -352,6 +371,7 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
         "dt": dt,
         "N": N,
         "corridor_bound": y_corridor_bound,
+        "y_ref_bulge": y_ref_bulge,
     }
     return prob, state, info
 
@@ -395,8 +415,7 @@ def measure_derivative_evaluations(
     dt = state.dt
     xf = state.xf
     x0 = state.x0
-    P_total = len(state.lam)
-    lam = state.lam if len(state.lam) > 0 else jnp.zeros(P_total, dtype=z.dtype)
+    lam = state.lam
 
     # Warmup JIT compilation
     _ = eval_grad_f(problem, z, t0, dt, xf).block_until_ready()
@@ -427,7 +446,6 @@ def measure_derivative_evaluations(
         "grad_f": t_grad,
         "jac_g": t_jac,
         "hess_l": t_hess,
-        "hess_L": t_hess,
         "total_derivative": t_total_deriv,
     }
 
@@ -438,11 +456,47 @@ def measure_solver_runtime(
     *,
     options: Mapping[str, Any] | None = None,
 ) -> tuple[IpoptResult, float]:
-    """Solve the problem with Ipopt and measure the wall-clock solve duration in seconds."""
+    """Solve the problem with Ipopt and measure the wall-clock solve duration in seconds.
+
+    A discarded solve runs first so that the measured one is not dominated by JIT compilation of
+    the callbacks, matching how the setup and derivative measurements are taken.
+    """
+    _ = solve_ipopt(problem, state, options=options)
+
     t_start = time.perf_counter()
     res = solve_ipopt(problem, state, options=options)
     t_duration = time.perf_counter() - t_start
     return res, t_duration
+
+
+def _measure_warmstart_pair(
+    problem: Problem,
+    state: MPCState,
+    opts: Mapping[str, Any],
+) -> tuple[float, float]:
+    """Time one MPC step solved warm-started and cold, returning (t_warm, t_cold) in seconds.
+
+    Both solves face the same problem at the same step and differ only in the initial guess, so
+    the ratio isolates warm starting. The cold guess is the default one, x0 repeated with zero
+    controls.
+    """
+    cold_state = MPCState.initial(
+        problem,
+        x0=state.x0,
+        t0=state.t0,
+        xf=state.xf,
+        dt=state.dt,
+    )
+
+    t_start = time.perf_counter()
+    _ = solve_ipopt(problem, state, options=opts)
+    t_warm = time.perf_counter() - t_start
+
+    t_start = time.perf_counter()
+    _ = solve_ipopt(problem, cold_state, options=opts)
+    t_cold = time.perf_counter() - t_start
+
+    return t_warm, t_cold
 
 
 def measure_closed_loop_mpc(
@@ -452,15 +506,19 @@ def measure_closed_loop_mpc(
     num_steps: int = 20,
     solver_options: Mapping[str, Any] | None = None,
 ) -> ClosedLoopStats:
-    """Measure closed-loop MPC sustained frequency, latency jitter, and warm-start speedup."""
+    """Measure closed-loop MPC sustained frequency, latency jitter, and warm-start speedup.
+
+    Every timed section is preceded by a discarded solve, so the statistics describe the solver
+    rather than JIT compilation: the first step of an uncompiled loop runs two orders of
+    magnitude slower than the rest and would otherwise set the mean, the jitter and the p95.
+    """
     opts = {"max_iter": 100, "tol": 1e-4, "print_level": 0}
     if solver_options:
         opts.update(solver_options)
 
-    # 1. Cold solve
-    t_start_cold = time.perf_counter()
+    # 1. Seed the loop, discarding a compilation solve first
+    _ = solve_ipopt(problem, initial_state, options=opts)
     cold_res = solve_ipopt(problem, initial_state, options=opts)
-    t_cold = time.perf_counter() - t_start_cold
 
     # 2. Receding horizon warm-started loop
     dt_val = float(initial_state.dt[0]) if initial_state.dt.ndim > 0 else float(initial_state.dt)
@@ -503,6 +561,8 @@ def measure_closed_loop_mpc(
     t_total_loop = time.perf_counter() - t_loop_start
     durations_arr = np.asarray(durations, dtype=np.float64)
 
+    t_warm_step, t_cold_step = _measure_warmstart_pair(problem, curr_state, opts)
+
     mean_lat = float(np.mean(durations_arr))
     std_lat = float(np.std(durations_arr))
     min_lat = float(np.min(durations_arr))
@@ -511,7 +571,7 @@ def measure_closed_loop_mpc(
     p95_lat = float(np.percentile(durations_arr, 95))
     p99_lat = float(np.percentile(durations_arr, 99))
     freq = 1.0 / mean_lat if mean_lat > 0 else 0.0
-    speedup = t_cold / mean_lat if mean_lat > 0 else 1.0
+    speedup = t_cold_step / t_warm_step if t_warm_step > 0 else 1.0
 
     return ClosedLoopStats(
         num_steps=num_steps,
@@ -555,7 +615,7 @@ def run_benchmark(
         derivative_eval_time_s=deriv_timing["total_derivative"],
         grad_f_time_s=deriv_timing["grad_f"],
         jac_g_time_s=deriv_timing["jac_g"],
-        hess_l_time_s=deriv_timing["hess_L"],
+        hess_l_time_s=deriv_timing["hess_l"],
         solver_runtime_s=t_solve,
         total_solve_time_s=t_setup + t_solve,
         iterations=solve_res.iterations,

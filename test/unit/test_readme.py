@@ -13,8 +13,6 @@ def extract_python_blocks(markdown_text: str) -> list[str]:
 def test_readme_code_examples_execute() -> None:
     """Execute all Python code snippets found in README.md."""
     readme_path = Path(__file__).resolve().parents[2] / "README.md"
-    assert readme_path.exists(), f"README.md not found at {readme_path}"
-
     content = readme_path.read_text(encoding="utf-8")
     blocks = extract_python_blocks(content)
     assert len(blocks) > 0, "No python code blocks found in README.md"

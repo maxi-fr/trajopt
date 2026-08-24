@@ -45,7 +45,7 @@ class Quaternion(eqx.Module):
         return Rotation.from_quat(np.asarray(h))
 
     def to_rot_mat(self) -> jax.Array:
-        """Convert quaternion to a direct 3x3 passive rotation matrix of shape (3, 3)."""
+        """Convert to the passive rotation matrix of shape (3, 3)."""
         x, y, z = self.vec[0], self.vec[1], self.vec[2]
         w = self.scalar
         return jnp.array(

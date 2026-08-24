@@ -6,22 +6,26 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from trajopt.cones import PositiveOrthant, SecondOrderCone, ZeroCone
+from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
+from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, _extract_discrete_model
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     build_linear_constraint_block,
     compute_constraint_violation,
     extract_quadratic_cost,
+    operating_point_z,
     parse_solver_initial_state,
     primal_bounds,
     z_to_trajectory,
 )
+from trajopt.transcription.result import blocked_to_canonical
 from trajopt.transcription.transcription import (
-    _extract_discrete_model,
     eval_f,
 )
+
+_EMPTY = np.zeros(0, dtype=np.float64)
 
 
 class ClarabelResult(NamedTuple):
@@ -47,6 +51,10 @@ class ClarabelResult(NamedTuple):
         Number of solver iterations. Defaults to 0.
     constraint_violation : float, optional
         Maximum constraint violation across all constraints. Defaults to 0.0.
+    lam : np.ndarray, optional
+        Constraint duals in canonical row order, of shape ``(P,)``. Defaults to empty.
+    mu : np.ndarray, optional
+        Signed bound duals of shape ``(N * n + (N - 1) * m,)``. Defaults to empty.
     """
 
     trajectory: Trajectory
@@ -58,6 +66,8 @@ class ClarabelResult(NamedTuple):
     info: dict[str, Any]
     iterations: int = 0
     constraint_violation: float = 0.0
+    lam: np.ndarray = _EMPTY
+    mu: np.ndarray = _EMPTY
 
 
 def _make_cone(name: str, dim: int) -> object:
@@ -78,6 +88,8 @@ def _extract_conic_dynamics(  # noqa: PLR0913 -- Conic dynamics extraction helpe
     x0_arr: jax.Array,
     t_stage: jax.Array,
     dt_arr: jax.Array,
+    X_op: jax.Array,
+    U_op: jax.Array,
 ) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
     """Assemble initial condition and dynamics defect rows with ZeroCones for Clarabel."""
     A_rows: list[sp.spmatrix] = []
@@ -95,33 +107,13 @@ def _extract_conic_dynamics(  # noqa: PLR0913 -- Conic dynamics extraction helpe
     for k in range(N - 1):
         tk = t_stage[k]
         dtk = dt_arr[k]
-        Ak = np.asarray(
-            discrete_model.state_jacobian(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
-        Bk = np.asarray(
-            discrete_model.control_jacobian(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
-        dk = np.asarray(
-            discrete_model.discrete_dynamics(
-                jnp.zeros(n, dtype=jnp.float64),
-                jnp.zeros(m, dtype=jnp.float64),
-                tk,
-                dtk,
-            ),
-            dtype=np.float64,
-        )
+        x_op = X_op[k]
+        u_op = U_op[k]
+        Ak = np.asarray(discrete_model.state_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
+        Bk = np.asarray(discrete_model.control_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
+        f_op = np.asarray(discrete_model.discrete_dynamics(x_op, u_op, tk, dtk), dtype=np.float64)
+        # f(x, u) ~ f(x_op, u_op) + A (x - x_op) + B (u - u_op), collected into the constant
+        dk = f_op - Ak @ np.asarray(x_op, dtype=np.float64) - Bk @ np.asarray(u_op, dtype=np.float64)
 
         A_dyn_k = sp.lil_matrix((n, nz), dtype=np.float64)
         col_x_k = k * (n + m)
@@ -147,6 +139,7 @@ def _extract_conic_stage_constraints(  # noqa: PLR0913 -- Stage constraint extra
     t_stage: jax.Array,
     t_term: jax.Array,
     xf_val: jax.Array | None,
+    z_op: jax.Array,
 ) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
     """Assemble stage, terminal, and second-order cone constraints for Clarabel."""
     A_rows: list[sp.spmatrix] = []
@@ -160,14 +153,9 @@ def _extract_conic_stage_constraints(  # noqa: PLR0913 -- Stage constraint extra
         tk = t_stage[k] if k < N - 1 else t_term
         col_k = k * (n + m)
         is_term = k == N - 1
+        z_op_k = z_op[col_k : col_k + (n if is_term else n + m)]
 
         for con in ev.constraints:
-            from trajopt.constraints.bounds import (  # noqa: PLC0415 -- type check for box bounds
-                BoundConstraint,
-                ControlBound,
-                StateBound,
-            )
-
             if isinstance(con, (BoundConstraint, ControlBound, StateBound)):
                 continue
 
@@ -182,6 +170,7 @@ def _extract_conic_stage_constraints(  # noqa: PLR0913 -- Stage constraint extra
                 tk=tk,
                 is_term=is_term,
                 xf_val=xf_val,
+                z_op_k=z_op_k,
             )
 
             if isinstance(con.cone, SecondOrderCone):
@@ -211,12 +200,18 @@ def _extract_conic_stage_constraints(  # noqa: PLR0913 -- Stage constraint extra
                 A_rows.append(A_con.tocsr())
                 b_vals.append(val0_np)
                 cones.append(_make_cone("NonnegativeConeT", dim_c))
-            else:
+            elif isinstance(con.cone, NegativeOrthant):
                 A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
                 A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
                 A_rows.append(A_con.tocsr())
                 b_vals.append(-val0_np)
                 cones.append(_make_cone("NonnegativeConeT", dim_c))
+            else:
+                msg = (
+                    f"Clarabel adapter does not support cone {type(con.cone).__name__} "
+                    f"on constraint {type(con).__name__}."
+                )
+                raise TypeError(msg)
 
     return A_rows, b_vals, cones
 
@@ -253,6 +248,28 @@ def _extract_conic_bounds(
     return A_rows, b_vals, cones
 
 
+def _normalise_duals(problem: Problem, z_dual: np.ndarray, nz: int) -> tuple[np.ndarray, np.ndarray]:
+    """Split Clarabel's cone duals into canonical constraint duals and signed bound duals.
+
+    Clarabel keeps every cone dual non-negative and posts the two sides of a box as separate
+    NonnegativeCone blocks, upper first. Recombining them as ``upper - lower`` recovers the
+    signed convention the other backends report.
+    """
+    canonical_rows = blocked_to_canonical(problem)
+    lam = z_dual[canonical_rows]
+
+    zL, zU = primal_bounds(problem)
+    ub_indices = np.where(np.isfinite(zU))[0]
+    lb_indices = np.where(np.isfinite(zL))[0]
+
+    mu = np.zeros(nz, dtype=np.float64)
+    bound_base = len(canonical_rows)
+    mu[ub_indices] += z_dual[bound_base : bound_base + len(ub_indices)]
+    bound_base += len(ub_indices)
+    mu[lb_indices] -= z_dual[bound_base : bound_base + len(lb_indices)]
+    return lam, mu
+
+
 def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     problem: Problem,
     x0: jax.Array | MPCState,
@@ -262,12 +279,23 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     initial_trajectory: Trajectory | None = None,
     initial_z: jax.Array | None = None,
     xf: jax.Array | None = None,
+    operating_point: Trajectory | jax.Array | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> ClarabelResult:
     """Solve the transcribed optimal control problem using Clarabel.
 
-    Clarabel is a conic interior-point solver. It natively accepts convex quadratic objectives,
-    affine dynamics, linear equality/inequality constraints, and second-order cone constraints.
+    Clarabel is a conic interior-point solver, so this adapter hands it one convex approximation
+    of the problem, expanded about ``operating_point`` (the origin by default): the dynamics
+    linearized to :math:`x_{k+1} = A_k x_k + B_k u_k + d_k`, the constraints linearized, and the
+    cost taken to second order. The approximation is exact — and the result is the true optimum —
+    when the dynamics are affine, the cost quadratic and the constraints linear or second-order
+    conic, whatever the operating point.
+
+    Otherwise this is linearized MPC: the returned trajectory optimizes the approximation, not
+    the nonlinear problem, and ``success`` reports the conic solver's convergence.
+    ``constraint_violation`` is measured against the true nonlinear dynamics and is the number
+    that says how far the two have drifted apart; drive it down by re-solving with the operating
+    point set to the previous solution. Use Ipopt to solve the nonlinear problem directly.
 
     Parameters
     ----------
@@ -285,6 +313,9 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         Flat initial guess vector of shape ``(N * n + (N - 1) * m,)``.
     xf : jax.Array | None, optional
         Goal state vector of shape ``(n,)``. Defaults to None.
+    operating_point : Trajectory | jax.Array | None, optional
+        Point about which the dynamics, constraints and cost are expanded, as a trajectory or a
+        flat vector of shape ``(N * n + (N - 1) * m,)``. Defaults to None, meaning the origin.
     options : Mapping[str, Any] | None, optional
         Solver options passed to Clarabel DefaultSettings (e.g. ``{"tol_gap_abs": 1e-8, "max_iter": 200}``).
 
@@ -317,6 +348,9 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
     t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
     t_term = t0_arr + jnp.sum(dt_arr)
 
+    z_op = operating_point_z(problem, operating_point)
+    X_op, U_op = z_to_trajectory(z_op, N, n, m)
+
     P_triu, q_vec = extract_quadratic_cost(
         problem,
         N,
@@ -326,6 +360,7 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         t0_arr=t0_arr,
         dt_arr=dt_arr,
         xf_val=xf_val,
+        z_op=z_op,
     )
 
     discrete_model = _extract_discrete_model(problem)
@@ -338,6 +373,8 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         x0_arr=x0_arr,
         t_stage=t_stage,
         dt_arr=dt_arr,
+        X_op=X_op,
+        U_op=U_op,
     )
 
     knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
@@ -350,6 +387,7 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         t_stage=t_stage,
         t_term=t_term,
         xf_val=xf_val,
+        z_op=z_op,
     )
 
     A_bounds, b_bounds, cones_bounds = _extract_conic_bounds(problem, nz)
@@ -391,6 +429,8 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         dt=dt_arr,
     )
 
+    lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz)
+
     info_dict = {
         "status": status_str,
         "iterations": iter_count,
@@ -411,4 +451,6 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         info=info_dict,
         iterations=iter_count,
         constraint_violation=viol,
+        lam=lam_out,
+        mu=mu_out,
     )

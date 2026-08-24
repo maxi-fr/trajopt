@@ -137,9 +137,16 @@ class ConstraintGroup(eqx.Module):
 
 
 class BuiltConstraintList(eqx.Module):
-    """Fused constraint set across all horizon knot points."""
+    """Fused constraint set across all horizon knot points.
+
+    `knot_evaluators` holds the transcribed constraint rows; box bounds are absent from it
+    and carried as primal limits instead. `bound_evaluators` reconstitutes those limits as
+    constraints for consumers with no native bound handling -- the augmented Lagrangian,
+    where a box is enforced through the penalty rather than by the solver.
+    """
 
     knot_evaluators: tuple[BuiltKnotConstraint, ...]
+    bound_evaluators: tuple[BuiltKnotConstraint, ...]
     groups: tuple[ConstraintGroup, ...]
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
@@ -175,6 +182,16 @@ class BuiltConstraintList(eqx.Module):
             self.u_lower = jnp.full((self.N - 1, self.m), -np.inf)
             self.u_upper = jnp.full((self.N - 1, self.m), np.inf)
 
+        self.bound_evaluators = tuple(
+            BuiltKnotConstraint(
+                constraints=self._knot_bounds(k),
+                n=self.n,
+                m=self.m,
+                is_terminal=(k == self.N - 1),
+            )
+            for k in range(self.N)
+        )
+
         by_structure: dict[tuple, list[int]] = {}
         for k, evaluator in enumerate(self.knot_evaluators):
             key = (tuple(id(c) for c in evaluator.constraints), evaluator.is_terminal)
@@ -182,6 +199,25 @@ class BuiltConstraintList(eqx.Module):
         self.groups = tuple(
             ConstraintGroup(evaluator=self.knot_evaluators[ks[0]], knots=tuple(ks)) for ks in by_structure.values()
         )
+
+    def _knot_bounds(self, k: int) -> list[Constraint]:
+        """Rebuild knot k's box limits as constraints, for consumers without native bounds."""
+        cons: list[Constraint] = []
+        x_lo = np.asarray(self.x_lower[k], dtype=float)
+        x_hi = np.asarray(self.x_upper[k], dtype=float)
+        if np.any(np.isfinite(x_lo)) or np.any(np.isfinite(x_hi)):
+            cons.append(StateBound(n=self.n, x_min=x_lo, x_max=x_hi, m=self.m))
+
+        if k < self.N - 1:
+            u_lo = np.asarray(self.u_lower[k], dtype=float)
+            u_hi = np.asarray(self.u_upper[k], dtype=float)
+            if np.any(np.isfinite(u_lo)) or np.any(np.isfinite(u_hi)):
+                cons.append(ControlBound(m=self.m, u_min=u_lo, u_max=u_hi, n=self.n))
+        return cons
+
+    def has_goal_constraint(self) -> bool:
+        """Whether any knot carries a GoalConstraint, the one constraint that reads a run-time xf."""
+        return any(isinstance(c, GoalConstraint) for ev in self.knot_evaluators for c in ev.constraints)
 
     def primal_bounds(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return the collected primal variable box bounds (xL, xU, uL, uU)."""
@@ -347,7 +383,11 @@ class ConstraintList:
                 self.p[k] += con.p
 
     def num_constraints(self) -> np.ndarray:
-        """Return total constraint dimension at each knot point, of shape (N,)."""
+        """Return registered constraint dimension at each knot point, of shape (N,).
+
+        Counts box bounds, matching the Julia reference. `build` hoists those into primal
+        limits, so `BuiltConstraintList.p` -- the transcribed row count -- is smaller.
+        """
         return self.p.copy()
 
     def _apply_state_bound(
@@ -425,10 +465,20 @@ class ConstraintList:
         return xL, xU, uL, uU
 
     def build(self) -> BuiltConstraintList:
-        """Trace and fuse all registered constraints into a single BuiltConstraintList."""
+        """Trace and fuse all registered constraints into a single BuiltConstraintList.
+
+        Box bounds are hoisted out of the knot evaluators and carried only as primal variable
+        limits. `Box.residual` reproduces exactly the limits `primal_bounds` collects, so
+        emitting both would duplicate every bound as a constraint row whose gradient is the
+        unit vector of an already-active variable bound -- degenerating the active set.
+        """
         knot_evaluators = [
             BuiltKnotConstraint(
-                constraints=[con for con, k_inds in zip(self.constraints, self.inds, strict=True) if k in k_inds],
+                constraints=[
+                    con
+                    for con, k_inds in zip(self.constraints, self.inds, strict=True)
+                    if k in k_inds and not isinstance(con, BoxBound)
+                ],
                 n=self.n,
                 m=self.m,
                 is_terminal=(k == self.N - 1),

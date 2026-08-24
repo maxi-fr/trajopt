@@ -8,9 +8,8 @@ import jax.numpy as jnp
 from trajopt.constraints.constraint_list import BuiltConstraintList, BuiltKnotConstraint, ConstraintList
 from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import DiagonalCost, QuadraticCost
-from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics
-from trajopt.dynamics.integrators import RK4
-from trajopt.problem import Problem
+from trajopt.dynamics.base import AbstractModel
+from trajopt.problem import Problem, _extract_discrete_model
 from trajopt.trajectory import Trajectory
 
 _EXPECTED_NDIM_2D = 2
@@ -19,9 +18,15 @@ _EXPECTED_NDIM_3D = 3
 
 class _KnotALContext(NamedTuple):
     evaluator: BuiltKnotConstraint
+    bounds: BuiltKnotConstraint
     lam_k: jax.Array
     mu_k: jax.Array
     tk: float | jax.Array
+
+    @property
+    def p(self) -> int:
+        """Total penalised row count at this knot: constraint rows then bound rows."""
+        return self.evaluator.p + self.bounds.p
 
 
 def _validate_expansion(exp: "Expansion") -> None:
@@ -180,27 +185,6 @@ class Expansion(eqx.Module):
             R=self.R - other.R,
             H=self.H - other.H,
         )
-
-
-def _extract_discrete_model(problem: Problem | AbstractModel) -> DiscreteDynamics:
-    """Extract or construct a DiscreteDynamics model from problem."""
-    if isinstance(problem, Problem):
-        model = problem.model
-        integrator = problem.integrator
-    elif isinstance(problem, AbstractModel):
-        model = problem
-        integrator = None
-    else:
-        msg = f"Cannot extract dynamics model from problem of type {type(problem).__name__}"
-        raise TypeError(msg)
-
-    if isinstance(model, DiscreteDynamics):
-        return model
-    if isinstance(model, ContinuousDynamics):
-        integ = integrator if integrator is not None else RK4()
-        return DiscretizedDynamics(continuous_dynamics=model, integrator=integ)
-    msg = f"Model {type(model).__name__} is neither DiscreteDynamics nor ContinuousDynamics"
-    raise TypeError(msg)
 
 
 def _extract_model(
@@ -452,10 +436,10 @@ def _evaluate_knot_penalty(
     x_in: jax.Array,
     u_in: jax.Array | None,
 ) -> jax.Array:
-    """Evaluate augmented Lagrangian penalty for a knot point's constraints."""
+    """Evaluate augmented Lagrangian penalty for a knot point's constraints and box bounds."""
     pen_sum = jnp.zeros((), dtype=x_in.dtype)
     off = 0
-    for c in ctx.evaluator.constraints:
+    for c in (*ctx.evaluator.constraints, *ctx.bounds.constraints):
         p_c = c.p
         lam_c = ctx.lam_k[off : off + p_c]
         val_c = c.evaluate(x_in, u_in, ctx.tk)
@@ -554,14 +538,13 @@ def _knot_al_expansion(
     model: AbstractModel | None,
 ) -> tuple[jax.Array, jax.Array | None, jax.Array, jax.Array | None, jax.Array | None]:
     """Compute AL gradient and Hessian contributions at a single knot point."""
-    p_k = ctx.evaluator.p
     dtype = xk.dtype
     n_x = int(xk.shape[0])
     ne = model.ne if model is not None else n_x
     m = int(uk.shape[0]) if uk is not None else int(ctx.evaluator.m)
     Gk = model.errstate_jacobian(xk) if model is not None else jnp.eye(n_x, dtype=dtype)
 
-    if p_k == 0 or len(ctx.evaluator.constraints) == 0:
+    if ctx.p == 0:
         q_al = jnp.zeros(ne, dtype=dtype)
         Q_al = jnp.zeros((ne, ne), dtype=dtype)
         r_al = jnp.zeros(m, dtype=dtype) if uk is not None else None
@@ -591,6 +574,8 @@ def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion ta
     ----------
     problem : Problem | BuiltConstraintList | ConstraintList
         Problem or constraint list holding active constraints and active knot-point ranges.
+        Box bounds are penalised alongside the constraint rows, since a native solver has no
+        variable bounds of its own; each knot's multipliers run constraint rows then bound rows.
     state : Trajectory
         Trajectory holding stacked states X of shape (N, n), controls U of shape (N-1, m),
         and times t of shape (N,).
@@ -620,7 +605,11 @@ def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion ta
     N = state.N
     dtype = X.dtype
 
-    lam_list = _parse_multipliers(lam, built_constraints.p, N, dtype)
+    p_penalised = tuple(
+        ev.p + bd.p
+        for ev, bd in zip(built_constraints.knot_evaluators, built_constraints.bound_evaluators, strict=True)
+    )
+    lam_list = _parse_multipliers(lam, p_penalised, N, dtype)
     mu_list = _parse_penalties(mu, N, dtype)
 
     q_al_list: list[jax.Array] = []
@@ -630,9 +619,9 @@ def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion ta
     H_al_list: list[jax.Array] = []
 
     for k in range(N):
-        evaluator = built_constraints.knot_evaluators[k]
         ctx = _KnotALContext(
-            evaluator=evaluator,
+            evaluator=built_constraints.knot_evaluators[k],
+            bounds=built_constraints.bound_evaluators[k],
             lam_k=lam_list[k],
             mu_k=mu_list[k],
             tk=t[k],

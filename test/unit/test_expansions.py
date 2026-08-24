@@ -38,6 +38,8 @@ from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
 from trajopt.problem import Problem
 from trajopt.rotations.quaternion import Quaternion
 from trajopt.trajectory import Trajectory
+from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
+from trajopt.transcription.transcription import constraints_and_jac, eval_grad_f, hessian
 
 
 def test_expansion_data_structure() -> None:
@@ -800,3 +802,107 @@ def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
     assert al_exp.r.shape == (N - 1, m)
     assert al_exp.R.shape == (N - 1, m, m)
     assert al_exp.H.shape == (N - 1, m, ne)
+
+
+def _euclidean_dubins_problem(weights: str) -> tuple[Problem, Trajectory, float, jax.Array]:
+    """Build a Dubins problem and a random trajectory to expand about, plus its (t0, dt).
+
+    DubinsCar is Euclidean (ne == n, G = I), which is what makes the engine's error-coordinate
+    output directly comparable to the transcription's state-coordinate derivatives. `weights`
+    selects the stacked DiagonalCost or the stacked QuadraticCost closed form inside
+    `_stage_cost_expansion`. Every weight varies knot to knot, and the dense case carries a
+    nonzero cross term, so a comparison that lost track of the knot index or dropped the cross
+    block could not still pass.
+    """
+    N, dt, t0 = 6, 0.1, 0.3
+    model = DubinsCar()
+    n, m = int(model.n), int(model.m)
+
+    rng = np.random.default_rng(20260824)
+    scale = 1.0 + jnp.arange(N - 1, dtype=jnp.float64)[:, None]
+    Q_diag = scale * jnp.array([1.0, 2.0, 0.5])
+    R_diag = scale * jnp.array([0.3, 0.7])
+    q_lin = jnp.asarray(rng.standard_normal((N - 1, n)))
+    r_lin = jnp.asarray(rng.standard_normal((N - 1, m)))
+    Qf_diag = jnp.array([10.0, 20.0, 5.0])
+
+    if weights == "diagonal":
+        stage_cost = DiagonalCost(Q=Q_diag, R=R_diag, q=q_lin, r=r_lin)
+        terminal_cost = DiagonalCost(Q=Qf_diag, terminal=True, m=m)
+    else:
+        cross = jnp.asarray(rng.standard_normal((N - 1, m, n)))
+        stage_cost = QuadraticCost(
+            Q=jax.vmap(jnp.diag)(Q_diag),
+            R=jax.vmap(jnp.diag)(R_diag),
+            H=cross,
+            q=q_lin,
+            r=r_lin,
+        )
+        terminal_cost = QuadraticCost(Q=jnp.diag(Qf_diag), terminal=True, m=m)
+    obj = Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
+
+    problem = Problem(model=model, obj=obj, constraints=ConstraintList(n, m, N), N=N, integrator=RK4())
+
+    dt_arr = jnp.full((N - 1,), dt)
+    traj = Trajectory(
+        X=jnp.asarray(rng.standard_normal((N, n))),
+        U=jnp.asarray(rng.standard_normal((N - 1, m))),
+        t=t0 + jnp.concatenate([jnp.zeros(1), jnp.cumsum(dt_arr)]),
+        dt=dt_arr,
+    )
+    return problem, traj, t0, dt_arr
+
+
+def _unpack_tril(values: np.ndarray, d: int) -> np.ndarray:
+    """Rebuild a symmetric (d, d) matrix from its lower-triangular nonzeros in row-major order."""
+    out = np.zeros((d, d))
+    rows, cols = np.tril_indices(d)
+    out[rows, cols] = values
+    return out + np.tril(out, -1).T
+
+
+@pytest.mark.parametrize("weights", ["diagonal", "dense"])
+def test_engine_agrees_with_transcription_on_euclidean_derivatives(weights: str) -> None:
+    """Verify the expansion engine and the NLP transcription compute the same derivatives at G = I.
+
+    The engine is the seam the native solvers will consume and nothing consumes it yet, so its
+    closed-form cost paths have had no oracle but themselves. Where the error dimension equals
+    the state dimension the two are computing the same quantities in the same coordinates, which
+    makes the transcription -- exercised on every Ipopt solve -- exactly that missing oracle.
+    """
+    problem, traj, t0, dt = _euclidean_dubins_problem(weights)
+    N, n, m = int(problem.N), int(problem.model.n), int(problem.model.m)
+    Z = trajectory_to_z(traj.X, traj.U)
+
+    # 1. Cost gradients against eval_grad_f, unpacked from the flat Z layout.
+    cost_exp = cost_expansion(problem, traj)
+    grad_X, grad_U = z_to_trajectory(eval_grad_f(problem, Z, t0, dt), N, n, m)
+    np.testing.assert_allclose(np.asarray(cost_exp.q), np.asarray(grad_X), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(cost_exp.r), np.asarray(grad_U), rtol=1e-12, atol=1e-12)
+
+    # 2. Cost Hessian blocks against the Lagrangian Hessian with the multipliers zeroed, which
+    #    leaves only the objective term.
+    hess = np.asarray(hessian(problem, Z, t0=t0, dt=dt, obj_factor=1.0, lam=None))
+    stage_nnz = (n + m) * (n + m + 1) // 2
+    for k in range(N - 1):
+        Hk = _unpack_tril(hess[k * stage_nnz : (k + 1) * stage_nnz], n + m)
+        np.testing.assert_allclose(np.asarray(cost_exp.Q[k]), Hk[:n, :n], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(cost_exp.R[k]), Hk[n:, n:], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(cost_exp.H[k]), Hk[n:, :n], rtol=1e-12, atol=1e-12)
+    H_term = _unpack_tril(hess[(N - 1) * stage_nnz :], n)
+    np.testing.assert_allclose(np.asarray(cost_exp.Q[-1]), H_term, rtol=1e-12, atol=1e-12)
+
+    # 3. Dynamics Jacobians against the defect rows of the constraint Jacobian, which carry
+    #    -[A_k, B_k] followed by the identity block of x_{k+1}.
+    dyn_exp = dynamics_expansion(problem, traj)
+    _, jac = constraints_and_jac(problem, Z, traj.X[0], t0, dt)
+    jac_np = np.asarray(jac)
+    offset = n * n  # the initial-condition identity block
+    for k in range(N - 1):
+        AB = -jac_np[offset : offset + n * (n + m)].reshape(n, n + m)
+        offset += n * (n + m)
+        np.testing.assert_allclose(np.asarray(dyn_exp.A[k]), AB[:, :n], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(dyn_exp.B[k]), AB[:, n:], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(jac_np[offset : offset + n * n].reshape(n, n), np.eye(n))
+        offset += n * n
+    assert offset == len(jac_np), "the constraint Jacobian carries rows this walk did not account for"

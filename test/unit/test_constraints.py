@@ -547,13 +547,20 @@ def test_built_constraint_list_batched_evaluation() -> None:
     # Three distinct fused structures: knot 0, knots 1..N-2, and the terminal knot
     assert [g.knots for g in built.groups] == [(0,), (1, 2, 3, 4), (5,)]
 
+    # The ControlBound is hoisted to primal limits, so it contributes no rows: knot 0 fuses
+    # to width 0, and knots 1..N-2 carry only the circle.
+    uL, uU = built.primal_bounds()[2:]
+    np.testing.assert_allclose(uL[: N - 1], -3.0)
+    np.testing.assert_allclose(uU[: N - 1], 3.0)
+    assert all(not isinstance(c, ControlBound) for ev in built.knot_evaluators for c in ev.constraints)
+
     vals = built.evaluate(X, U)
-    assert [v.shape for v in vals] == [(1, 2), (4, 3), (1, 4)]
+    assert [v.shape for v in vals] == [(1, 0), (4, 1), (1, 4)]
 
     jacs = built.jacobian(X, U)
     assert [(jx.shape, ju.shape) for jx, ju in jacs] == [
-        ((1, 2, n), (1, 2, m)),
-        ((4, 3, n), (4, 3, m)),
+        ((1, 0, n), (1, 0, m)),
+        ((4, 1, n), (4, 1, m)),
         ((1, 4, n), (1, 4, 0)),
     ]
 

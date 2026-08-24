@@ -7,9 +7,10 @@ import pytest
 from trajopt.constraints.bounds import ControlBound
 from trajopt.constraints.constraint_list import ConstraintList
 from trajopt.constraints.linear import GoalConstraint
-from trajopt.costs.objective import LQRObjective
+from trajopt.costs.objective import LQRObjective, TrackingObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
+from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
 from trajopt.problem import (
     MPCState,
@@ -27,6 +28,7 @@ from trajopt.transcription.ipopt import solve_ipopt
 from trajopt.transcription.transcription import (
     constraints_and_jac,
     eval_f,
+    eval_grad_f,
     eval_h,
 )
 
@@ -98,6 +100,7 @@ def test_mpcstate_per_step_operations_return_new_values() -> None:
     new_xf = jnp.array([0.0, 0.0])
     s_goal = state.with_goal(new_xf)
     assert s_goal is not state
+    assert s_goal.xf is not None
     np.testing.assert_allclose(s_goal.xf, new_xf)
 
     # 3. Shift trajectory forward
@@ -171,13 +174,15 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
     compile_count_jac = 0
     compile_count_hess = 0
 
-    def cost_target(p: Problem, z: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array) -> jax.Array:
+    # xf is Array | None on MPCState, and forwarding it as such is what lets these mirror the
+    # real call sites rather than a narrowed version of them.
+    def cost_target(p: Problem, z: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array | None) -> jax.Array:
         nonlocal compile_count_cost
         compile_count_cost += 1
         return eval_f(p, z, t0, dt, xf)
 
     def jac_target(
-        p: Problem, z: jax.Array, x_init: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array
+        p: Problem, z: jax.Array, x_init: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array | None
     ) -> tuple[jax.Array, jax.Array]:
         nonlocal compile_count_jac
         compile_count_jac += 1
@@ -190,7 +195,7 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
         dt: jax.Array,
         obj_factor: float,
         lam: jax.Array,
-        xf: jax.Array,
+        xf: jax.Array | None,
     ) -> jax.Array:
         nonlocal compile_count_hess
         compile_count_hess += 1
@@ -301,7 +306,7 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     res_cold = solve_ipopt(prob, state_cold, options={"max_iter": 200, "tol": 1e-4, "print_level": 0})
 
     # Warm start measurably reduces solver iterations vs cold start
-    assert res_warm.info.get("iter_count", 0) < res_cold.info.get("iter_count", 100)
+    assert res_warm.iterations < res_cold.iterations
     np.testing.assert_allclose(res_warm.trajectory.U[0], res_cold.trajectory.U[0], atol=1e-2)
 
 
@@ -377,3 +382,95 @@ def test_rollout_problem_state() -> None:
     for k in range(N - 1):
         x_next = dmodel.discrete_dynamics(traj.X[k], traj.U[k], traj.t[k], traj.dt[k])
         np.testing.assert_allclose(traj.X[k + 1], x_next)
+
+
+def _tracking_problem() -> tuple[Problem, Trajectory]:
+    """Build a Dubins-style problem whose objective tracks a reference and whose goal is a constraint."""
+    model = DubinsCar()
+    n, m, N, dt = model.n, model.m, 8, 0.1
+    xf = jnp.array([2.0, 0.0, 0.0])
+
+    t_arr = jnp.linspace(0.0, (N - 1) * dt, N)
+    dt_arr = jnp.full((N - 1,), dt)
+    X_ref = jnp.zeros((N, n)).at[:, 0].set(jnp.linspace(0.0, float(xf[0]), N))
+    U_ref = jnp.ones((N - 1, m)) * jnp.array([float(xf[0]) / ((N - 1) * dt), 0.0])
+    ref = Trajectory(X=X_ref, U=U_ref, t=t_arr, dt=dt_arr)
+
+    obj = TrackingObjective(Q=jnp.diag(jnp.array([1.0, 10.0, 0.1])), R=jnp.diag(jnp.array([0.1, 0.1])), trajectory=ref)
+    cl = ConstraintList(n=n, m=m, N=N)
+    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
+    return Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4()), ref
+
+
+def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
+    """Assert a run-time xf moves an LQRObjective exactly as rebuilding it at the new goal would."""
+    model = Cartpole()
+    N = 8
+    Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
+    R = jnp.diag(jnp.array([0.01]))
+    Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
+    xf_build = jnp.array([0.0, np.pi, 0.0, 0.0])
+    xf_new = jnp.array([0.3, 2.0, -0.1, 0.4])
+
+    prob = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf_build, N=N), N=N, integrator=RK4())
+    prob_rebuilt = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf_new, N=N), N=N, integrator=RK4())
+
+    state = MPCState.initial(prob, x0=jnp.array([0.1, 0.2, 0.0, 0.0]), dt=0.05, xf=xf_build)
+    Z = state.Z + 0.05 * jnp.arange(len(state.Z), dtype=state.Z.dtype)
+
+    # The retarget rewrites q = -Q xf and leaves c at its build value, so the two costs agree up
+    # to that constant; the gradient, which is what the solver sees, agrees outright.
+    np.testing.assert_allclose(
+        eval_grad_f(prob, Z, state.t0, state.dt, xf_new),
+        eval_grad_f(prob_rebuilt, Z, state.t0, state.dt, None),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    j_retargeted = eval_f(prob, Z, state.t0, state.dt, xf_new)
+    j_rebuilt = eval_f(prob_rebuilt, Z, state.t0, state.dt, None)
+    offset = j_retargeted - j_rebuilt
+    Z2 = Z * 0.5
+    np.testing.assert_allclose(
+        eval_f(prob, Z2, state.t0, state.dt, xf_new) - eval_f(prob_rebuilt, Z2, state.t0, state.dt, None),
+        offset,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_runtime_goal_leaves_a_tracking_objective_alone() -> None:
+    """Assert xf reaches the goal constraint without displacing a tracking objective's reference."""
+    prob, ref = _tracking_problem()
+    xf = jnp.array([2.0, 0.0, 0.0])
+    state = MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, xf=xf, initial_trajectory=ref)
+
+    # At the reference the tracking cost is zero; regulating to xf instead would not be.
+    np.testing.assert_allclose(prob.obj.cost(ref), 0.0, atol=1e-12)
+    np.testing.assert_allclose(eval_f(prob, state.Z, state.t0, state.dt, state.xf), 0.0, atol=1e-12)
+
+    # The goal constraint still follows the run-time goal.
+    xf_new = jnp.array([1.0, 0.25, 0.0])
+    con, _ = constraints_and_jac(prob, state.Z, state.x0, state.t0, state.dt, xf=state.with_goal(xf_new).xf)
+    np.testing.assert_allclose(con[-3:], states(state)[-1] - xf_new, atol=1e-12)
+
+
+def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
+    """Assert a goal that neither the objective nor a constraint consumes is refused at construction."""
+    prob, ref = _tracking_problem()
+    unconstrained = Problem(model=prob.model, obj=prob.obj, N=prob.N, integrator=RK4())
+
+    with pytest.raises(ValueError, match="nothing in the problem reads it"):
+        MPCState.initial(unconstrained, x0=jnp.zeros(3), dt=0.1, xf=jnp.array([2.0, 0.0, 0.0]))
+
+    state = MPCState.initial(unconstrained, x0=jnp.zeros(3), dt=0.1, initial_trajectory=ref)
+    assert state.xf is None
+    with pytest.raises(ValueError, match="built without a goal"):
+        state.with_goal(jnp.array([2.0, 0.0, 0.0]))
+
+
+def test_tracking_objective_cannot_be_retargeted_by_a_goal() -> None:
+    """Assert retargeting a tracking objective is refused rather than silently discarding its reference."""
+    prob, _ = _tracking_problem()
+    assert prob.obj.regulates_to_goal is False
+    with pytest.raises(TypeError, match="does not regulate to a goal state"):
+        prob.obj.with_goal(jnp.array([2.0, 0.0, 0.0]))

@@ -102,8 +102,9 @@ class MPCState(eqx.Module):
         Initial state condition of shape (n,).
     t0 : jax.Array
         Initial timestamp scalar of shape ().
-    xf : jax.Array
-        Goal state vector of shape (n,).
+    xf : jax.Array | None
+        Run-time goal state vector of shape (n,), or None when the goal is baked into the
+        objective and the constraints at build time.
     lam : jax.Array
         Constraint dual multipliers vector of shape (P,).
     mu : jax.Array
@@ -122,7 +123,7 @@ class MPCState(eqx.Module):
 
     x0: jax.Array
     t0: jax.Array
-    xf: jax.Array
+    xf: jax.Array | None
     lam: jax.Array
     mu: jax.Array
     Z: jax.Array
@@ -154,7 +155,13 @@ class MPCState(eqx.Module):
         t0 : float | jax.Array, optional
             Initial timestamp. Defaults to 0.0.
         xf : jax.Array | Sequence[float] | None, optional
-            Target goal state vector of shape (n,). Defaults to zeros.
+            Run-time goal state vector of shape (n,), read by a goal-regulating objective and by
+            any GoalConstraint. Defaults to None, leaving both at their build-time goal.
+
+        Raises
+        ------
+        ValueError
+            If xf is given but nothing in the problem reads it.
         dt : float | jax.Array, optional
             Step duration (scalar or array of shape (N - 1,)). Defaults to 0.05.
         initial_trajectory : Trajectory | None, optional
@@ -174,7 +181,19 @@ class MPCState(eqx.Module):
         x0_arr = jnp.asarray(x0, dtype=jnp.float64)
         t0_arr = jnp.asarray(t0, dtype=jnp.float64)
         dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
-        xf_arr = jnp.asarray(xf, dtype=jnp.float64) if xf is not None else jnp.zeros(n, dtype=jnp.float64)
+
+        if xf is None:
+            xf_arr = None
+        elif problem.obj.regulates_to_goal or problem.constraints.has_goal_constraint():
+            xf_arr = jnp.asarray(xf, dtype=jnp.float64)
+        else:
+            msg = (
+                f"xf was given but nothing in the problem reads it: the {type(problem.obj.stage_cost).__name__} "
+                f"objective carries a reference of its own rather than regulating to a goal, and no "
+                f"GoalConstraint is registered. Build the objective with LQRObjective to regulate to xf, or "
+                f"add a GoalConstraint, or leave xf unset."
+            )
+            raise ValueError(msg)
 
         if initial_z is not None:
             z_init = jnp.asarray(initial_z, dtype=jnp.float64)
@@ -249,7 +268,15 @@ class MPCState(eqx.Module):
         -------
         MPCState
             New state instance with updated goal.
+
+        Raises
+        ------
+        ValueError
+            If this state was built without a goal, since nothing was checked to read one.
         """
+        if self.xf is None:
+            msg = "This MPCState was built without a goal. Pass xf to MPCState.initial to make the goal run-time."
+            raise ValueError(msg)
         xf_arr = jnp.asarray(xf, dtype=self.xf.dtype)
         return MPCState(
             x0=self.x0,
@@ -439,11 +466,53 @@ def rollout(
     raise TypeError(msg)
 
 
+def _dispatch_solver(
+    problem: Problem,
+    state: MPCState,
+    *,
+    solver: str | Callable[..., Any],
+    operating_point: "Trajectory | jax.Array | None",
+    options: Mapping[str, Any] | None,
+) -> Any:  # noqa: ANN401 -- each backend returns its own result NamedTuple
+    """Run the named or supplied solver backend and return its raw result."""
+    if callable(solver):
+        if operating_point is not None:
+            msg = "operating_point is not forwarded to a callable solver; bind it inside the callable instead."
+            raise ValueError(msg)
+        solver_fn: Any = solver
+        return solver_fn(problem=problem, x0=state, options=options)
+
+    if not isinstance(solver, str):
+        msg = f"Invalid solver type: {type(solver).__name__}. Expected str or callable."
+        raise TypeError(msg)
+
+    solver_name = solver.strip().lower()
+    if solver_name == "ipopt":
+        from trajopt.transcription.ipopt import solve_ipopt  # noqa: PLC0415 -- avoid circular import
+
+        if operating_point is not None:
+            msg = "Ipopt solves the nonlinear problem directly; operating_point applies to 'osqp' and 'clarabel'."
+            raise ValueError(msg)
+        return solve_ipopt(problem=problem, x0=state, options=options)
+    if solver_name == "osqp":
+        from trajopt.transcription.osqp import solve_osqp  # noqa: PLC0415 -- avoid circular import
+
+        return solve_osqp(problem=problem, x0=state, operating_point=operating_point, options=options)
+    if solver_name == "clarabel":
+        from trajopt.transcription.clarabel import solve_clarabel  # noqa: PLC0415 -- avoid circular import
+
+        return solve_clarabel(problem=problem, x0=state, operating_point=operating_point, options=options)
+
+    msg = f"Unknown solver backend: '{solver}'. Expected 'ipopt', 'osqp', 'clarabel', or callable."
+    raise ValueError(msg)
+
+
 def solve(
     problem: Problem,
     state: MPCState,
     *,
     solver: str | Callable[..., Any] = "ipopt",
+    operating_point: "Trajectory | jax.Array | None" = None,
     options: Mapping[str, Any] | None = None,
 ) -> MPCState:
     """Solve the optimal control problem and return an updated MPCState with optimal trajectory and multipliers.
@@ -454,8 +523,11 @@ def solve(
         Problem structure containing model, objective, constraints, and horizon.
     state : MPCState
         Current per-step state holding initial state, warm-start trajectory, and goal.
-    solver : str | Any, optional
+    solver : str | Callable[..., Any], optional
         Solver backend to use ("ipopt", "osqp", "clarabel") or a callable. Defaults to "ipopt".
+    operating_point : Trajectory | jax.Array | None, optional
+        Point about which the QP backends expand the problem. Defaults to None, meaning the
+        origin. Ipopt solves the nonlinear problem directly and rejects it.
     options : Mapping[str, Any] | None, optional
         Solver options passed to backend (e.g. max_iter, tol, print_level, verbose).
 
@@ -464,44 +536,10 @@ def solve(
     MPCState
         New state containing optimal trajectory Z, dual multipliers lam, mu, and boundary conditions.
     """
-    res: Any
-    if isinstance(solver, str):
-        solver_name = solver.strip().lower()
-        if solver_name == "ipopt":
-            from trajopt.transcription.ipopt import solve_ipopt  # noqa: PLC0415 -- avoid circular import
+    res = _dispatch_solver(problem, state, solver=solver, operating_point=operating_point, options=options)
 
-            res = solve_ipopt(problem=problem, x0=state, options=options)
-        elif solver_name == "osqp":
-            from trajopt.transcription.osqp import solve_osqp  # noqa: PLC0415 -- avoid circular import
-
-            res = solve_osqp(problem=problem, x0=state, options=options)
-        elif solver_name == "clarabel":
-            from trajopt.transcription.clarabel import solve_clarabel  # noqa: PLC0415 -- avoid circular import
-
-            res = solve_clarabel(problem=problem, x0=state, options=options)
-        else:
-            msg = f"Unknown solver backend: '{solver}'. Expected 'ipopt', 'osqp', 'clarabel', or callable."
-            raise ValueError(msg)
-    elif callable(solver):
-        solver_fn: Any = solver
-        res = solver_fn(problem=problem, x0=state, options=options)
-    else:
-        msg = f"Invalid solver type: {type(solver).__name__}. Expected str or callable."
-        raise TypeError(msg)
-
-    mult_con = res.info.get("mult_g")
-    if mult_con is None:
-        mult_con = res.info.get("y")
-    if mult_con is None:
-        mult_con = res.info.get("z")
-    lam = jnp.asarray(mult_con, dtype=state.Z.dtype) if mult_con is not None else state.lam
-
-    mult_x_L = res.info.get("mult_x_L")
-    mult_x_U = res.info.get("mult_x_U")
-    if mult_x_U is not None and mult_x_L is not None:
-        mu = jnp.asarray(mult_x_U - mult_x_L, dtype=state.Z.dtype)
-    else:
-        mu = state.mu
+    lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if len(res.lam) > 0 else state.lam
+    mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if len(res.mu) > 0 else state.mu
 
     return MPCState(
         x0=state.x0,

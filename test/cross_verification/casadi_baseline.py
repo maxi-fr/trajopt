@@ -1063,6 +1063,82 @@ def assert_setups_match(
         )
 
 
+def canonical_dual_blocks(problem: Problem) -> list[tuple[str, int, int]]:
+    """Return the transcribed problem's dual row blocks as (name, start, width), in eval_g order.
+
+    Both formulations emit the initial condition first and then, per knot, the dynamics defect
+    followed by that knot's path constraints, so this decomposition indexes either side's dual
+    vector. It stops at the last constraint row: variable bounds live outside it.
+    """
+    n = int(problem.model.n)
+    N = int(problem.N)
+    knot_p = list(problem.constraints.p)
+
+    blocks: list[tuple[str, int, int]] = [("initial condition", 0, n)]
+    offset = n
+    for k in range(N - 1):
+        blocks.append((f"dynamics defect {k}", offset, n))
+        offset += n
+        if knot_p[k]:
+            blocks.append((f"path constraints {k}", offset, knot_p[k]))
+            offset += knot_p[k]
+    if knot_p[N - 1]:
+        blocks.append((f"terminal constraints {N - 1}", offset, knot_p[N - 1]))
+
+    return blocks
+
+
+def assert_dual_block_parity(
+    problem: Problem,
+    trajopt_res: IpoptResult,
+    casadi_res: CasadiResult,
+    *,
+    tol_dual: float = 1e-4,
+) -> None:
+    """Assert the dual blocks whose rows exist in both formulations agree, block by block.
+
+    Only the transcribed constraint rows are compared. The box bounds are deliberately excluded:
+    trajopt hands them to Ipopt as variable limits, where their multipliers come back through
+    `mu` rather than `mult_g`, while `_add_primal_bounds` gives CasADi general constraint rows
+    for them -- collapsed to a knot-invariant min/max envelope, ordered by variable rather than
+    by knot, and skipping the first and last state knots. Those rows are a different set, not a
+    permutation of the same one, so no elementwise comparison of them would mean anything.
+
+    Parameters
+    ----------
+    problem : Problem
+        The trajopt problem both formulations transcribe, read for the row layout.
+    trajopt_res : IpoptResult
+        Result whose `lam` holds the canonical constraint duals.
+    casadi_res : CasadiResult
+        Result whose `mult_g` holds the same rows first, then CasADi's bound rows.
+    tol_dual : float, optional
+        Maximum tolerated relative dual error per block. Defaults to 1e-4.
+    """
+    lam_py = np.asarray(trajopt_res.lam, dtype=float).flatten()
+    lam_cas = np.asarray(casadi_res.mult_g, dtype=float).flatten()
+
+    blocks = canonical_dual_blocks(problem)
+    n_compared = blocks[-1][1] + blocks[-1][2]
+
+    assert len(lam_py) == n_compared, (
+        f"trajopt returned {len(lam_py)} constraint duals against {n_compared} canonical rows"
+    )
+    assert len(lam_cas) >= n_compared, (
+        f"CasADi returned {len(lam_cas)} duals, fewer than the {n_compared} shared constraint rows"
+    )
+
+    for name, start, width in blocks:
+        a = lam_py[start : start + width]
+        b = lam_cas[start : start + width]
+        # Scaled by |b| but floored at 1, so a near-zero multiplier stays an absolute test.
+        rel_err = float(np.max(np.abs(a - b) / (np.abs(b) + 1.0)))
+        assert rel_err <= tol_dual, (
+            f"Dual block '{name}' (rows {start}:{start + width}) disagrees: "
+            f"max rel err {rel_err:.3e} exceeds {tol_dual:.3e}\n  trajopt: {a}\n  casadi:  {b}"
+        )
+
+
 def assert_parity(
     trajopt_res: IpoptResult,
     casadi_res: CasadiResult,
@@ -1094,18 +1170,24 @@ def assert_parity(
         f"Maximum absolute control error {max_control_err:.3e} exceeds tolerance {tol_control:.3e}"
     )
 
-    # 3. Relative objective parity: |J*_trajopt - J*_casadi| / |J*_casadi| <= tol_cost
+    # 3. Objective parity, relative to |J*_casadi| but floored at 1 so that a near-zero
+    # optimal cost (the tracking problems reach ~1e-15) does not turn this into a ratio test.
     abs_cost_err = float(abs(trajopt_res.cost - casadi_res.cost))
     scale = max(abs(casadi_res.cost), 1.0)
     rel_cost_err = abs_cost_err / scale
-    assert abs_cost_err <= tol_cost or rel_cost_err <= tol_cost, (
+    assert rel_cost_err <= tol_cost, (
         f"Relative objective error {rel_cost_err:.3e} exceeds tolerance {tol_cost:.3e} "
         f"(trajopt: {trajopt_res.cost:.6f}, casadi: {casadi_res.cost:.6f})"
     )
 
-    # 4. Feasibility tolerance on constraint residual
+    # 4. Feasibility tolerance on constraint residual.
+    # NOTE: evaluate_max_constraint_residual covers only x0, box bounds and the goal, so the
+    # trajopt-side violation below is the one that actually sees the dynamics defects.
     assert casadi_res.max_constraint_residual <= tol_feas, (
         f"CasADi constraint residual {casadi_res.max_constraint_residual:.3e} exceeds feasibility tol {tol_feas:.3e}"
+    )
+    assert trajopt_res.constraint_violation <= tol_feas, (
+        f"trajopt constraint violation {trajopt_res.constraint_violation:.3e} exceeds feasibility tol {tol_feas:.3e}"
     )
 
     # 5. Dual multiplier agreement
@@ -1119,8 +1201,8 @@ def assert_parity(
         )
         dual_diff = np.abs(mult_g_py - mult_g_cas)
         max_dual_err = float(np.max(dual_diff))
-        # If absolute error is slightly above tol_dual, check relative error
+        # Scaled by |mult_g_cas| but floored at 1, so a near-zero multiplier stays an absolute test.
         rel_dual_err = float(np.max(dual_diff / (np.abs(mult_g_cas) + 1.0)))
-        assert max_dual_err <= tol_dual or rel_dual_err <= tol_dual, (
+        assert rel_dual_err <= tol_dual, (
             f"Dual multipliers disagree: max abs err {max_dual_err:.3e}, max rel err {rel_dual_err:.3e}"
         )

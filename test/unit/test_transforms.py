@@ -196,59 +196,75 @@ def test_control_rate_cost_parity_with_hand_calculation() -> None:
 
 
 def test_cost_hessian_block_diagonal_verification() -> None:
-    """Assert that augmented model's cost Hessian is block diagonal across knot points, not block tridiagonal."""
+    """Assert state augmentation turns a knot-coupling control-rate penalty into a block-diagonal one at equal cost."""
     N = 5
     n = 2
     m = 1
     R_delta = np.array([4.0])
-
-    # 1. Augmented formulation: total cost as a function of stacked knot variables Z
     stage_cost = control_rate_cost(jnp.array(R_delta), n=n, m=m)
 
-    def total_augmented_cost(Z: jax.Array) -> jax.Array:
+    rng = np.random.default_rng(7)
+    X = rng.standard_normal((N, n))
+    U = rng.standard_normal((N - 1, m))
+    u_prev_0 = rng.standard_normal(m)
+
+    # Layout A, unaugmented: knot k is [x_k, u_k], terminal knot is [x_{N-1}].
+    # The penalty at knot k reads u_{k-1} out of knot k-1, so knots couple.
+    plain_slices = [(k * (n + m), k * (n + m) + n + m) for k in range(N - 1)]
+    plain_slices.append(((N - 1) * (n + m), (N - 1) * (n + m) + n))
+    Z_plain = jnp.array(np.concatenate([*(np.concatenate([X[k], U[k]]) for k in range(N - 1)), X[-1]]))
+
+    def coupled_cost(Z: jax.Array) -> jax.Array:
         cost = 0.0
-        idx = 0
-        for _ in range(N - 1):
-            x_k = Z[idx : idx + n + m]
-            idx += n + m
-            u_k = Z[idx : idx + m]
-            idx += m
-            cost = cost + stage_cost.evaluate(x_k, u_k)
+        u_prev = jnp.array(u_prev_0)
+        for k in range(N - 1):
+            u_k = Z[k * (n + m) + n : k * (n + m) + n + m]
+            du = u_k - u_prev
+            cost = cost + 0.5 * jnp.sum(jnp.asarray(R_delta) * (du**2))
+            u_prev = u_k
         return cost
 
-    total_dim = (N - 1) * (n + m + m) + (n + m)
-    Z_test = jnp.arange(total_dim, dtype=float)
+    # Layout B, augmented: knot k is [x_k, u_{k-1}, u_k]. The same penalty is now a stage cost.
+    aug_slices = [(k * (n + 2 * m), k * (n + 2 * m) + n + 2 * m) for k in range(N - 1)]
+    aug_slices.append(((N - 1) * (n + 2 * m), (N - 1) * (n + 2 * m) + n + m))
+    u_prev_of = [u_prev_0, *[U[k] for k in range(N - 2)]]
+    Z_aug = jnp.array(
+        np.concatenate(
+            [
+                *(np.concatenate([X[k], u_prev_of[k], U[k]]) for k in range(N - 1)),
+                np.concatenate([X[-1], U[-1]]),
+            ]
+        )
+    )
 
-    H_aug = jax.hessian(total_augmented_cost)(Z_test)
-    assert H_aug.shape == (total_dim, total_dim)
+    def augmented_cost(Z: jax.Array) -> jax.Array:
+        cost = 0.0
+        for k in range(N - 1):
+            base = k * (n + 2 * m)
+            x_aug_k = Z[base : base + n + m]
+            u_k = Z[base + n + m : base + n + 2 * m]
+            cost = cost + stage_cost.evaluate(x_aug_k, u_k)
+        return cost
 
-    knot_slices = []
-    idx_k = 0
-    for _ in range(N - 1):
-        knot_slices.append((idx_k, idx_k + n + 2 * m))
-        idx_k += n + 2 * m
-    knot_slices.append((idx_k, idx_k + n + m))
+    # 1. Both layouts express the same penalty, so the comparison below is like for like.
+    np.testing.assert_allclose(float(augmented_cost(Z_aug)), float(coupled_cost(Z_plain)), rtol=1e-14, atol=1e-14)
 
-    for i, (start_i, end_i) in enumerate(knot_slices):
-        for j, (start_j, end_j) in enumerate(knot_slices):
-            block = H_aug[start_i:end_i, start_j:end_j]
-            if i != j:
-                np.testing.assert_allclose(
-                    block,
-                    np.zeros_like(block),
-                    atol=1e-15,
-                    err_msg=f"Off-diagonal block ({i}, {j}) must be zero (block-diagonal)",
-                )
+    def max_offdiag(H: jax.Array, slices: list[tuple[int, int]]) -> float:
+        return max(
+            float(jnp.max(jnp.abs(H[a:b, c:d])))
+            for i, (a, b) in enumerate(slices)
+            for j, (c, d) in enumerate(slices)
+            if i != j
+        )
 
-    # 2. In contrast, verify that direct coupled formulation produces off-diagonal entries (block tridiagonal)
-    def coupled_cost_direct(U: jax.Array) -> jax.Array:
-        du = U[1:] - U[:-1]
-        return 0.5 * jnp.sum(jnp.asarray(R_delta) * (du**2))
+    # 2. Unaugmented, the penalty couples adjacent knots: block tridiagonal.
+    H_coupled = jax.hessian(coupled_cost)(Z_plain)
+    np.testing.assert_allclose(float(H_coupled[n, n + m + n]), -R_delta[0], rtol=1e-14)
+    assert max_offdiag(H_coupled, plain_slices) > 0.0, "Coupled penalty must produce off-diagonal knot blocks"
 
-    U_test = jnp.arange(N, dtype=float)
-    H_coupled = jax.hessian(coupled_cost_direct)(U_test)
-    np.testing.assert_allclose(H_coupled[0, 1], -R_delta[0])
-    assert not np.allclose(H_coupled[0, 1], 0.0), "Coupled penalty Hessian must be block-tridiagonal"
+    # 3. Augmented, the identical penalty is stage separable: block diagonal.
+    H_aug = jax.hessian(augmented_cost)(Z_aug)
+    assert max_offdiag(H_aug, aug_slices) == 0.0, "Augmented penalty must have no off-diagonal knot blocks"
 
 
 def test_composition_with_integrators_and_rollout() -> None:
