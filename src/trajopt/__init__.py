@@ -81,7 +81,6 @@ from trajopt.problem import (
     cost,
     initial_controls,
     initial_states,
-    solve,
     states,
 )
 from trajopt.rotations.quaternion import (
@@ -92,12 +91,12 @@ from trajopt.trajectory import (
     Trajectory,
 )
 from trajopt.transcription.clarabel import (
+    Clarabel,
     ClarabelResult,
-    solve_clarabel,
 )
 from trajopt.transcription.ipopt import (
+    Ipopt,
     IpoptResult,
-    solve_ipopt,
 )
 from trajopt.transcription.layout import (
     compute_constraint_violation,
@@ -107,8 +106,13 @@ from trajopt.transcription.layout import (
     z_to_trajectory,
 )
 from trajopt.transcription.osqp import (
+    OSQP,
     OSQPResult,
-    solve_osqp,
+)
+from trajopt.transcription.result import (
+    Solver,
+    SolverResult,
+    SolverStatus,
 )
 from trajopt.transcription.sparsity import (
     hessian_sparsity_pattern,
@@ -128,6 +132,7 @@ from trajopt.transcription.transcription import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "OSQP",
     "RK4",
     "AbstractCone",
     "AbstractDynamicsConstraint",
@@ -136,6 +141,7 @@ __all__ = [
     "BuiltKnotConstraint",
     "Cartpole",
     "CircleConstraint",
+    "Clarabel",
     "ClarabelResult",
     "CollisionConstraint",
     "Constraint",
@@ -160,6 +166,7 @@ __all__ = [
     "ImplicitMidpoint",
     "IndexedConstraint",
     "Integrator",
+    "Ipopt",
     "IpoptResult",
     "KnotPoint",
     "LQRCost",
@@ -181,6 +188,9 @@ __all__ = [
     "Quaternion",
     "RigidBody",
     "SecondOrderCone",
+    "Solver",
+    "SolverResult",
+    "SolverStatus",
     "SphereConstraint",
     "StageConstraint",
     "StateBound",
@@ -214,10 +224,6 @@ __all__ = [
     "primal_bounds",
     "rk4_step",
     "rollout_states",
-    "solve",
-    "solve_clarabel",
-    "solve_ipopt",
-    "solve_osqp",
     "states",
     "trajectory_to_z",
     "update_reference",

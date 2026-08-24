@@ -17,9 +17,9 @@ from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
-from trajopt.problem import MPCState, Problem, solve
+from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import IpoptResult, _IpoptCallback, solve_ipopt
+from trajopt.transcription.ipopt import Ipopt, IpoptResult, _IpoptCallback
 from trajopt.transcription.layout import (
     constraint_bounds,
     primal_bounds,
@@ -460,10 +460,11 @@ def measure_solver_runtime(
     A discarded solve runs first so that the measured one is not dominated by JIT compilation of
     the callbacks, matching how the setup and derivative measurements are taken.
     """
-    _ = solve_ipopt(problem, state, options=options)
+    ipopt = Ipopt(options=options or {})
+    _ = ipopt.solve(problem, state)
 
     t_start = time.perf_counter()
-    res = solve_ipopt(problem, state, options=options)
+    res = ipopt.solve(problem, state)
     t_duration = time.perf_counter() - t_start
     return res, t_duration
 
@@ -486,13 +487,14 @@ def _measure_warmstart_pair(
         xf=state.xf,
         dt=state.dt,
     )
+    ipopt = Ipopt(options=opts)
 
     t_start = time.perf_counter()
-    _ = solve_ipopt(problem, state, options=opts)
+    _ = ipopt.solve(problem, state)
     t_warm = time.perf_counter() - t_start
 
     t_start = time.perf_counter()
-    _ = solve_ipopt(problem, cold_state, options=opts)
+    _ = ipopt.solve(problem, cold_state)
     t_cold = time.perf_counter() - t_start
 
     return t_warm, t_cold
@@ -514,10 +516,11 @@ def measure_closed_loop_mpc(
     opts = {"max_iter": 100, "tol": 1e-4, "print_level": 0}
     if solver_options:
         opts.update(solver_options)
+    ipopt = Ipopt(options=opts)
 
     # 1. Seed the loop, discarding a compilation solve first
-    _ = solve_ipopt(problem, initial_state, options=opts)
-    cold_res = solve_ipopt(problem, initial_state, options=opts)
+    _ = ipopt.solve(problem, initial_state)
+    cold_res = ipopt.solve(problem, initial_state)
 
     # 2. Receding horizon warm-started loop
     dt_val = float(initial_state.dt[0]) if initial_state.dt.ndim > 0 else float(initial_state.dt)
@@ -542,7 +545,7 @@ def measure_closed_loop_mpc(
     for _ in range(num_steps):
         curr_state = curr_state.shift(dt_val)
         t_step_start = time.perf_counter()
-        solved_state = solve(problem, curr_state, solver="ipopt", options=opts)
+        solved_state = problem.solve(curr_state, solver=ipopt)
         t_step_dur = time.perf_counter() - t_step_start
         durations.append(t_step_dur)
 

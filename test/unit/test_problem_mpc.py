@@ -19,11 +19,10 @@ from trajopt.problem import (
     cost,
     initial_controls,
     initial_states,
-    solve,
     states,
 )
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import solve_ipopt
+from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.transcription import (
     constraints_and_jac,
     eval_f,
@@ -289,7 +288,7 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
 
     # Initial solve
-    state_opt = solve(prob, state, options={"max_iter": 200, "tol": 1e-4, "print_level": 0})
+    state_opt = prob.solve(state, solver=Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}))
     u0 = controls(state_opt)[0]
 
     # Advance 1 step
@@ -298,11 +297,11 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
 
     # 1. Warm start: shift previous optimal solution
     state_warm = state_opt.with_measurement(x1, dt).shift(dt)
-    res_warm = solve_ipopt(prob, state_warm, options={"max_iter": 200, "tol": 1e-4, "print_level": 0})
+    res_warm = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state_warm)
 
     # 2. Cold start: reset trajectory to constant x1 and zero controls
     state_cold = MPCState.initial(prob, x0=x1, t0=dt, xf=xf, dt=dt)
-    res_cold = solve_ipopt(prob, state_cold, options={"max_iter": 200, "tol": 1e-4, "print_level": 0})
+    res_cold = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state_cold)
 
     # Warm start measurably reduces solver iterations vs cold start
     assert res_warm.iterations < res_cold.iterations
@@ -339,7 +338,7 @@ def test_closed_loop_cartpole_mpc() -> None:
 
     for _ in range(sim_steps):
         state = state.with_measurement(x_curr, t_curr)
-        state = solve(prob, state, options={"max_iter": 50, "tol": 1e-4, "print_level": 0})
+        state = prob.solve(state, solver=Ipopt(options={"max_iter": 50, "tol": 1e-4, "print_level": 0}))
         u_cmd = controls(state)[0]
 
         # Simulate system forward with applied control

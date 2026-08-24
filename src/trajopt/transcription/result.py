@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import jax
 import numpy as np
@@ -9,6 +9,8 @@ from trajopt.trajectory import Trajectory
 if TYPE_CHECKING:
     from trajopt.problem import MPCState
 
+SolverStatus = Literal["converged", "infeasible", "iteration_limit", "error"]
+
 
 @runtime_checkable
 class SolverResult(Protocol):
@@ -17,19 +19,93 @@ class SolverResult(Protocol):
     `lam` and `mu` are normalised by the adapter, not by the caller: each backend knows its
     own row layout and sign convention, so `problem.solve` reads these two fields directly
     rather than sniffing a backend-specific key out of `info`.
+
+    Every member is a read-only property rather than a plain attribute so that the backends'
+    `NamedTuple` results, whose fields are themselves read-only, satisfy this Protocol
+    structurally: a plain attribute annotation implies a setter too, which a `NamedTuple`
+    field does not have.
     """
 
-    trajectory: Trajectory
-    success: bool
-    status: Any
-    message: str
-    cost: float
-    Z: jax.Array
-    info: dict[str, Any]
-    iterations: int
-    constraint_violation: float
-    lam: np.ndarray
-    mu: np.ndarray
+    @property
+    def trajectory(self) -> Trajectory:
+        """Optimal state and control trajectory."""
+        ...
+
+    @property
+    def success(self) -> bool:
+        """Whether the solver converged to optimality or within tolerance."""
+        ...
+
+    @property
+    def status(self) -> Any:  # noqa: ANN401 -- native status code per backend: int, str, ...
+        """Native backend status code or string."""
+        ...
+
+    @property
+    def message(self) -> str:
+        """Native backend status message."""
+        ...
+
+    @property
+    def cost(self) -> float:
+        """Final objective value."""
+        ...
+
+    @property
+    def Z(self) -> jax.Array:  # noqa: N802 -- matches the backends' NamedTuple field name
+        """Optimal flat primal vector."""
+        ...
+
+    @property
+    def info(self) -> dict[str, Any]:
+        """Raw backend-specific return info dictionary."""
+        ...
+
+    @property
+    def iterations(self) -> int:
+        """Number of solver iterations."""
+        ...
+
+    @property
+    def constraint_violation(self) -> float:
+        """Maximum constraint violation across all constraints."""
+        ...
+
+    @property
+    def lam(self) -> np.ndarray:
+        """Constraint duals in canonical row order, of shape ``(P,)``."""
+        ...
+
+    @property
+    def mu(self) -> np.ndarray:
+        """Signed bound duals of shape ``(N * n + (N - 1) * m,)``."""
+        ...
+
+
+@runtime_checkable
+class Solver(Protocol):
+    """A solver backend that solves a transcribed `Problem` from an `MPCState`."""
+
+    def solve(self, problem: Problem, state: "MPCState") -> SolverResult:
+        """Solve `problem` starting from `state` and return the backend's raw result."""
+        ...
+
+
+def normalize_status(*, success: bool, message: str) -> SolverStatus:
+    """Map a backend's success flag and native status message onto MPCState's normalized vocabulary.
+
+    Every backend's `message` field already carries a human-readable native status (Ipopt's
+    `status_msg`, OSQP's `status`, Clarabel's `status`), so pattern-matching that text is what
+    lets one function normalize all three rather than each backend hand-coding its own mapping.
+    """
+    if success:
+        return "converged"
+    lowered = message.lower()
+    if "infeasib" in lowered:
+        return "infeasible"
+    if "iter" in lowered:
+        return "iteration_limit"
+    return "error"
 
 
 def constraint_row_count(problem: Problem) -> int:

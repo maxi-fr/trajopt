@@ -21,6 +21,7 @@ from trajopt.simulate import (
     TrajOptMPC,
     TrajOptMPCLog,
 )
+from trajopt.transcription.ipopt import Ipopt
 
 
 def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, MPCState]:
@@ -48,8 +49,7 @@ def test_mpc_update_step_and_warmstart_shift() -> None:
         dt=0.05,
         problem=prob,
         initial_state=initial_state,
-        solver="ipopt",
-        solver_options={"print_level": 0, "max_iter": 50},
+        solver=Ipopt(options={"print_level": 0, "max_iter": 50}),
     )
 
     ref = np.array([np.pi, 0.0])
@@ -77,14 +77,13 @@ def test_mpc_from_config_direct_problem() -> None:
         "dt": 0.05,
         "problem": prob,
         "initial_state": initial_state,
-        "solver": "ipopt",
-        "solver_options": {"print_level": 0},
+        "solver": Ipopt(options={"print_level": 0}),
     }
 
     controller = TrajOptMPC.from_config(cfg)
     assert isinstance(controller, TrajOptMPC)
     assert controller.dt == 0.05
-    assert controller.solver == "ipopt"
+    assert isinstance(controller.solver, Ipopt)
 
 
 def test_mpc_from_config_class_path() -> None:
@@ -96,7 +95,6 @@ def test_mpc_from_config_class_path() -> None:
             "N": 12,
             "dt": 0.05,
         },
-        "solver": "ipopt",
     }
 
     controller = TrajOptMPC.from_config(cfg)
@@ -112,7 +110,9 @@ def test_mpc_fallback_on_solver_failure() -> None:
         dt=0.05,
         problem=prob,
         initial_state=initial_state,
-        solver="unknown_invalid_solver",
+        # An option cyipopt rejects at add_option time is what breaks the solve; the fallback
+        # path doesn't care why the solver failed, only that it did.
+        solver=Ipopt(options={"max_iter": "not_a_number"}),
     )
 
     u, log = controller.update(t=0.0, ref=np.array([np.pi, 0.0]), x_hat=np.array([0.1, 0.0]))
@@ -195,8 +195,7 @@ def test_unified_closed_loop_plant_and_mpc() -> None:
         dt=dt,
         problem=prob,
         initial_state=initial_state,
-        solver="ipopt",
-        solver_options={"print_level": 0, "max_iter": 30},
+        solver=Ipopt(options={"print_level": 0, "max_iter": 30}),
     )
 
     reference = StepReference(dt=dt, step_value=np.array([np.pi, 0.0]))

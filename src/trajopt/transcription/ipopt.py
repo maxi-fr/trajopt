@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import jax
@@ -150,134 +151,104 @@ class _IpoptCallback:
         return self.hess_rows, self.hess_cols
 
 
-def solve_ipopt(  # noqa: PLR0913 -- solver configuration takes 8 arguments
-    problem: Problem,
-    x0: jax.Array | MPCState,
-    *,
-    t0: float | jax.Array = 0.0,
-    dt: float | jax.Array = 0.05,
-    initial_trajectory: Trajectory | None = None,
-    initial_z: jax.Array | None = None,
-    xf: jax.Array | None = None,
-    options: Mapping[str, Any] | None = None,
-) -> IpoptResult:
-    """Solve the transcribed optimal control problem using Ipopt via cyipopt.
+@dataclass(frozen=True)
+class Ipopt:
+    """Ipopt nonlinear interior-point solver backend, solving the nonlinear problem directly.
 
     Parameters
     ----------
-    problem : Problem
-        Problem instance containing model, objective, constraints, and horizon.
-    x0 : jax.Array | MPCState
-        Initial state condition of shape (n,) or an MPCState instance.
-    t0 : float | jax.Array, optional
-        Initial timestamp. Defaults to 0.0.
-    dt : float | jax.Array, optional
-        Step duration (scalar or array of length N-1). Defaults to 0.05.
-    initial_trajectory : Trajectory | None, optional
-        Initial trajectory guess. Defaults to repeating x0 with zero controls.
-    initial_z : jax.Array | None, optional
-        Flat initial guess vector of shape (N * n + (N - 1) * m,).
-    xf : jax.Array | None, optional
-        Goal state vector. Defaults to None.
-    options : Mapping[str, Any] | None, optional
-        Solver options passed to cyipopt (e.g. {"max_iter": 200, "tol": 1e-4, "print_level": 0}).
-
-    Returns
-    -------
-    IpoptResult
-        Optimization result including optimal trajectory, convergence flag, status, and cost.
+    options : Mapping[str, Any], optional
+        Native cyipopt options (e.g. {"max_iter": 200, "tol": 1e-4, "print_level": 0}).
+        Defaults to empty.
     """
-    import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
 
-    N = int(problem.N)
-    n = int(problem.model.n)
-    m = int(problem.model.m)
+    options: Mapping[str, Any] = field(default_factory=dict)
 
-    x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(
-        problem,
-        x0,
-        t0=t0,
-        dt=dt,
-        initial_trajectory=initial_trajectory,
-        initial_z=initial_z,
-        xf=xf,
-    )
-    dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
-    z0 = np.asarray(z0_jax, dtype=np.float64)
-    lam0, mu0 = warm_start_duals(problem, x0) if isinstance(x0, MPCState) else (None, None)
+    def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
+        """Solve the transcribed optimal control problem using Ipopt via cyipopt."""
+        import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
 
-    # Bounds
-    zL, zU = primal_bounds(problem)
-    gL, gU = constraint_bounds(problem)
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
 
-    cb = _IpoptCallback(problem=problem, x0=x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
+        x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(state)
+        dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
+        z0 = np.asarray(z0_jax, dtype=np.float64)
+        lam0, mu0 = warm_start_duals(problem, state)
 
-    problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
-    nlp = problem_cls(
-        n=len(z0),
-        m=len(gL),
-        problem_obj=cb,
-        lb=zL,
-        ub=zU,
-        cl=gL,
-        cu=gU,
-    )
+        # Bounds
+        zL, zU = primal_bounds(problem)
+        gL, gU = constraint_bounds(problem)
 
-    if options:
-        for k, v in options.items():
-            nlp.add_option(k, v)
+        cb = _IpoptCallback(problem=problem, x0=x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
-    if lam0 is not None and mu0 is not None:
-        # Ipopt only honours the supplied multipliers with the warm-start option set; the
-        # push factors keep it from shoving them back off the bounds it just accepted.
-        nlp.add_option("warm_start_init_point", "yes")
-        nlp.add_option("warm_start_bound_push", 1e-9)
-        nlp.add_option("warm_start_mult_bound_push", 1e-9)
-        mult_x_L, mult_x_U = split_bound_duals(mu0)
-        z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
-    else:
-        z_opt, info = nlp.solve(z0)
-    status = int(info.get("status", -1))
-    success = status in _SUCCESS_STATUSES
-    message = str(info.get("status_msg", ""))
-    cost_val = float(info.get("obj_val", cb.objective(z_opt)))
+        problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
+        nlp = problem_cls(
+            n=len(z0),
+            m=len(gL),
+            problem_obj=cb,
+            lb=zL,
+            ub=zU,
+            cl=gL,
+            cu=gU,
+        )
 
-    Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
-    X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
-    t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+        if self.options:
+            for k, v in self.options.items():
+                nlp.add_option(k, v)
 
-    opt_traj = Trajectory(
-        X=X_opt,
-        U=U_opt,
-        t=t_opt,
-        dt=dt_arr,
-    )
+        if lam0 is not None and mu0 is not None:
+            # Ipopt only honours the supplied multipliers with the warm-start option set; the
+            # push factors keep it from shoving them back off the bounds it just accepted.
+            nlp.add_option("warm_start_init_point", "yes")
+            nlp.add_option("warm_start_bound_push", 1e-9)
+            nlp.add_option("warm_start_mult_bound_push", 1e-9)
+            mult_x_L, mult_x_U = split_bound_duals(mu0)
+            z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
+        else:
+            z_opt, info = nlp.solve(z0)
+        status = int(info.get("status", -1))
+        success = status in _SUCCESS_STATUSES
+        message = str(info.get("status_msg", ""))
+        cost_val = float(info.get("obj_val", cb.objective(z_opt)))
 
-    iter_count = int(cb.iteration_count)
-    viol = compute_constraint_violation(
-        problem,
-        Z_opt_jax,
-        x0_arr,
-        t0=t0_arr,
-        dt=dt_arr,
-        xf=xf_val,
-    )
+        Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
+        X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+        t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
-    lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
-    mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
-    mult_x_U_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
-    mu_out = mult_x_U_out - mult_x_L_out
+        opt_traj = Trajectory(
+            X=X_opt,
+            U=U_opt,
+            t=t_opt,
+            dt=dt_arr,
+        )
 
-    return IpoptResult(
-        trajectory=opt_traj,
-        success=success,
-        status=status,
-        message=message,
-        cost=cost_val,
-        Z=Z_opt_jax,
-        info=info,
-        iterations=iter_count,
-        constraint_violation=viol,
-        lam=lam_out,
-        mu=mu_out,
-    )
+        iter_count = int(cb.iteration_count)
+        viol = compute_constraint_violation(
+            problem,
+            Z_opt_jax,
+            x0_arr,
+            t0=t0_arr,
+            dt=dt_arr,
+            xf=xf_val,
+        )
+
+        lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
+        mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
+        mult_x_U_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
+        mu_out = mult_x_U_out - mult_x_L_out
+
+        return IpoptResult(
+            trajectory=opt_traj,
+            success=success,
+            status=status,
+            message=message,
+            cost=cost_val,
+            Z=Z_opt_jax,
+            info=info,
+            iterations=iter_count,
+            constraint_violation=viol,
+            lam=lam_out,
+            mu=mu_out,
+        )

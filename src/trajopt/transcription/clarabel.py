@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import jax
@@ -270,19 +271,9 @@ def _normalise_duals(problem: Problem, z_dual: np.ndarray, nz: int) -> tuple[np.
     return lam, mu
 
 
-def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
-    problem: Problem,
-    x0: jax.Array | MPCState,
-    *,
-    t0: float | jax.Array = 0.0,
-    dt: float | jax.Array = 0.05,
-    initial_trajectory: Trajectory | None = None,
-    initial_z: jax.Array | None = None,
-    xf: jax.Array | None = None,
-    operating_point: Trajectory | jax.Array | None = None,
-    options: Mapping[str, Any] | None = None,
-) -> ClarabelResult:
-    """Solve the transcribed optimal control problem using Clarabel.
+@dataclass(frozen=True)
+class Clarabel:
+    """Clarabel conic interior-point solver backend, expanding the problem about `operating_point`.
 
     Clarabel is a conic interior-point solver, so this adapter hands it one convex approximation
     of the problem, expanded about ``operating_point`` (the origin by default): the dynamics
@@ -299,158 +290,138 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
 
     Parameters
     ----------
-    problem : Problem
-        Problem instance containing model, objective, constraints, and horizon.
-    x0 : jax.Array | MPCState
-        Initial state condition of shape ``(n,)`` or an MPCState instance.
-    t0 : float | jax.Array, optional
-        Initial timestamp scalar. Defaults to 0.0.
-    dt : float | jax.Array, optional
-        Step duration (scalar or array of length N-1). Defaults to 0.05.
-    initial_trajectory : Trajectory | None, optional
-        Initial trajectory guess. Defaults to repeating x0 with zero controls.
-    initial_z : jax.Array | None, optional
-        Flat initial guess vector of shape ``(N * n + (N - 1) * m,)``.
-    xf : jax.Array | None, optional
-        Goal state vector of shape ``(n,)``. Defaults to None.
     operating_point : Trajectory | jax.Array | None, optional
         Point about which the dynamics, constraints and cost are expanded, as a trajectory or a
         flat vector of shape ``(N * n + (N - 1) * m,)``. Defaults to None, meaning the origin.
-    options : Mapping[str, Any] | None, optional
-        Solver options passed to Clarabel DefaultSettings (e.g. ``{"tol_gap_abs": 1e-8, "max_iter": 200}``).
-
-    Returns
-    -------
-    ClarabelResult
-        Optimization result including optimal trajectory, convergence flag, status, and cost.
+    options : Mapping[str, Any], optional
+        Native Clarabel DefaultSettings options (e.g. {"tol_gap_abs": 1e-8, "max_iter": 200}).
+        Defaults to empty.
     """
-    import clarabel  # noqa: PLC0415 -- clarabel is an optional solver dependency
 
-    settings_cls: Any = getattr(clarabel, "DefaultSettings")  # noqa: B009 -- clarabel is an untyped C-extension
-    solver_cls: Any = getattr(clarabel, "DefaultSolver")  # noqa: B009 -- clarabel is an untyped C-extension
-    solver_status_cls: Any = getattr(clarabel, "SolverStatus")  # noqa: B009 -- clarabel is an untyped C-extension
+    operating_point: Trajectory | jax.Array | None = None
+    options: Mapping[str, Any] = field(default_factory=dict)
 
-    N = int(problem.N)
-    n = int(problem.model.n)
-    m = int(problem.model.m)
-    nz = N * n + (N - 1) * m
+    def solve(self, problem: Problem, state: MPCState) -> ClarabelResult:
+        """Solve the transcribed optimal control problem using Clarabel."""
+        import clarabel  # noqa: PLC0415 -- clarabel is an optional solver dependency
 
-    x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(
-        problem,
-        x0,
-        t0=t0,
-        dt=dt,
-        initial_trajectory=initial_trajectory,
-        initial_z=initial_z,
-        xf=xf,
-    )
+        settings_cls: Any = getattr(clarabel, "DefaultSettings")  # noqa: B009 -- clarabel is an untyped C-extension
+        solver_cls: Any = getattr(clarabel, "DefaultSolver")  # noqa: B009 -- clarabel is an untyped C-extension
+        solver_status_cls: Any = getattr(clarabel, "SolverStatus")  # noqa: B009 -- clarabel is an untyped C-extension
 
-    t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
-    t_term = t0_arr + jnp.sum(dt_arr)
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+        nz = N * n + (N - 1) * m
 
-    z_op = operating_point_z(problem, operating_point)
-    X_op, U_op = z_to_trajectory(z_op, N, n, m)
+        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
 
-    P_triu, q_vec = extract_quadratic_cost(
-        problem,
-        N,
-        n,
-        m,
-        nz,
-        t0_arr=t0_arr,
-        dt_arr=dt_arr,
-        xf_val=xf_val,
-        z_op=z_op,
-    )
+        t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
+        t_term = t0_arr + jnp.sum(dt_arr)
 
-    discrete_model = problem.model
-    A_dyn, b_dyn, cones_dyn = _extract_conic_dynamics(
-        discrete_model,
-        N,
-        n,
-        m,
-        nz,
-        x0_arr=x0_arr,
-        t_stage=t_stage,
-        dt_arr=dt_arr,
-        X_op=X_op,
-        U_op=U_op,
-    )
+        z_op = operating_point_z(problem, self.operating_point)
+        X_op, U_op = z_to_trajectory(z_op, N, n, m)
 
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
-    A_con, b_con, cones_con = _extract_conic_stage_constraints(
-        knot_evaluators,
-        N,
-        n,
-        m,
-        nz,
-        t_stage=t_stage,
-        t_term=t_term,
-        xf_val=xf_val,
-        z_op=z_op,
-    )
+        P_triu, q_vec = extract_quadratic_cost(
+            problem,
+            N,
+            n,
+            m,
+            nz,
+            t0_arr=t0_arr,
+            dt_arr=dt_arr,
+            xf_val=xf_val,
+            z_op=z_op,
+        )
 
-    A_bounds, b_bounds, cones_bounds = _extract_conic_bounds(problem, nz)
+        discrete_model = problem.model
+        A_dyn, b_dyn, cones_dyn = _extract_conic_dynamics(
+            discrete_model,
+            N,
+            n,
+            m,
+            nz,
+            x0_arr=x0_arr,
+            t_stage=t_stage,
+            dt_arr=dt_arr,
+            X_op=X_op,
+            U_op=U_op,
+        )
 
-    A_mat = sp.vstack([*A_dyn, *A_con, *A_bounds]).tocsc()
-    b_vec = np.concatenate([*b_dyn, *b_con, *b_bounds])
-    cones = [*cones_dyn, *cones_con, *cones_bounds]
+        knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+        A_con, b_con, cones_con = _extract_conic_stage_constraints(
+            knot_evaluators,
+            N,
+            n,
+            m,
+            nz,
+            t_stage=t_stage,
+            t_term=t_term,
+            xf_val=xf_val,
+            z_op=z_op,
+        )
 
-    settings = settings_cls()
-    settings.verbose = False
-    if options:
-        for k, v in options.items():
-            if hasattr(settings, k):
-                setattr(settings, k, v)
+        A_bounds, b_bounds, cones_bounds = _extract_conic_bounds(problem, nz)
 
-    solver = solver_cls(P_triu, q_vec, A_mat, b_vec, cones, settings)
-    res = solver.solve()
+        A_mat = sp.vstack([*A_dyn, *A_con, *A_bounds]).tocsc()
+        b_vec = np.concatenate([*b_dyn, *b_con, *b_bounds])
+        cones = [*cones_dyn, *cones_con, *cones_bounds]
 
-    status_str = str(res.status)
-    success = res.status in {solver_status_cls.Solved, solver_status_cls.AlmostSolved}
-    iter_count = int(getattr(res, "iterations", 0))
+        settings = settings_cls()
+        settings.verbose = False
+        if self.options:
+            for k, v in self.options.items():
+                if hasattr(settings, k):
+                    setattr(settings, k, v)
 
-    Z_opt_np = (
-        np.asarray(res.x, dtype=np.float64)
-        if (res.x is not None and len(res.x) == nz)
-        else np.asarray(z0, dtype=np.float64)
-    )
-    Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
-    cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
-    viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
+        solver = solver_cls(P_triu, q_vec, A_mat, b_vec, cones, settings)
+        res = solver.solve()
 
-    X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
-    t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+        status_str = str(res.status)
+        success = res.status in {solver_status_cls.Solved, solver_status_cls.AlmostSolved}
+        iter_count = int(getattr(res, "iterations", 0))
 
-    opt_traj = Trajectory(
-        X=X_opt,
-        U=U_opt,
-        t=t_opt,
-        dt=dt_arr,
-    )
+        Z_opt_np = (
+            np.asarray(res.x, dtype=np.float64)
+            if (res.x is not None and len(res.x) == nz)
+            else np.asarray(z0, dtype=np.float64)
+        )
+        Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
+        cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
+        viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
-    lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz)
+        X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+        t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
-    info_dict = {
-        "status": status_str,
-        "iterations": iter_count,
-        "solve_time": getattr(res, "solve_time", 0.0),
-        "r_prim": getattr(res, "r_prim", 0.0),
-        "r_dual": getattr(res, "r_dual", 0.0),
-        "z": res.z,
-        "s": res.s,
-    }
+        opt_traj = Trajectory(
+            X=X_opt,
+            U=U_opt,
+            t=t_opt,
+            dt=dt_arr,
+        )
 
-    return ClarabelResult(
-        trajectory=opt_traj,
-        success=success,
-        status=status_str,
-        message=status_str,
-        cost=cost_val,
-        Z=Z_opt_jax,
-        info=info_dict,
-        iterations=iter_count,
-        constraint_violation=viol,
-        lam=lam_out,
-        mu=mu_out,
-    )
+        lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz)
+
+        info_dict = {
+            "status": status_str,
+            "iterations": iter_count,
+            "solve_time": getattr(res, "solve_time", 0.0),
+            "r_prim": getattr(res, "r_prim", 0.0),
+            "r_dual": getattr(res, "r_dual", 0.0),
+            "z": res.z,
+            "s": res.s,
+        }
+
+        return ClarabelResult(
+            trajectory=opt_traj,
+            success=success,
+            status=status_str,
+            message=status_str,
+            cost=cost_val,
+            Z=Z_opt_jax,
+            info=info_dict,
+            iterations=iter_count,
+            constraint_violation=viol,
+            lam=lam_out,
+            mu=mu_out,
+        )

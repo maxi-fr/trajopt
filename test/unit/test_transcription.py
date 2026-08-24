@@ -14,9 +14,9 @@ from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import Problem
+from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import solve_ipopt
+from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
     constraint_bounds,
     primal_bounds,
@@ -306,15 +306,10 @@ def test_cartpole_swingup_ipopt_solve() -> None:
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    state = MPCState.initial(prob, x0=x0, t0=t0, dt=dt)
 
     # Solve with Ipopt
-    res = solve_ipopt(
-        problem=prob,
-        x0=x0,
-        t0=t0,
-        dt=dt,
-        options={"max_iter": 200, "tol": 1e-4, "print_level": 0},
-    )
+    res = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state)
 
     assert res.success, f"Ipopt failed to converge: {res.message}"
 
@@ -444,7 +439,8 @@ def test_unconstrained_solve() -> None:
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.array([0.5, 0.0])
-    res = solve_ipopt(prob, x0=x0, dt=0.05, options={"print_level": 0})
+    state = MPCState.initial(prob, x0=x0, dt=0.05)
+    res = Ipopt(options={"print_level": 0}).solve(prob, state)
     assert res.success
     np.testing.assert_allclose(res.trajectory.X[0], x0, atol=1e-4)
 

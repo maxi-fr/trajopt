@@ -1,5 +1,5 @@
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -11,6 +11,9 @@ from trajopt.dynamics.base import AbstractModel, DiscreteDynamics, IntegratorCal
 from trajopt.dynamics.integrators import Integrator
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
+
+if TYPE_CHECKING:
+    from trajopt.transcription.result import Solver, SolverStatus
 
 
 class Problem(eqx.Module):
@@ -55,6 +58,49 @@ class Problem(eqx.Module):
         self.constraints = built_con
         self.N = N_val
 
+    def solve(self, state: "MPCState", solver: "Solver | None" = None) -> "MPCState":
+        """Solve this problem from `state` with `solver`, returning an updated MPCState.
+
+        Parameters
+        ----------
+        state : MPCState
+            Current per-step state holding initial state, warm-start trajectory, and goal.
+        solver : Solver | None, optional
+            Solver backend object (e.g. ``Ipopt()``, ``OSQP(operating_point=...)``). Defaults to
+            None, meaning ``Ipopt()``, resolved here rather than at import time to avoid a cycle
+            between this module and the transcription layer.
+
+        Returns
+        -------
+        MPCState
+            New state containing optimal trajectory Z, dual multipliers lam, mu, and status.
+        """
+        if solver is None:
+            from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415 -- avoid an import cycle
+
+            solver = Ipopt()
+
+        from trajopt.transcription.result import normalize_status  # noqa: PLC0415 -- avoid an import cycle
+
+        res = solver.solve(self, state)
+
+        lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if len(res.lam) > 0 else state.lam
+        mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if len(res.mu) > 0 else state.mu
+
+        return MPCState(
+            x0=state.x0,
+            t0=state.t0,
+            xf=state.xf,
+            lam=lam,
+            mu=mu,
+            Z=res.Z,
+            dt=state.dt,
+            n=state.n,
+            m=state.m,
+            N=state.N,
+            status=normalize_status(success=res.success, message=res.message),
+        )
+
 
 class MPCState(eqx.Module):
     """Per-step MPC state holding initial condition, goal, trajectory, multipliers, and metadata.
@@ -82,6 +128,9 @@ class MPCState(eqx.Module):
         Control dimension.
     N : int
         Horizon length in knot points.
+    status : SolverStatus | None
+        Normalized outcome of the last solve ("converged", "infeasible", "iteration_limit",
+        "error"), or None before any solve has run.
     """
 
     x0: jax.Array
@@ -94,6 +143,7 @@ class MPCState(eqx.Module):
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
+    status: "SolverStatus | None" = eqx.field(static=True, default=None)
 
     @classmethod
     def initial(  # noqa: PLR0913 -- Initial state factory takes 7 arguments
@@ -217,6 +267,7 @@ class MPCState(eqx.Module):
             n=self.n,
             m=self.m,
             N=self.N,
+            status=self.status,
         )
 
     def with_goal(self, xf: jax.Array | Sequence[float]) -> "MPCState":
@@ -252,6 +303,7 @@ class MPCState(eqx.Module):
             n=self.n,
             m=self.m,
             N=self.N,
+            status=self.status,
         )
 
     def shift(self, dt: float | jax.Array | None = None) -> "MPCState":
@@ -288,6 +340,7 @@ class MPCState(eqx.Module):
             n=self.n,
             m=self.m,
             N=self.N,
+            status=self.status,
         )
 
     def states(self) -> jax.Array:
@@ -326,6 +379,7 @@ class MPCState(eqx.Module):
             n=self.n,
             m=self.m,
             N=self.N,
+            status=self.status,
         )
 
     def initial_controls(self, U0: jax.Array) -> "MPCState":
@@ -354,6 +408,7 @@ class MPCState(eqx.Module):
             n=self.n,
             m=self.m,
             N=self.N,
+            status=self.status,
         )
 
     def to_trajectory(self) -> Trajectory:
@@ -390,90 +445,3 @@ def cost(problem: Problem, state: MPCState) -> jax.Array:
     return eval_f(problem, state.Z, state.t0, state.dt, state.xf)
 
 
-def _dispatch_solver(
-    problem: Problem,
-    state: MPCState,
-    *,
-    solver: str | Callable[..., Any],
-    operating_point: "Trajectory | jax.Array | None",
-    options: Mapping[str, Any] | None,
-) -> Any:  # noqa: ANN401 -- each backend returns its own result NamedTuple
-    """Run the named or supplied solver backend and return its raw result."""
-    if callable(solver):
-        if operating_point is not None:
-            msg = "operating_point is not forwarded to a callable solver; bind it inside the callable instead."
-            raise ValueError(msg)
-        solver_fn: Any = solver
-        return solver_fn(problem=problem, x0=state, options=options)
-
-    if not isinstance(solver, str):
-        msg = f"Invalid solver type: {type(solver).__name__}. Expected str or callable."
-        raise TypeError(msg)
-
-    solver_name = solver.strip().lower()
-    if solver_name == "ipopt":
-        from trajopt.transcription.ipopt import solve_ipopt  # noqa: PLC0415 -- avoid circular import
-
-        if operating_point is not None:
-            msg = "Ipopt solves the nonlinear problem directly; operating_point applies to 'osqp' and 'clarabel'."
-            raise ValueError(msg)
-        return solve_ipopt(problem=problem, x0=state, options=options)
-    if solver_name == "osqp":
-        from trajopt.transcription.osqp import solve_osqp  # noqa: PLC0415 -- avoid circular import
-
-        return solve_osqp(problem=problem, x0=state, operating_point=operating_point, options=options)
-    if solver_name == "clarabel":
-        from trajopt.transcription.clarabel import solve_clarabel  # noqa: PLC0415 -- avoid circular import
-
-        return solve_clarabel(problem=problem, x0=state, operating_point=operating_point, options=options)
-
-    msg = f"Unknown solver backend: '{solver}'. Expected 'ipopt', 'osqp', 'clarabel', or callable."
-    raise ValueError(msg)
-
-
-def solve(
-    problem: Problem,
-    state: MPCState,
-    *,
-    solver: str | Callable[..., Any] = "ipopt",
-    operating_point: "Trajectory | jax.Array | None" = None,
-    options: Mapping[str, Any] | None = None,
-) -> MPCState:
-    """Solve the optimal control problem and return an updated MPCState with optimal trajectory and multipliers.
-
-    Parameters
-    ----------
-    problem : Problem
-        Problem structure containing model, objective, constraints, and horizon.
-    state : MPCState
-        Current per-step state holding initial state, warm-start trajectory, and goal.
-    solver : str | Callable[..., Any], optional
-        Solver backend to use ("ipopt", "osqp", "clarabel") or a callable. Defaults to "ipopt".
-    operating_point : Trajectory | jax.Array | None, optional
-        Point about which the QP backends expand the problem. Defaults to None, meaning the
-        origin. Ipopt solves the nonlinear problem directly and rejects it.
-    options : Mapping[str, Any] | None, optional
-        Solver options passed to backend (e.g. max_iter, tol, print_level, verbose).
-
-    Returns
-    -------
-    MPCState
-        New state containing optimal trajectory Z, dual multipliers lam, mu, and boundary conditions.
-    """
-    res = _dispatch_solver(problem, state, solver=solver, operating_point=operating_point, options=options)
-
-    lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if len(res.lam) > 0 else state.lam
-    mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if len(res.mu) > 0 else state.mu
-
-    return MPCState(
-        x0=state.x0,
-        t0=state.t0,
-        xf=state.xf,
-        lam=lam,
-        mu=mu,
-        Z=res.Z,
-        dt=state.dt,
-        n=state.n,
-        m=state.m,
-        N=state.N,
-    )

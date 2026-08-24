@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import jax
@@ -194,7 +195,7 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
 def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the state, and the row map
     solver: Any,  # noqa: ANN401 -- osqp.OSQP is an untyped C-extension
     problem: Problem,
-    x0: jax.Array | MPCState,
+    state: MPCState,
     *,
     z0: jax.Array | None,
     canonical_rows: np.ndarray,
@@ -204,7 +205,7 @@ def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the 
     if z0 is not None:
         solver.warm_start(x=z0)
 
-    lam0, mu0 = warm_start_duals(problem, x0) if isinstance(x0, MPCState) else (None, None)
+    lam0, mu0 = warm_start_duals(problem, state)
     if lam0 is None or mu0 is None:
         return
 
@@ -214,19 +215,9 @@ def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the 
     solver.warm_start(y=y0)
 
 
-def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
-    problem: Problem,
-    x0: jax.Array | MPCState,
-    *,
-    t0: float | jax.Array = 0.0,
-    dt: float | jax.Array = 0.05,
-    initial_trajectory: Trajectory | None = None,
-    initial_z: jax.Array | None = None,
-    xf: jax.Array | None = None,
-    operating_point: Trajectory | jax.Array | None = None,
-    options: Mapping[str, Any] | None = None,
-) -> OSQPResult:
-    """Solve the transcribed optimal control problem using OSQP.
+@dataclass(frozen=True)
+class OSQP:
+    """OSQP convex QP solver backend, expanding the problem about `operating_point`.
 
     OSQP is a convex quadratic programming solver, so this adapter hands it one convex
     approximation of the problem, expanded about ``operating_point`` (the origin by default):
@@ -246,155 +237,135 @@ def solve_osqp(  # noqa: PLR0913 -- solver configuration takes 8 arguments
 
     Parameters
     ----------
-    problem : Problem
-        Problem instance containing model, objective, constraints, and horizon.
-    x0 : jax.Array | MPCState
-        Initial state condition of shape ``(n,)`` or an MPCState instance.
-    t0 : float | jax.Array, optional
-        Initial timestamp scalar. Defaults to 0.0.
-    dt : float | jax.Array, optional
-        Step duration (scalar or array of length N-1). Defaults to 0.05.
-    initial_trajectory : Trajectory | None, optional
-        Initial trajectory guess. Defaults to repeating x0 with zero controls.
-    initial_z : jax.Array | None, optional
-        Flat initial guess vector of shape ``(N * n + (N - 1) * m,)``.
-    xf : jax.Array | None, optional
-        Goal state vector of shape ``(n,)``. Defaults to None.
     operating_point : Trajectory | jax.Array | None, optional
         Point about which the dynamics, constraints and cost are expanded, as a trajectory or a
         flat vector of shape ``(N * n + (N - 1) * m,)``. Defaults to None, meaning the origin.
-    options : Mapping[str, Any] | None, optional
-        Solver options passed to OSQP (e.g. ``{"eps_abs": 1e-6, "eps_rel": 1e-6, "max_iter": 4000}``).
-
-    Returns
-    -------
-    OSQPResult
-        Optimization result including optimal trajectory, convergence flag, status, and cost.
+    options : Mapping[str, Any], optional
+        Native OSQP options (e.g. {"eps_abs": 1e-6, "eps_rel": 1e-6, "max_iter": 4000}).
+        Defaults to empty.
     """
-    import osqp  # noqa: PLC0415 -- osqp is an optional solver dependency
 
-    N = int(problem.N)
-    n = int(problem.model.n)
-    m = int(problem.model.m)
-    nz = N * n + (N - 1) * m
+    operating_point: Trajectory | jax.Array | None = None
+    options: Mapping[str, Any] = field(default_factory=dict)
 
-    x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(
-        problem,
-        x0,
-        t0=t0,
-        dt=dt,
-        initial_trajectory=initial_trajectory,
-        initial_z=initial_z,
-        xf=xf,
-    )
+    def solve(self, problem: Problem, state: MPCState) -> OSQPResult:
+        """Solve the transcribed optimal control problem using OSQP."""
+        import osqp  # noqa: PLC0415 -- osqp is an optional solver dependency
 
-    t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
-    t_term = t0_arr + jnp.sum(dt_arr)
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+        nz = N * n + (N - 1) * m
 
-    z_op = operating_point_z(problem, operating_point)
-    X_op, U_op = z_to_trajectory(z_op, N, n, m)
+        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
 
-    P_triu, q_vec = extract_quadratic_cost(
-        problem,
-        N,
-        n,
-        m,
-        nz,
-        t0_arr=t0_arr,
-        dt_arr=dt_arr,
-        xf_val=xf_val,
-        z_op=z_op,
-    )
+        t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
+        t_term = t0_arr + jnp.sum(dt_arr)
 
-    discrete_model = problem.model
-    A_dyn, l_dyn, u_dyn = _extract_qp_dynamics(
-        discrete_model,
-        N,
-        n,
-        m,
-        nz,
-        x0_arr=x0_arr,
-        t_stage=t_stage,
-        dt_arr=dt_arr,
-        X_op=X_op,
-        U_op=U_op,
-    )
+        z_op = operating_point_z(problem, self.operating_point)
+        X_op, U_op = z_to_trajectory(z_op, N, n, m)
 
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
-    A_con, l_con, u_con = _extract_qp_stage_constraints(
-        knot_evaluators,
-        N,
-        n,
-        m,
-        nz,
-        t_stage=t_stage,
-        t_term=t_term,
-        xf_val=xf_val,
-        z_op=z_op,
-    )
+        P_triu, q_vec = extract_quadratic_cost(
+            problem,
+            N,
+            n,
+            m,
+            nz,
+            t0_arr=t0_arr,
+            dt_arr=dt_arr,
+            xf_val=xf_val,
+            z_op=z_op,
+        )
 
-    zL, zU = primal_bounds(problem)
-    A_bounds = sp.eye(nz, format="csr", dtype=np.float64)
+        discrete_model = problem.model
+        A_dyn, l_dyn, u_dyn = _extract_qp_dynamics(
+            discrete_model,
+            N,
+            n,
+            m,
+            nz,
+            x0_arr=x0_arr,
+            t_stage=t_stage,
+            dt_arr=dt_arr,
+            X_op=X_op,
+            U_op=U_op,
+        )
 
-    A_mat = sp.vstack([*A_dyn, *A_con, A_bounds]).tocsc()
-    canonical_rows = blocked_to_canonical(problem)
-    l_vec = np.concatenate([*l_dyn, *l_con, zL])
-    u_vec = np.concatenate([*u_dyn, *u_con, zU])
+        knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+        A_con, l_con, u_con = _extract_qp_stage_constraints(
+            knot_evaluators,
+            N,
+            n,
+            m,
+            nz,
+            t_stage=t_stage,
+            t_term=t_term,
+            xf_val=xf_val,
+            z_op=z_op,
+        )
 
-    solver = osqp.OSQP()
-    solver_opts: dict[str, Any] = {"verbose": False}
-    if options:
-        solver_opts.update(options)
+        zL, zU = primal_bounds(problem)
+        A_bounds = sp.eye(nz, format="csr", dtype=np.float64)
 
-    solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
-    _warm_start(solver, problem, x0, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
+        A_mat = sp.vstack([*A_dyn, *A_con, A_bounds]).tocsc()
+        canonical_rows = blocked_to_canonical(problem)
+        l_vec = np.concatenate([*l_dyn, *l_con, zL])
+        u_vec = np.concatenate([*u_dyn, *u_con, zU])
 
-    res = solver.solve()
+        solver = osqp.OSQP()
+        solver_opts: dict[str, Any] = {"verbose": False}
+        if self.options:
+            solver_opts.update(self.options)
 
-    status_val = int(getattr(res.info, "status_val", -1))
-    success = status_val in _SUCCESS_STATUS_VALS
-    status_msg = str(getattr(res.info, "status", "unknown"))
-    iter_count = int(getattr(res.info, "iter", 0))
+        solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
+        _warm_start(solver, problem, state, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
 
-    Z_opt_np = np.asarray(res.x, dtype=np.float64) if res.x is not None else np.asarray(z0, dtype=np.float64)
-    Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
-    cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
-    viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
+        res = solver.solve()
 
-    X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
-    t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+        status_val = int(getattr(res.info, "status_val", -1))
+        success = status_val in _SUCCESS_STATUS_VALS
+        status_msg = str(getattr(res.info, "status", "unknown"))
+        iter_count = int(getattr(res.info, "iter", 0))
 
-    opt_traj = Trajectory(
-        X=X_opt,
-        U=U_opt,
-        t=t_opt,
-        dt=dt_arr,
-    )
+        Z_opt_np = np.asarray(res.x, dtype=np.float64) if res.x is not None else np.asarray(z0, dtype=np.float64)
+        Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
+        cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
+        viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
-    y_out = np.asarray(res.y, dtype=np.float64) if res.y is not None else np.zeros(A_mat.shape[0])
-    lam_out = y_out[canonical_rows]
-    mu_out = y_out[len(canonical_rows) :]
+        X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+        t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
-    info_dict = {
-        "status": status_msg,
-        "status_val": status_val,
-        "iter": iter_count,
-        "obj_val": getattr(res.info, "obj_val", cost_val),
-        "prim_res": getattr(res.info, "prim_res", 0.0),
-        "dual_res": getattr(res.info, "dual_res", 0.0),
-        "y": res.y,
-    }
+        opt_traj = Trajectory(
+            X=X_opt,
+            U=U_opt,
+            t=t_opt,
+            dt=dt_arr,
+        )
 
-    return OSQPResult(
-        trajectory=opt_traj,
-        success=success,
-        status=status_val,
-        message=status_msg,
-        cost=cost_val,
-        Z=Z_opt_jax,
-        info=info_dict,
-        iterations=iter_count,
-        constraint_violation=viol,
-        lam=lam_out,
-        mu=mu_out,
-    )
+        y_out = np.asarray(res.y, dtype=np.float64) if res.y is not None else np.zeros(A_mat.shape[0])
+        lam_out = y_out[canonical_rows]
+        mu_out = y_out[len(canonical_rows) :]
+
+        info_dict = {
+            "status": status_msg,
+            "status_val": status_val,
+            "iter": iter_count,
+            "obj_val": getattr(res.info, "obj_val", cost_val),
+            "prim_res": getattr(res.info, "prim_res", 0.0),
+            "dual_res": getattr(res.info, "dual_res", 0.0),
+            "y": res.y,
+        }
+
+        return OSQPResult(
+            trajectory=opt_traj,
+            success=success,
+            status=status_val,
+            message=status_msg,
+            cost=cost_val,
+            Z=Z_opt_jax,
+            info=info_dict,
+            iterations=iter_count,
+            constraint_violation=viol,
+            lam=lam_out,
+            mu=mu_out,
+        )

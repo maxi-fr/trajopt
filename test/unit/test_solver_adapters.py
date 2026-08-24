@@ -15,10 +15,10 @@ from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.base import ContinuousDynamics, DiscretizedDynamics
 from trajopt.dynamics.integrators import RK4, Euler
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem, solve
-from trajopt.transcription.clarabel import ClarabelResult, solve_clarabel
-from trajopt.transcription.ipopt import IpoptResult, solve_ipopt
-from trajopt.transcription.osqp import OSQPResult, solve_osqp
+from trajopt.problem import MPCState, Problem
+from trajopt.transcription.clarabel import Clarabel, ClarabelResult
+from trajopt.transcription.ipopt import Ipopt, IpoptResult
+from trajopt.transcription.osqp import OSQP, OSQPResult
 from trajopt.transcription.result import SolverResult, split_bound_duals
 
 
@@ -65,9 +65,11 @@ def test_clarabel_soc_vs_ipopt_quadratic_norm_parity() -> None:
     prob_ipopt = Problem(model=model, obj=obj, constraints=clist_ipopt, N=N)
 
     x0 = jnp.array([3.0, 2.0, -1.0, 0.5])
+    state_clarabel = MPCState.initial(prob_clarabel, x0=x0, dt=dt)
+    state_ipopt = MPCState.initial(prob_ipopt, x0=x0, dt=dt)
 
-    res_clarabel = solve_clarabel(prob_clarabel, x0, dt=dt, options={"tol_gap_abs": 1e-8, "tol_gap_rel": 1e-8})
-    res_ipopt = solve_ipopt(prob_ipopt, x0, dt=dt, options={"tol": 1e-8, "print_level": 0})
+    res_clarabel = Clarabel(options={"tol_gap_abs": 1e-8, "tol_gap_rel": 1e-8}).solve(prob_clarabel, state_clarabel)
+    res_ipopt = Ipopt(options={"tol": 1e-8, "print_level": 0}).solve(prob_ipopt, state_ipopt)
 
     assert res_clarabel.success is True
     assert res_ipopt.success is True
@@ -112,9 +114,9 @@ def test_problem_definition_invariance_across_solvers() -> None:
 
     state = MPCState.initial(prob, x0=x0, dt=dt)
 
-    state_ipopt = solve(prob, state, solver="ipopt", options={"print_level": 0})
-    state_osqp = solve(prob, state, solver="osqp", options={"eps_abs": 1e-7, "eps_rel": 1e-7})
-    state_clarabel = solve(prob, state, solver="clarabel", options={"tol_gap_abs": 1e-7})
+    state_ipopt = prob.solve(state, solver=Ipopt(options={"print_level": 0}))
+    state_osqp = prob.solve(state, solver=OSQP(options={"eps_abs": 1e-7, "eps_rel": 1e-7}))
+    state_clarabel = prob.solve(state, solver=Clarabel(options={"tol_gap_abs": 1e-7}))
 
     assert isinstance(state_ipopt, MPCState)
     assert isinstance(state_osqp, MPCState)
@@ -140,9 +142,9 @@ _OSQP_OPTS: dict[str, Any] = {"eps_abs": 1e-10, "eps_rel": 1e-10, "max_iter": 20
 _CLARABEL_OPTS: dict[str, Any] = {}
 
 _BACKENDS = [
-    ("ipopt", solve_ipopt, IpoptResult, _IPOPT_OPTS),
-    ("osqp", solve_osqp, OSQPResult, _OSQP_OPTS),
-    ("clarabel", solve_clarabel, ClarabelResult, _CLARABEL_OPTS),
+    ("ipopt", Ipopt, IpoptResult, _IPOPT_OPTS),
+    ("osqp", OSQP, OSQPResult, _OSQP_OPTS),
+    ("clarabel", Clarabel, ClarabelResult, _CLARABEL_OPTS),
 ]
 
 
@@ -195,8 +197,8 @@ def test_common_adapter_interface() -> None:
     """Verify every backend's result conforms to SolverResult and reports convergence honestly."""
     prob, state = _bound_active_double_integrator()
 
-    for name, solve_fn, exp_type, opts in _BACKENDS:
-        res = solve_fn(prob, state, options=opts)
+    for name, solver_cls, exp_type, opts in _BACKENDS:
+        res = solver_cls(options=opts).solve(prob, state)
 
         assert isinstance(res, exp_type)
         # Structural conformance rather than a checklist of hasattr: a field renamed or dropped
@@ -217,7 +219,7 @@ def test_backends_agree_on_the_duals_of_a_shared_optimum() -> None:
     """Verify all three adapters report the same duals, in the same rows, with the same signs."""
     prob, state = _bound_active_double_integrator()
 
-    results = {name: solve_fn(prob, state, options=opts) for name, solve_fn, _, opts in _BACKENDS}
+    results = {name: solver_cls(options=opts).solve(prob, state) for name, solver_cls, _, opts in _BACKENDS}
     for name, res in results.items():
         assert res.success is True, f"{name} failed: {res.message}"
 
@@ -234,19 +236,20 @@ def test_backends_agree_on_the_duals_of_a_shared_optimum() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "solve_fn", "opts", "warm_startable"),
+    ("name", "solver_cls", "opts", "warm_startable"),
     [
-        ("ipopt", solve_ipopt, _IPOPT_OPTS, True),
-        ("osqp", solve_osqp, _OSQP_OPTS, True),
+        ("ipopt", Ipopt, _IPOPT_OPTS, True),
+        ("osqp", OSQP, _OSQP_OPTS, True),
         # Clarabel exposes no warm-start API, so handing it duals is a documented no-op. Asserting
         # the count is unchanged is what keeps that a deliberate gap rather than a silent one.
-        ("clarabel", solve_clarabel, _CLARABEL_OPTS, False),
+        ("clarabel", Clarabel, _CLARABEL_OPTS, False),
     ],
 )
-def test_dual_warm_start_cuts_iterations(name, solve_fn, opts, warm_startable) -> None:
+def test_dual_warm_start_cuts_iterations(name, solver_cls, opts, warm_startable) -> None:
     """Verify handing a backend the converged duals costs it fewer iterations than the primal alone."""
     prob, state = _bound_active_double_integrator()
-    solved = solve_fn(prob, state, options=opts)
+    solver = solver_cls(options=opts)
+    solved = solver.solve(prob, state)
     assert solved.success is True, f"{name} failed: {solved.message}"
 
     # Both re-solves start from the optimal trajectory, so the only difference between them is
@@ -254,8 +257,8 @@ def test_dual_warm_start_cuts_iterations(name, solve_fn, opts, warm_startable) -
     both = _with_state(state, solved.Z, solved.lam, solved.mu)
     primal_only = _with_state(state, solved.Z, jnp.zeros_like(state.lam), jnp.zeros_like(state.mu))
 
-    res_primal = solve_fn(prob, primal_only, options=opts)
-    res_both = solve_fn(prob, both, options=opts)
+    res_primal = solver.solve(prob, primal_only)
+    res_both = solver.solve(prob, both)
 
     assert res_primal.success is True
     assert res_both.success is True
@@ -289,29 +292,30 @@ def _pendulum_swingup_problem() -> tuple[Problem, jax.Array, float]:
 # Eight re-expansions per backend, and the two parameters together are 60 seconds.
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    ("solve_qp", "result_type", "qp_options"),
+    ("solver_cls", "result_type", "qp_options"),
     [
         # OSQP is a first-order method, so its own tolerances have to be tightened before the
         # residual left over is the linearization's rather than the solver's.
-        (solve_osqp, OSQPResult, {"eps_abs": 1e-9, "eps_rel": 1e-9, "max_iter": 40000}),
-        (solve_clarabel, ClarabelResult, {}),
+        (OSQP, OSQPResult, {"eps_abs": 1e-9, "eps_rel": 1e-9, "max_iter": 40000}),
+        (Clarabel, ClarabelResult, {}),
     ],
 )
-def test_operating_point_drives_a_qp_adapter_onto_the_nonlinear_solution(solve_qp, result_type, qp_options) -> None:
+def test_operating_point_drives_a_qp_adapter_onto_the_nonlinear_solution(solver_cls, result_type, qp_options) -> None:
     """Assert re-expanding about the previous solution converges the linearized solve onto Ipopt's."""
     problem, x0, dt = _pendulum_swingup_problem()
-    ref = solve_ipopt(problem, x0, dt=dt, options={"print_level": 0, "tol": 1e-8})
+    state = MPCState.initial(problem, x0=x0, dt=dt)
+    ref = Ipopt(options={"print_level": 0, "tol": 1e-8}).solve(problem, state)
 
     # Expanded about the origin the QP is a poor model of the pendulum, and says so: the
     # trajectory it returns is far from satisfying the true nonlinear dynamics.
-    res_origin = solve_qp(problem, x0, dt=dt, options=qp_options)
+    res_origin = solver_cls(options=qp_options).solve(problem, state)
     assert isinstance(res_origin, result_type)
     assert res_origin.success is True
     assert res_origin.constraint_violation > 1e-2
 
     z_op = res_origin.Z
     for _ in range(8):
-        res = solve_qp(problem, x0, dt=dt, operating_point=z_op, options=qp_options)
+        res = solver_cls(operating_point=z_op, options=qp_options).solve(problem, state)
         z_op = res.Z
 
     assert res.constraint_violation < 1e-4
@@ -319,8 +323,8 @@ def test_operating_point_drives_a_qp_adapter_onto_the_nonlinear_solution(solve_q
     np.testing.assert_allclose(res.trajectory.X, ref.trajectory.X, atol=5e-3)
 
 
-@pytest.mark.parametrize("solve_qp", [solve_osqp, solve_clarabel])
-def test_operating_point_does_not_move_the_solution_of_an_affine_problem(solve_qp) -> None:
+@pytest.mark.parametrize("solver_cls", [OSQP, Clarabel])
+def test_operating_point_does_not_move_the_solution_of_an_affine_problem(solver_cls) -> None:
     """Assert the expansion point is irrelevant when the dynamics are affine and the cost quadratic."""
     model = DiscretizedDynamics(PlanarDoubleIntegrator(), Euler())
     n, m, N, dt = 4, 2, 12, 0.1
@@ -332,20 +336,13 @@ def test_operating_point_does_not_move_the_solution_of_an_affine_problem(solve_q
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-1.0, -1.0], u_max=[1.0, 1.0]), range(N - 1))
     problem = Problem(model=model, obj=Objective(stage_cost=cost, terminal_cost=term, N=N), constraints=cl, N=N)
     x0 = jnp.array([2.0, -1.0, 0.0, 0.0])
+    state = MPCState.initial(problem, x0=x0, dt=dt)
 
     nz = N * n + (N - 1) * m
     z_op = jnp.asarray(np.random.default_rng(11).standard_normal(nz))
 
-    res_origin = solve_qp(problem, x0, dt=dt)
-    res_shifted = solve_qp(problem, x0, dt=dt, operating_point=z_op)
+    res_origin = solver_cls().solve(problem, state)
+    res_shifted = solver_cls(operating_point=z_op).solve(problem, state)
 
     np.testing.assert_allclose(res_shifted.Z, res_origin.Z, atol=1e-5)
     np.testing.assert_allclose(res_shifted.cost, res_origin.cost, rtol=1e-6)
-
-
-def test_operating_point_is_refused_by_the_nonlinear_backend() -> None:
-    """Assert Ipopt rejects an operating point rather than accepting one it does not use."""
-    problem, x0, dt = _pendulum_swingup_problem()
-    state = MPCState.initial(problem, x0=x0, dt=dt)
-    with pytest.raises(ValueError, match="solves the nonlinear problem directly"):
-        solve(problem, state, solver="ipopt", operating_point=state.Z)

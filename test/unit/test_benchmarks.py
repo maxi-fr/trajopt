@@ -18,7 +18,7 @@ from trajopt.benchmarks import (
     run_all_benchmarks,
     run_benchmark,
 )
-from trajopt.transcription.ipopt import IpoptResult, solve_ipopt
+from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import z_to_trajectory
 
 # Every test here runs at least one full benchmark solve, and the file is the slowest in
@@ -59,7 +59,7 @@ def test_cartpole_swingup_benchmark_drives_the_cart_onto_its_position_limit() ->
 
     p_bound = float(info["x_pos_bound"])
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    res = solve_ipopt(prob, state, options=opts)
+    res = Ipopt(options=opts).solve(prob, state)
 
     assert res.success is True
     assert res.status in {0, 1}
@@ -103,7 +103,7 @@ def test_quadrotor_obstacle_benchmark_solves_to_optimality() -> None:
     assert prob.model.m == 4
 
     opts = {"max_iter": 500, "tol": 1e-6, "print_level": 0}
-    res = solve_ipopt(prob, state, options=opts)
+    res = Ipopt(options=opts).solve(prob, state)
 
     assert res.success is True
     assert res.status in {0, 1}
@@ -151,7 +151,7 @@ def test_dubins_corridor_benchmark_pins_the_tracked_trajectory_to_the_corridor_w
     assert float(info["y_ref_bulge"]) > y_bound, "reference must leave the corridor for it to bind"
 
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    res = solve_ipopt(prob, state, options=opts)
+    res = Ipopt(options=opts).solve(prob, state)
 
     assert res.success is True
     assert res.status in {0, 1}
@@ -273,7 +273,7 @@ def test_benchmark_cartpole_solve(benchmark: Any) -> None:
     prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
     opts = {"max_iter": 100, "tol": 1e-6, "print_level": 0}
 
-    res = benchmark(solve_ipopt, prob, state, options=opts)
+    res = benchmark(Ipopt(options=opts).solve, prob, state)
     assert res.success is True
 
 
@@ -285,7 +285,7 @@ def test_benchmark_quadrotor_solve(benchmark: Any) -> None:
     prob, state, _ = quadrotor_obstacle_benchmark(N=25, dt=0.05)
     opts = {"max_iter": 500, "tol": 1e-6, "print_level": 0}
 
-    res = benchmark(solve_ipopt, prob, state, options=opts)
+    res = benchmark(Ipopt(options=opts).solve, prob, state)
     assert res.success is True
 
 
@@ -297,5 +297,5 @@ def test_benchmark_dubins_solve(benchmark: Any) -> None:
     prob, state, _ = dubins_corridor_benchmark(N=25, dt=0.1)
     opts = {"max_iter": 100, "tol": 1e-6, "print_level": 0}
 
-    res = benchmark(solve_ipopt, prob, state, options=opts)
+    res = benchmark(Ipopt(options=opts).solve, prob, state)
     assert res.success is True

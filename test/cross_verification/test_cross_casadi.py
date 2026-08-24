@@ -25,9 +25,9 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
 from trajopt.models.quadrotor import Quadrotor
-from trajopt.problem import Problem
+from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import solve_ipopt
+from trajopt.transcription.ipopt import Ipopt
 
 # Every test here solves the same problem twice, once per formulation. Unlike the Julia
 # cross-verification files these carry no `julia` marker to deselect them by.
@@ -73,7 +73,8 @@ def test_cartpole_swingup_casadi_parity() -> None:
 
     # 2. Solve both under identical Ipopt options
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     # 3. Assert full parity
@@ -131,7 +132,8 @@ def test_cartpole_with_state_limits_casadi_parity() -> None:
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
@@ -184,7 +186,8 @@ def test_dubins_car_casadi_parity() -> None:
 
     # 2. Solve both
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     # 3. Assert full parity
@@ -254,7 +257,8 @@ def test_dubins_car_with_corridor_and_obstacles_casadi_parity() -> None:
     init_traj = Trajectory(X=X_init, U=U_init, t=t_init, dt=dt_arr)
 
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, initial_trajectory=init_traj, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=init_traj)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts, initial_X=np.asarray(X_init), initial_U=np.asarray(U_init))
 
     assert_parity(
@@ -293,7 +297,8 @@ def test_dual_multipliers_parity_under_identical_solver_settings() -> None:
 
     # Solve both with tight tolerance
     solver_opts = {"max_iter": 500, "tol": 1e-9, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
@@ -331,7 +336,8 @@ def test_cartpole_dual_multipliers_parity() -> None:
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
 
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=solver_opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
@@ -449,7 +455,8 @@ def test_pendulum_casadi_parity() -> None:
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, x0=x0, dt=dt, options=opts)
+    state = MPCState.initial(prob, x0=x0, dt=dt)
+    trajopt_res = Ipopt(options=opts).solve(prob, state)
     casadi_res = casadi_prob.solve(opts)
 
     assert_parity(
@@ -487,7 +494,7 @@ def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
     # correction and cannot drive this problem past roughly 1e-8; the duals are compared at the
     # accuracy it does reach rather than at one it does not.
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(
         options=solver_opts,
         initial_X=np.asarray(X_init),
@@ -532,7 +539,7 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
     # significant figure while the trajectories agree to 1e-10. Tightening the solve is what
     # makes a dual comparison measure the formulations rather than the stopping rule.
     solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(
         options=solver_opts,
         initial_X=np.asarray(X_init),
@@ -566,7 +573,7 @@ def test_cartpole_benchmark_casadi_parity() -> None:
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
     solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
-    trajopt_res = solve_ipopt(prob, state, options=solver_opts)
+    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(

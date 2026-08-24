@@ -1,10 +1,8 @@
 import dataclasses
 import importlib
 import time
-from collections.abc import Callable, Mapping
 from typing import Any, Self
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -17,9 +15,9 @@ except ImportError as err:
     raise ImportError(msg) from err
 
 from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics
-from trajopt.problem import MPCState, Problem, solve
+from trajopt.problem import MPCState, Problem
 from trajopt.problem import cost as eval_cost
-from trajopt.trajectory import Trajectory
+from trajopt.transcription.result import Solver
 
 
 def _build_model(spec: dict[str, Any] | AbstractModel) -> AbstractModel:
@@ -84,22 +82,17 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         Optimal control problem definition.
     initial_state : MPCState | None, optional
         Initial MPC state holding trajectories and multipliers. If None, initialized at the origin.
-    solver : str | Callable[..., Any], optional
-        Solver backend name ("ipopt", "osqp", "clarabel") or a callable. Defaults to "ipopt".
-    solver_options : Mapping[str, Any] | None, optional
-        Options dictionary passed to the solver backend.
-    operating_point : Trajectory | jax.Array | None, optional
-        Operating point for QP solvers (OSQP/Clarabel).
+    solver : Solver | None, optional
+        Solver backend object (e.g. ``Ipopt()``, ``OSQP(operating_point=...)``). Defaults to
+        None, meaning ``Ipopt()``.
     """
 
-    def __init__(  # noqa: PLR0913, PLR0917 -- MPC component constructor arguments
+    def __init__(
         self,
         dt: float,
         problem: Problem,
         initial_state: MPCState | None = None,
-        solver: str | Callable[..., Any] = "ipopt",
-        solver_options: Mapping[str, Any] | None = None,
-        operating_point: Trajectory | jax.Array | None = None,
+        solver: Solver | None = None,
     ) -> None:
         super().__init__(dt)
         self.problem = problem
@@ -108,8 +101,6 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         else:
             self.state = MPCState.initial(problem, x0=jnp.zeros(problem.model.n), dt=dt)
         self.solver = solver
-        self.solver_options = dict(solver_options or {})
-        self.operating_point = operating_point
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> Self:
@@ -119,7 +110,7 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         ----------
         config : dict[str, Any]
             Dictionary containing ``dt``, ``problem`` (Problem instance or {class_path, ...} dict),
-            and optional ``solver``, ``solver_options``, ``initial_state``.
+            and optional ``solver``, ``initial_state``.
 
         Returns
         -------
@@ -131,9 +122,7 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
             dt=float(config["dt"]),
             problem=problem,
             initial_state=initial_state or config.get("initial_state"),
-            solver=config.get("solver", "ipopt"),
-            solver_options=config.get("solver_options"),
-            operating_point=config.get("operating_point"),
+            solver=config.get("solver"),
         )
 
     def update(
@@ -170,13 +159,7 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         fallback_used = False
         solve_success = True
         try:
-            solved_state = solve(
-                self.problem,
-                state,
-                solver=self.solver,
-                operating_point=self.operating_point,
-                options=self.solver_options,
-            )
+            solved_state = self.problem.solve(state, solver=self.solver)
             optimal_cost = float(eval_cost(self.problem, solved_state))
         except Exception:  # noqa: BLE001 -- fallback on any solver failure
             solve_success = False

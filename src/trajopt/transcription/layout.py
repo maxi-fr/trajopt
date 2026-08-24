@@ -287,46 +287,15 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     return max(max_primal, viol_init, viol_dyn, viol_stage)
 
 
-def parse_solver_initial_state(  # noqa: PLR0913 -- Initial state parser takes 7 parameters
-    problem: Problem,
-    x0: jax.Array | MPCState,
-    *,
-    t0: float | jax.Array = 0.0,
-    dt: float | jax.Array = 0.05,
-    initial_trajectory: Trajectory | None = None,
-    initial_z: jax.Array | None = None,
-    xf: jax.Array | None = None,
+def parse_solver_initial_state(
+    state: MPCState,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
-    """Parse solver inputs into standard JAX array representations."""
-    from trajopt.problem import MPCState  # noqa: PLC0415 -- avoid circular import
-
-    N = int(problem.N)
-    m = int(problem.model.m)
-
-    if isinstance(x0, MPCState):
-        x0_arr = jnp.asarray(x0.x0, dtype=jnp.float64)
-        t0_arr = jnp.asarray(x0.t0, dtype=jnp.float64)
-        dt_arr = jnp.asarray(x0.dt, dtype=jnp.float64)
-        xf_val = jnp.asarray(x0.xf, dtype=jnp.float64) if x0.xf is not None else None
-        z0 = x0.Z
-    else:
-        x0_arr = jnp.asarray(x0, dtype=jnp.float64)
-        t0_arr = jnp.asarray(t0, dtype=jnp.float64)
-        dt_arr = (
-            jnp.asarray(dt, dtype=jnp.float64)
-            if isinstance(dt, (list, tuple, np.ndarray, jax.Array)) and len(dt) == N - 1
-            else jnp.full(N - 1, jnp.asarray(dt, dtype=jnp.float64))
-        )
-        xf_val = jnp.asarray(xf, dtype=jnp.float64) if xf is not None else None
-
-        if initial_z is not None:
-            z0 = jnp.asarray(initial_z, dtype=jnp.float64)
-        elif initial_trajectory is not None:
-            z0 = trajectory_to_z(initial_trajectory.X, initial_trajectory.U)
-        else:
-            X_init = jnp.repeat(x0_arr[None, :], N, axis=0)
-            U_init = jnp.zeros((N - 1, m), dtype=jnp.float64)
-            z0 = trajectory_to_z(X_init, U_init)
+    """Extract standard JAX array representations of `state`'s boundary and warm-start data."""
+    x0_arr = jnp.asarray(state.x0, dtype=jnp.float64)
+    t0_arr = jnp.asarray(state.t0, dtype=jnp.float64)
+    dt_arr = jnp.asarray(state.dt, dtype=jnp.float64)
+    xf_val = jnp.asarray(state.xf, dtype=jnp.float64) if state.xf is not None else None
+    z0 = state.Z
 
     return x0_arr, t0_arr, dt_arr, xf_val, z0
 
