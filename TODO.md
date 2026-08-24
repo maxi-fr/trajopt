@@ -5,9 +5,6 @@
   * split workers (2) between cross_verification and others maybe
   * cross tests very slow
 
-* Simulate package integration
-  * wrappers for dynamics and controller
-
 * Implement: SQP adapter, ALTRO, iLQR
 
 * Remove unnecessary configurability. Many if else blocks

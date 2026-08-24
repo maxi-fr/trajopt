@@ -37,6 +37,9 @@ dev = [
     "marimo>=0.23.8",
     "pytest-xdist>=3.8.0",
 ]
+simulate = [
+    "simulate",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trajopt"]
@@ -51,6 +54,9 @@ markers = [
 
 [tool.uv]
 no-build-isolation-package = ["cyipopt"]
+
+[tool.uv.sources]
+simulate = { git = "https://github.com/maxi-fr/simulate.git" }
 
 [tool.ruff]
 line-length = 120
