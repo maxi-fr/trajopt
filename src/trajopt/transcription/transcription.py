@@ -7,7 +7,7 @@ from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import Problem
-from trajopt.transcription.layout import z_to_trajectory
+from trajopt.transcription.layout import _z_to_trajectory
 
 
 def _cost_fn(
@@ -22,7 +22,7 @@ def _cost_fn(
     n = int(problem.model.n)
     m = int(problem.model.m)
 
-    X, U = z_to_trajectory(Z, N, n, m)
+    X, U = _z_to_trajectory(Z, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
@@ -130,7 +130,7 @@ def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 
-    X, U = z_to_trajectory(Z, N, n, m)
+    X, U = _z_to_trajectory(Z, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
@@ -201,7 +201,7 @@ def _constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 
-    X, U = z_to_trajectory(Z, N, n, m)
+    X, U = _z_to_trajectory(Z, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
@@ -356,7 +356,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 
-    X, U = z_to_trajectory(Z, N, n, m)
+    X, U = _z_to_trajectory(Z, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)

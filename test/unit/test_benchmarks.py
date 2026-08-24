@@ -19,7 +19,7 @@ from trajopt.benchmarks import (
     run_benchmark,
 )
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
-from trajopt.transcription.layout import z_to_trajectory
+from trajopt.transcription.layout import _z_to_trajectory
 
 # Every test here runs at least one full benchmark solve, and the file is the slowest in
 # the suite by a wide margin. The dev loop is `-m "not slow and not benchmark"`.
@@ -43,7 +43,7 @@ def _bound_activity(
     carries a nonzero one.
     """
     X = np.asarray(res.trajectory.X)
-    mu_X, _ = z_to_trajectory(jnp.asarray(res.mu), N, n, m)
+    mu_X, _ = _z_to_trajectory(jnp.asarray(res.mu), N, n, m)
     on_bound = np.abs(np.abs(X[:, index]) - bound) <= tol
     return X[on_bound, index], np.asarray(mu_X)[on_bound, index]
 

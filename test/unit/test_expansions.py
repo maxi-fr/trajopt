@@ -33,7 +33,7 @@ from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
 from trajopt.problem import Problem
 from trajopt.rotations.quaternion import Quaternion
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
+from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 from trajopt.transcription.transcription import constraints_and_jac, eval_grad_f, hessian
 
 
@@ -867,11 +867,11 @@ def test_engine_agrees_with_transcription_on_euclidean_derivatives(weights: str)
     """
     problem, traj, t0, dt = _euclidean_dubins_problem(weights)
     N, n, m = int(problem.N), int(problem.model.n), int(problem.model.m)
-    Z = trajectory_to_z(traj.X, traj.U)
+    Z = _trajectory_to_z(traj.X, traj.U)
 
     # 1. Cost gradients against eval_grad_f, unpacked from the flat Z layout.
     cost_exp = problem.cost_expansion(traj)
-    grad_X, grad_U = z_to_trajectory(eval_grad_f(problem, Z, t0, dt), N, n, m)
+    grad_X, grad_U = _z_to_trajectory(eval_grad_f(problem, Z, t0, dt), N, n, m)
     np.testing.assert_allclose(np.asarray(cost_exp.q), np.asarray(grad_X), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.asarray(cost_exp.r), np.asarray(grad_U), rtol=1e-12, atol=1e-12)
 

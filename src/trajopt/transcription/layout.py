@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from trajopt.trajectory import Trajectory
 
 
-def trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
+def _trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
     """Interleave states and controls into the flat NLP primal vector Z.
 
     Parameters
@@ -35,7 +35,7 @@ def trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
     return jnp.concatenate([Z_stages, X[-1]])
 
 
-def z_to_trajectory(
+def _z_to_trajectory(
     Z: jax.Array,
     N: int,
     n: int,
@@ -241,7 +241,7 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     m = int(problem.model.m)
 
     Z_arr = jnp.asarray(Z, dtype=jnp.float64)
-    X, U = z_to_trajectory(Z_arr, N, n, m)
+    X, U = _z_to_trajectory(Z_arr, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
@@ -320,7 +320,7 @@ def operating_point_z(problem: Problem, operating_point: Trajectory | jax.Array 
     if operating_point is None:
         return jnp.zeros(nz, dtype=jnp.float64)
     if isinstance(operating_point, _Trajectory):
-        return trajectory_to_z(operating_point.X, operating_point.U).astype(jnp.float64)
+        return _trajectory_to_z(operating_point.X, operating_point.U).astype(jnp.float64)
 
     z_op = jnp.asarray(operating_point, dtype=jnp.float64)
     if z_op.shape != (nz,):

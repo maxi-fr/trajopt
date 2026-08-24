@@ -117,19 +117,7 @@ class Trajectory(eqx.Module):
         """Control dimension."""
         return int(self.U.shape[1])
 
-    def states(self) -> jax.Array:
-        """Return the stacked state array X of shape (N, n)."""
-        return self.X
-
-    def controls(self) -> jax.Array:
-        """Return the stacked control array U of shape (N-1, m)."""
-        return self.U
-
-    def times(self) -> jax.Array:
-        """Return the stacked timestamp array t of shape (N,)."""
-        return self.t
-
-    def set_states(self, X: jax.Array) -> "Trajectory":
+    def with_states(self, X: jax.Array) -> "Trajectory":
         """Return a new Trajectory with updated states.
 
         Parameters
@@ -144,7 +132,7 @@ class Trajectory(eqx.Module):
         """
         return Trajectory(X=X, U=self.U, t=self.t, dt=self.dt)
 
-    def set_controls(self, U: jax.Array) -> "Trajectory":
+    def with_controls(self, U: jax.Array) -> "Trajectory":
         """Return a new Trajectory with updated controls.
 
         Parameters

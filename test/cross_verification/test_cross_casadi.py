@@ -487,8 +487,8 @@ def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
-    X_init = state.states()
-    U_init = state.controls()
+    X_init = state.states
+    U_init = state.controls
 
     # The quaternion block of the terminal Hessian is exactly singular, so Ipopt leans on inertia
     # correction and cannot drive this problem past roughly 1e-8; the duals are compared at the
@@ -532,8 +532,8 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
-    X_init = state.states()
-    U_init = state.controls()
+    X_init = state.states
+    U_init = state.controls
 
     # Duals converge later than primals, and at 1e-8 the costates still differ in the fourth
     # significant figure while the trajectories agree to 1e-10. Tightening the solve is what

@@ -15,11 +15,6 @@ from trajopt.models.pendulum import Pendulum
 from trajopt.problem import (
     MPCState,
     Problem,
-    controls,
-    cost,
-    initial_controls,
-    initial_states,
-    states,
 )
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt
@@ -92,7 +87,7 @@ def test_mpcstate_per_step_operations_return_new_values() -> None:
     assert s_meas is not state
     np.testing.assert_allclose(s_meas.x0, new_x)
     np.testing.assert_allclose(s_meas.t0, new_t)
-    np.testing.assert_allclose(states(s_meas)[0], new_x)
+    np.testing.assert_allclose(s_meas.states[0], new_x)
 
     # 2. Update goal
     new_xf = jnp.array([0.0, 0.0])
@@ -104,12 +99,12 @@ def test_mpcstate_per_step_operations_return_new_values() -> None:
     # 3. Shift trajectory forward
     X_init = jnp.arange(N * 2, dtype=jnp.float64).reshape((N, 2))
     U_init = jnp.arange((N - 1) * 1, dtype=jnp.float64).reshape((N - 1, 1))
-    s_custom = state.initial_states(X_init).initial_controls(U_init)
+    s_custom = state.with_states(X_init).with_controls(U_init)
 
     s_shifted = s_custom.shift(dt=0.1)
     assert s_shifted is not s_custom
-    X_shifted = states(s_shifted)
-    U_shifted = controls(s_shifted)
+    X_shifted = s_shifted.states
+    U_shifted = s_shifted.controls
 
     # Shift drops index 0, shifts remaining forward, and duplicates the final element
     np.testing.assert_allclose(X_shifted[:-1], X_init[1:])
@@ -135,7 +130,7 @@ def test_goal_state_single_source_of_truth() -> None:
     state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf_initial)
 
     # Initial cost and constraint evaluation
-    c1 = cost(prob, state)
+    c1 = prob.cost(state)
     con1, _ = constraints_and_jac(prob, state.Z, state.x0, state.t0, state.dt, xf=state.xf)
 
     # Update goal on state alone
@@ -143,13 +138,13 @@ def test_goal_state_single_source_of_truth() -> None:
     state_new = state.with_goal(xf_new)
     assert state_new.xf is not state.xf
 
-    c2 = cost(prob, state_new)
+    c2 = prob.cost(state_new)
     con2, _ = constraints_and_jac(prob, state_new.Z, state_new.x0, state_new.t0, state_new.dt, xf=state_new.xf)
 
     # Goal constraint residual at terminal index must reflect xf_new directly
     terminal_con1 = con1[-n:]
     terminal_con2 = con2[-n:]
-    X_state = states(state)
+    X_state = state.states
     np.testing.assert_allclose(terminal_con1, X_state[-1] - xf_initial)
     np.testing.assert_allclose(terminal_con2, X_state[-1] - xf_new)
     assert not np.allclose(c1, c2)
@@ -289,7 +284,7 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
 
     # Initial solve
     state_opt = prob.solve(state, solver=Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}))
-    u0 = controls(state_opt)[0]
+    u0 = state_opt.controls[0]
 
     # Advance 1 step
     dmodel = RK4(model)
@@ -339,7 +334,7 @@ def test_closed_loop_cartpole_mpc() -> None:
     for _ in range(sim_steps):
         state = state.with_measurement(x_curr, t_curr)
         state = prob.solve(state, solver=Ipopt(options={"max_iter": 50, "tol": 1e-4, "print_level": 0}))
-        u_cmd = controls(state)[0]
+        u_cmd = state.controls[0]
 
         # Simulate system forward with applied control
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
@@ -365,7 +360,7 @@ def test_rollout_problem_state() -> None:
     x0 = jnp.array([0.1, 0.2, 0.0, 0.0])
     state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=0.05)
     U_const = jnp.full((N - 1, m), 0.5)
-    state = state.initial_controls(U_const)
+    state = state.with_controls(U_const)
 
     traj = prob.model.rollout(state.to_trajectory())
     assert isinstance(traj, Trajectory)
@@ -449,7 +444,7 @@ def test_runtime_goal_leaves_a_tracking_objective_alone() -> None:
     # The goal constraint still follows the run-time goal.
     xf_new = jnp.array([1.0, 0.25, 0.0])
     con, _ = constraints_and_jac(prob, state.Z, state.x0, state.t0, state.dt, xf=state.with_goal(xf_new).xf)
-    np.testing.assert_allclose(con[-3:], states(state)[-1] - xf_new, atol=1e-12)
+    np.testing.assert_allclose(con[-3:], state.states[-1] - xf_new, atol=1e-12)
 
 
 def test_runtime_goal_rejected_when_nothing_reads_it() -> None:

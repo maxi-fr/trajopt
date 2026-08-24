@@ -115,7 +115,7 @@ from trajopt.constraints.linear import GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem, controls, states
+from trajopt.problem import MPCState, Problem
 
 # 1. Define model and problem dimensions
 model = Pendulum()
@@ -141,8 +141,8 @@ state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
 
 # 5. Solve the trajectory optimization problem with Ipopt
 opt_state = prob.solve(state)
-X = states(opt_state)
-U = controls(opt_state)
+X = opt_state.states
+U = opt_state.controls
 
 print(f"Optimal final state: {np.asarray(X[-1])}")
 ```

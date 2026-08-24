@@ -16,7 +16,6 @@ except ImportError as err:
 
 from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics
 from trajopt.problem import MPCState, Problem
-from trajopt.problem import cost as eval_cost
 from trajopt.transcription.result import Solver
 
 
@@ -160,14 +159,14 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         solve_success = True
         try:
             solved_state = self.problem.solve(state, solver=self.solver)
-            optimal_cost = float(eval_cost(self.problem, solved_state))
+            optimal_cost = float(self.problem.cost(solved_state))
         except Exception:  # noqa: BLE001 -- fallback on any solver failure
             solve_success = False
             fallback_used = True
             optimal_cost = float("nan")
             solved_state = state
 
-        u_cmd = np.asarray(solved_state.controls()[0], dtype=np.float64)
+        u_cmd = np.asarray(solved_state.controls[0], dtype=np.float64)
 
         self.state = solved_state.shift(self.dt)
         solve_time = time.perf_counter() - t_start

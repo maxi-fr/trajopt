@@ -73,11 +73,6 @@ from trajopt.models import (
 from trajopt.problem import (
     MPCState,
     Problem,
-    controls,
-    cost,
-    initial_controls,
-    initial_states,
-    states,
 )
 from trajopt.rotations.quaternion import (
     Quaternion,
@@ -98,8 +93,6 @@ from trajopt.transcription.layout import (
     compute_constraint_violation,
     constraint_bounds,
     primal_bounds,
-    trajectory_to_z,
-    z_to_trajectory,
 )
 from trajopt.transcription.osqp import (
     OSQP,
@@ -198,8 +191,6 @@ __all__ = [
     "constraint_bounds",
     "constraints_and_jac",
     "control_rate_cost",
-    "controls",
-    "cost",
     "cost_and_grad",
     "euler_step",
     "eval_f",
@@ -210,15 +201,10 @@ __all__ = [
     "hessian",
     "hessian_sparsity_pattern",
     "implicit_midpoint_step",
-    "initial_controls",
-    "initial_states",
     "jacobian_sparsity_pattern",
     "primal_bounds",
     "rk4_step",
     "rollout_states",
-    "states",
-    "trajectory_to_z",
     "update_reference",
     "with_control_rate_penalty",
-    "z_to_trajectory",
 ]

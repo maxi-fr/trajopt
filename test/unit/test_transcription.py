@@ -18,10 +18,10 @@ from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
+    _trajectory_to_z,
+    _z_to_trajectory,
     constraint_bounds,
     primal_bounds,
-    trajectory_to_z,
-    z_to_trajectory,
 )
 from trajopt.transcription.sparsity import (
     hessian_sparsity_pattern,
@@ -49,7 +49,7 @@ def test_primal_vector_interleaving_roundtrip() -> None:
     X = jnp.arange(N * n, dtype=jnp.float64).reshape((N, n))
     U = jnp.arange(100, 100 + (N - 1) * m, dtype=jnp.float64).reshape((N - 1, m))
 
-    Z = trajectory_to_z(X, U)
+    Z = _trajectory_to_z(X, U)
     expected_len = N * n + (N - 1) * m
     assert Z.shape == (expected_len,)
 
@@ -68,7 +68,7 @@ def test_primal_vector_interleaving_roundtrip() -> None:
     np.testing.assert_allclose(Z, expected_Z)
 
     # Round trip
-    X_rec, U_rec = z_to_trajectory(Z, N, n, m)
+    X_rec, U_rec = _z_to_trajectory(Z, N, n, m)
     np.testing.assert_allclose(X_rec, X)
     np.testing.assert_allclose(U_rec, U)
 

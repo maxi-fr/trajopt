@@ -9,11 +9,11 @@ import numpy as np
 from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
+    _z_to_trajectory,
     compute_constraint_violation,
     constraint_bounds,
     parse_solver_initial_state,
     primal_bounds,
-    z_to_trajectory,
 )
 from trajopt.transcription.result import split_bound_duals, warm_start_duals
 from trajopt.transcription.sparsity import (
@@ -214,7 +214,7 @@ class Ipopt:
         cost_val = float(info.get("obj_val", cb.objective(z_opt)))
 
         Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
-        X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+        X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
         t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
         opt_traj = Trajectory(

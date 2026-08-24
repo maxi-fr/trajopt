@@ -13,13 +13,13 @@ from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
+    _z_to_trajectory,
     build_linear_constraint_block,
     compute_constraint_violation,
     extract_quadratic_cost,
     operating_point_z,
     parse_solver_initial_state,
     primal_bounds,
-    z_to_trajectory,
 )
 from trajopt.transcription.result import blocked_to_canonical
 from trajopt.transcription.transcription import (
@@ -320,7 +320,7 @@ class Clarabel:
         t_term = t0_arr + jnp.sum(dt_arr)
 
         z_op = operating_point_z(problem, self.operating_point)
-        X_op, U_op = z_to_trajectory(z_op, N, n, m)
+        X_op, U_op = _z_to_trajectory(z_op, N, n, m)
 
         P_triu, q_vec = extract_quadratic_cost(
             problem,
@@ -390,7 +390,7 @@ class Clarabel:
         cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
         viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
-        X_opt, U_opt = z_to_trajectory(Z_opt_jax, N, n, m)
+        X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
         t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
         opt_traj = Trajectory(

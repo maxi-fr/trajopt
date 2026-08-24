@@ -549,7 +549,7 @@ def measure_closed_loop_mpc(
         t_step_dur = time.perf_counter() - t_step_start
         durations.append(t_step_dur)
 
-        u0 = solved_state.controls()[0]
+        u0 = solved_state.controls[0]
         t0_curr = float(curr_state.t0)
         x_next = model.discrete_dynamics(curr_state.x0, u0, t0_curr, dt_val)
         curr_state = solved_state.with_measurement(x_next, t0_curr + dt_val)

@@ -10,7 +10,7 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel, DiscreteDynamics, IntegratorCallable
 from trajopt.dynamics.integrators import Integrator
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
+from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
 if TYPE_CHECKING:
     from trajopt.expansions import Expansion
@@ -119,6 +119,12 @@ class Problem(eqx.Module):
             N=state.N,
             status=normalize_status(success=res.success, message=res.message),
         )
+
+    def cost(self, state: "MPCState") -> jax.Array:
+        """Evaluate objective scalar cost J(state.Z) for this problem at `state`."""
+        from trajopt.transcription.transcription import eval_f  # noqa: PLC0415 -- avoid circular import
+
+        return eval_f(self, state.Z, state.t0, state.dt, state.xf)
 
 
 class MPCState(eqx.Module):
@@ -230,11 +236,11 @@ class MPCState(eqx.Module):
         if initial_z is not None:
             z_init = jnp.asarray(initial_z, dtype=jnp.float64)
         elif initial_trajectory is not None:
-            z_init = trajectory_to_z(initial_trajectory.X, initial_trajectory.U)
+            z_init = _trajectory_to_z(initial_trajectory.X, initial_trajectory.U)
         else:
             X0 = jnp.repeat(x0_arr[None, :], N, axis=0)
             U0 = jnp.zeros((N - 1, m), dtype=jnp.float64)
-            z_init = trajectory_to_z(X0, U0)
+            z_init = _trajectory_to_z(X0, U0)
 
         P_total = n + (N - 1) * n + sum(problem.constraints.p)
         lam = jnp.zeros(P_total, dtype=jnp.float64)
@@ -271,9 +277,9 @@ class MPCState(eqx.Module):
         x_arr = jnp.asarray(x, dtype=self.x0.dtype)
         t_arr = jnp.asarray(t, dtype=self.t0.dtype)
 
-        X, U = z_to_trajectory(self.Z, self.N, self.n, self.m)
+        X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         X_new = X.at[0].set(x_arr)
-        Z_new = trajectory_to_z(X_new, U)
+        Z_new = _trajectory_to_z(X_new, U)
 
         return MPCState(
             x0=x_arr,
@@ -338,10 +344,10 @@ class MPCState(eqx.Module):
         MPCState
             New state instance with warm-start trajectory shifted forward.
         """
-        X, U = z_to_trajectory(self.Z, self.N, self.n, self.m)
+        X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         new_X = jnp.concatenate([X[1:], X[-1:]], axis=0)
         new_U = jnp.concatenate([U[1:], U[-1:]], axis=0)
-        new_Z = trajectory_to_z(new_X, new_U)
+        new_Z = _trajectory_to_z(new_X, new_U)
 
         dt_step = self.dt[0] if (self.dt.ndim > 0 and len(self.dt) > 0) else self.dt
         step_val = dt_step if dt is None else jnp.asarray(dt, dtype=self.t0.dtype)
@@ -362,17 +368,19 @@ class MPCState(eqx.Module):
             status=self.status,
         )
 
+    @property
     def states(self) -> jax.Array:
-        """Return stacked state trajectory X of shape (N, n)."""
-        X, _ = z_to_trajectory(self.Z, self.N, self.n, self.m)
+        """Stacked state trajectory X of shape (N, n), unpacked from Z on each access."""
+        X, _ = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         return X
 
+    @property
     def controls(self) -> jax.Array:
-        """Return stacked control trajectory U of shape (N - 1, m)."""
-        _, U = z_to_trajectory(self.Z, self.N, self.n, self.m)
+        """Stacked control trajectory U of shape (N - 1, m), unpacked from Z on each access."""
+        _, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         return U
 
-    def initial_states(self, X0: jax.Array) -> "MPCState":
+    def with_states(self, X0: jax.Array) -> "MPCState":
         """Return a new MPCState with states in Z replaced by X0.
 
         Parameters
@@ -385,8 +393,8 @@ class MPCState(eqx.Module):
         MPCState
             New state instance with updated states.
         """
-        _, U = z_to_trajectory(self.Z, self.N, self.n, self.m)
-        Z_new = trajectory_to_z(jnp.asarray(X0, dtype=self.Z.dtype), U)
+        _, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
+        Z_new = _trajectory_to_z(jnp.asarray(X0, dtype=self.Z.dtype), U)
         return MPCState(
             x0=self.x0,
             t0=self.t0,
@@ -401,7 +409,7 @@ class MPCState(eqx.Module):
             status=self.status,
         )
 
-    def initial_controls(self, U0: jax.Array) -> "MPCState":
+    def with_controls(self, U0: jax.Array) -> "MPCState":
         """Return a new MPCState with controls in Z replaced by U0.
 
         Parameters
@@ -414,8 +422,8 @@ class MPCState(eqx.Module):
         MPCState
             New state instance with updated controls.
         """
-        X, _ = z_to_trajectory(self.Z, self.N, self.n, self.m)
-        Z_new = trajectory_to_z(X, jnp.asarray(U0, dtype=self.Z.dtype))
+        X, _ = _z_to_trajectory(self.Z, self.N, self.n, self.m)
+        Z_new = _trajectory_to_z(X, jnp.asarray(U0, dtype=self.Z.dtype))
         return MPCState(
             x0=self.x0,
             t0=self.t0,
@@ -432,35 +440,8 @@ class MPCState(eqx.Module):
 
     def to_trajectory(self) -> Trajectory:
         """Convert state to a Trajectory instance."""
-        X, U = z_to_trajectory(self.Z, self.N, self.n, self.m)
+        X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         t_arr = self.t0 + jnp.concatenate([jnp.zeros(1, dtype=self.Z.dtype), jnp.cumsum(self.dt)])
         return Trajectory(X=X, U=U, t=t_arr, dt=self.dt)
-
-
-def states(state: MPCState) -> jax.Array:
-    """Return stacked state trajectory X of shape (N, n)."""
-    return state.states()
-
-
-def controls(state: MPCState) -> jax.Array:
-    """Return stacked control trajectory U of shape (N - 1, m)."""
-    return state.controls()
-
-
-def initial_states(state: MPCState, X0: jax.Array) -> MPCState:
-    """Return a new MPCState with states in Z replaced by X0."""
-    return state.initial_states(X0)
-
-
-def initial_controls(state: MPCState, U0: jax.Array) -> MPCState:
-    """Return a new MPCState with controls in Z replaced by U0."""
-    return state.initial_controls(U0)
-
-
-def cost(problem: Problem, state: MPCState) -> jax.Array:
-    """Evaluate objective scalar cost J(state.Z) given Problem and MPCState."""
-    from trajopt.transcription.transcription import eval_f  # noqa: PLC0415 -- avoid circular import
-
-    return eval_f(problem, state.Z, state.t0, state.dt, state.xf)
 
 
