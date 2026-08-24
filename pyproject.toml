@@ -31,7 +31,6 @@ test = [
 dev = [
     "ruff>=0.3.0",
     "pytest>=8.0.0",
-    "pytest-benchmark>=4.0.0",
     "ty>=0.0.73",
     "validate-pyproject>=0.26",
     "marimo>=0.23.8",
@@ -48,7 +47,6 @@ packages = ["src/trajopt"]
 testpaths = ["test"]
 markers = [
     "julia: tests requiring Julia runtime and juliacall cross-verification (deselect with '-m \"not julia\"')",
-    "benchmark: benchmark timing and performance tests (deselect with '-m \"not benchmark\"')",
     "slow: correctness tests dominated by full nonlinear solves (deselect with '-m \"not slow\"')",
 ]
 
@@ -87,10 +85,10 @@ known-first-party = ["trajopt"]
 convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
-# "scripts/**" = [
-#     "INP001", # Not a package — standalone runnable demos
-#     "T201",   # print() is fine in CLI scripts
-# ]
+"scripts/**" = [
+    "INP001", # Not a package — standalone runnable demos
+    "T201",   # print() is fine in CLI scripts
+]
 "docs/**" = [
     "INP001", # Reference implementations for the spec, not an importable package
 ]

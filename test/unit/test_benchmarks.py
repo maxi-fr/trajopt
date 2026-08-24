@@ -1,5 +1,3 @@
-from typing import Any
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -22,7 +20,7 @@ from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import _z_to_trajectory
 
 # Every test here runs at least one full benchmark solve, and the file is the slowest in
-# the suite by a wide margin. The dev loop is `-m "not slow and not benchmark"`.
+# the suite by a wide margin. The dev loop is `-m "not slow"`.
 pytestmark = pytest.mark.slow
 
 
@@ -263,39 +261,3 @@ def test_run_all_benchmarks() -> None:
     for name, res in results.items():
         assert res.solve_result.success is True, f"Benchmark {name} solve failed"
         assert res.closed_loop.sustained_frequency_hz > 0.0
-
-
-@pytest.mark.benchmark
-def test_benchmark_cartpole_solve(benchmark: Any) -> None:
-    """Pytest-benchmark performance test for Cartpole swing-up solve."""
-    pytest.importorskip("cyipopt")
-
-    prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
-    opts = {"max_iter": 100, "tol": 1e-6, "print_level": 0}
-
-    res = benchmark(Ipopt(options=opts).solve, prob, state)
-    assert res.success is True
-
-
-@pytest.mark.benchmark
-def test_benchmark_quadrotor_solve(benchmark: Any) -> None:
-    """Pytest-benchmark performance test for Quadrotor obstacle avoidance solve."""
-    pytest.importorskip("cyipopt")
-
-    prob, state, _ = quadrotor_obstacle_benchmark(N=25, dt=0.05)
-    opts = {"max_iter": 500, "tol": 1e-6, "print_level": 0}
-
-    res = benchmark(Ipopt(options=opts).solve, prob, state)
-    assert res.success is True
-
-
-@pytest.mark.benchmark
-def test_benchmark_dubins_solve(benchmark: Any) -> None:
-    """Pytest-benchmark performance test for Dubins car corridor tracking solve."""
-    pytest.importorskip("cyipopt")
-
-    prob, state, _ = dubins_corridor_benchmark(N=25, dt=0.1)
-    opts = {"max_iter": 100, "tol": 1e-6, "print_level": 0}
-
-    res = benchmark(Ipopt(options=opts).solve, prob, state)
-    assert res.success is True

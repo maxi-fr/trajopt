@@ -39,7 +39,7 @@ repos:
       - id: markdownlint-cli2
         args: ["--fix"]
         pass_filenames: true
-        exclude: "CLAUDE.md|AGENTS.md"
+        exclude: "CLAUDE.md|AGENTS.md|altro_jl*"
 
   - repo: local
     hooks:
@@ -59,7 +59,7 @@ repos:
 
       - id: pytest
         name: pytest
-        entry: uv run pytest -n 4 --benchmark-disable
+        entry: uv run pytest -n 4
         language: system
         pass_filenames: false
         always_run: true
