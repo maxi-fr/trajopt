@@ -103,8 +103,11 @@ class Problem(eqx.Module):
 
         res = solver.solve(self, state)
 
-        lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if len(res.lam) > 0 else state.lam
-        mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if len(res.mu) > 0 else state.mu
+        # Single shooting carries no dynamics or initial-condition duals, so its lam/mu are
+        # shorter than the multiple-shooting layout and are taken as-is (possibly empty).
+        single_shooting = bool(getattr(solver, "single_shooting", False))
+        lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if single_shooting or len(res.lam) > 0 else state.lam
+        mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if single_shooting or len(res.mu) > 0 else state.mu
 
         return MPCState(
             x0=state.x0,
@@ -142,7 +145,8 @@ class MPCState(eqx.Module):
     lam : jax.Array
         Constraint dual multipliers vector of shape (P,).
     mu : jax.Array
-        Primal variable bounds multipliers vector of shape (N * n + (N - 1) * m,).
+        Primal variable bounds multipliers vector, one entry per primal variable of the
+        transcription.
     Z : jax.Array
         Warm-start flat primal trajectory vector of shape (N * n + (N - 1) * m,).
     dt : jax.Array
@@ -443,5 +447,3 @@ class MPCState(eqx.Module):
         X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         t_arr = self.t0 + jnp.concatenate([jnp.zeros(1, dtype=self.Z.dtype), jnp.cumsum(self.dt)])
         return Trajectory(X=X, U=U, t=t_arr, dt=self.dt)
-
-

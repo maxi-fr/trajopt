@@ -84,4 +84,3 @@ def rollout_states(
 
     dt_arr, t_arr = _step_durations_and_times(t, dt, n_steps=U_arr.shape[0], dtype=x0_arr.dtype)
     return _rollout_scan(model.discretize(), x0_arr, U_arr, t_arr, dt_arr)
-
