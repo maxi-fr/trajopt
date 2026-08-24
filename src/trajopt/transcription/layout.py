@@ -236,8 +236,6 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     float
         Maximum constraint violation scalar.
     """
-    from trajopt.problem import _extract_discrete_model  # noqa: PLC0415 -- avoid circular import
-
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -248,7 +246,7 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 

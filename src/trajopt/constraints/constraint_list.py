@@ -301,6 +301,10 @@ class BuiltConstraintList(eqx.Module):
         T_arr = jnp.zeros(self.N, dtype=X.dtype) if T is None else T
         return tuple(g.jacobian(X, U, T_arr) for g in self.groups)
 
+    def build(self) -> "BuiltConstraintList":
+        """Return self; already built."""
+        return self
+
 
 class ConstraintList:
     """Stores the set of constraints and active knot-point ranges for an optimization problem.

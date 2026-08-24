@@ -9,7 +9,6 @@ from trajopt.dynamics import (
     DiscretizedDynamics,
     Euler,
     ImplicitMidpoint,
-    rollout,
     rollout_states,
 )
 from trajopt.expansions import dynamics_expansion
@@ -315,7 +314,7 @@ def test_composition_with_integrators_and_rollout() -> None:
 
     # 4. Trajectory rollout object
     traj = Trajectory(X=jnp.zeros((N, 5)), U=U, t=jnp.arange(N) * dt, dt=jnp.full(N - 1, dt))
-    traj_rolled = rollout(aug_rk4, traj, x0=x0_aug)
+    traj_rolled = aug_rk4.rollout(traj, x0=x0_aug)
     np.testing.assert_allclose(traj_rolled.X, X_sim_aug)
 
 

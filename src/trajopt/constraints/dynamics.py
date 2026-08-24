@@ -4,8 +4,7 @@ import jax
 
 from trajopt.cones import ZeroCone
 from trajopt.constraints.base import ConstraintShape
-from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics, IntegratorCallable
-from trajopt.dynamics.integrators import RK4
+from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics, IntegratorCallable
 
 
 class AbstractDynamicsConstraint(ConstraintShape):
@@ -94,14 +93,7 @@ class DynamicsConstraint(AbstractDynamicsConstraint):
         model: DiscreteDynamics | ContinuousDynamics,
         integrator: IntegratorCallable | None = None,
     ) -> None:
-        if isinstance(model, DiscreteDynamics):
-            disc_model = model
-        elif isinstance(model, ContinuousDynamics):
-            integ = RK4() if integrator is None else integrator
-            disc_model = DiscretizedDynamics(model, integ)
-        else:
-            msg = f"Expected DiscreteDynamics or ContinuousDynamics, got {type(model).__name__}."
-            raise TypeError(msg)
+        disc_model = model.discretize(integrator)
 
         super().__init__(n=disc_model.n, m=disc_model.m, p=disc_model.n, cone=ZeroCone())
         self.model = disc_model

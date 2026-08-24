@@ -19,7 +19,6 @@ from trajopt.problem import (
     cost,
     initial_controls,
     initial_states,
-    rollout,
     solve,
     states,
 )
@@ -50,7 +49,7 @@ def test_problem_structure_mpcstate_split() -> None:
     assert hasattr(prob, "obj")
     assert hasattr(prob, "constraints")
     assert hasattr(prob, "N")
-    assert hasattr(prob, "integrator")
+    assert not hasattr(prob, "integrator")
     assert not hasattr(prob, "x0")
     assert not hasattr(prob, "t0")
 
@@ -258,7 +257,7 @@ def test_model_parameters_traced_zero_recompile() -> None:
     assert compile_count == 1
 
     # Change mass parameter in model
-    prob2 = eqx.tree_at(lambda p: p.model.mp, prob1, jnp.asarray(0.35, dtype=jnp.float64))
+    prob2 = eqx.tree_at(lambda p: p.model.continuous_dynamics.mp, prob1, jnp.asarray(0.35, dtype=jnp.float64))
     _c2, j2 = jit_jac(prob2, state.Z, state.x0, state.t0, state.dt)
 
     # Must NOT recompile (compile_count stays 1)
@@ -355,7 +354,7 @@ def test_closed_loop_cartpole_mpc() -> None:
 
 
 def test_rollout_problem_state() -> None:
-    """Verify rollout(problem, state) simulates dynamics and returns a Trajectory."""
+    """Verify model.rollout(trajectory) simulates dynamics and returns a Trajectory."""
     model = Cartpole()
     n, m, N = model.n, model.m, 10
     Q = jnp.eye(n)
@@ -369,7 +368,7 @@ def test_rollout_problem_state() -> None:
     U_const = jnp.full((N - 1, m), 0.5)
     state = state.initial_controls(U_const)
 
-    traj = rollout(prob, state)
+    traj = prob.model.rollout(state.to_trajectory())
     assert isinstance(traj, Trajectory)
     assert traj.N == N
     assert traj.n == n

@@ -9,7 +9,7 @@ from trajopt.constraints.constraint_list import BuiltConstraintList, BuiltKnotCo
 from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import DiagonalCost, QuadraticCost
 from trajopt.dynamics.base import AbstractModel
-from trajopt.problem import Problem, _extract_discrete_model
+from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 
 _EXPECTED_NDIM_2D = 2
@@ -235,7 +235,7 @@ def dynamics_expansion(problem: Problem | AbstractModel, state: Trajectory) -> E
     Expansion
         Expansion holding stacked A of shape (N-1, ne, ne) and B of shape (N-1, ne, m).
     """
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model if isinstance(problem, Problem) else problem.discretize()
 
     X = state.X
     U = state.U

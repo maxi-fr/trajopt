@@ -54,7 +54,6 @@ from trajopt.dynamics import (
     euler_step,
     implicit_midpoint_step,
     rk4_step,
-    rollout,
     rollout_states,
 )
 from trajopt.expansions import (
@@ -214,7 +213,6 @@ __all__ = [
     "linearize_about",
     "primal_bounds",
     "rk4_step",
-    "rollout",
     "rollout_states",
     "solve",
     "solve_clarabel",

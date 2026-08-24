@@ -1,18 +1,9 @@
 import jax
 import jax.numpy as jnp
 
-from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics, DiscretizedDynamics
-from trajopt.dynamics.integrators import RK4
-from trajopt.trajectory import Trajectory
+from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics
 
 _EXPECTED_NDIM_2D = 2
-
-
-def _discretize(model: DiscreteDynamics | ContinuousDynamics) -> DiscreteDynamics:
-    """Return model unchanged if already discrete, otherwise discretize it with RK4."""
-    if isinstance(model, DiscreteDynamics):
-        return model
-    return DiscretizedDynamics(model, RK4())
 
 
 def _step_durations_and_times(
@@ -92,32 +83,5 @@ def rollout_states(
         raise ValueError(msg)
 
     dt_arr, t_arr = _step_durations_and_times(t, dt, n_steps=U_arr.shape[0], dtype=x0_arr.dtype)
-    return _rollout_scan(_discretize(model), x0_arr, U_arr, t_arr, dt_arr)
+    return _rollout_scan(model.discretize(), x0_arr, U_arr, t_arr, dt_arr)
 
-
-def rollout(
-    model: DiscreteDynamics | ContinuousDynamics,
-    trajectory: Trajectory,
-    x0: jax.Array | None = None,
-) -> Trajectory:
-    """Forward simulate a dynamical system over a horizon using jax.lax.scan.
-
-    Sets x_1 = x_0 and propagates x_{k+1} = f_d(x_k, u_k, t_k, dt_k) using the controls,
-    timestamps, and step durations stored in the trajectory.
-
-    Parameters
-    ----------
-    model
-        Dynamics model. A continuous model is discretized with RK4.
-    trajectory
-        Trajectory supplying the controls, timestamps, and step durations.
-    x0
-        Initial state of shape (n,). Defaults to the trajectory's first state.
-
-    Returns
-    -------
-    New Trajectory holding the simulated states X of shape (N, n) and the inputs it was given.
-    """
-    x0_val = trajectory.X[0] if x0 is None else jnp.asarray(x0, dtype=trajectory.X.dtype)
-    X_sim = _rollout_scan(_discretize(model), x0_val, trajectory.U, trajectory.t, trajectory.dt)
-    return Trajectory(X=X_sim, U=trajectory.U, t=trajectory.t, dt=trajectory.dt)

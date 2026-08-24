@@ -14,6 +14,7 @@ from trajopt.constraints.rotations import QuatVecEq
 from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import DiagonalCost, QuadraticCost
 from trajopt.costs.rotations import QuatGeodesicCost
+from trajopt.dynamics.base import DiscretizedDynamics
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
@@ -694,7 +695,10 @@ def build_quadrotor_casadi(
 
 
 def _get_casadi_dyn_fn(model: Any) -> Callable[[ca.MX, ca.MX], ca.MX]:
-    """Extract continuous dynamics callable for a model."""
+    """Extract continuous dynamics callable for a model, reaching through a discretized wrapper."""
+    if isinstance(model, DiscretizedDynamics):
+        model = model.continuous_dynamics
+
     if isinstance(model, Cartpole):
         mc = float(np.asarray(model.mc))
         mp = float(np.asarray(model.mp))

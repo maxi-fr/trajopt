@@ -6,7 +6,7 @@ import numpy as np
 from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import Problem, _extract_discrete_model
+from trajopt.problem import Problem
 from trajopt.transcription.layout import z_to_trajectory
 
 
@@ -126,7 +126,7 @@ def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 
@@ -197,7 +197,7 @@ def _constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 
@@ -352,7 +352,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model
     built_constraints = problem.constraints
     knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
 

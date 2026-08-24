@@ -3,8 +3,8 @@ import jax
 import jax.numpy as jnp
 
 from trajopt.costs.quadratic import QuadraticCost
-from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics
-from trajopt.dynamics.rollout import _discretize, _step_durations_and_times
+from trajopt.dynamics.base import AbstractModel, DiscreteDynamics
+from trajopt.dynamics.rollout import _step_durations_and_times
 from trajopt.trajectory import Trajectory
 
 _EXPECTED_NDIM_2D = 2
@@ -161,10 +161,7 @@ def with_control_rate_penalty(
     tuple[ControlRateModel, QuadraticCost]
         Augmented discrete model and the corresponding stage cost function.
     """
-    discrete_model = _discretize(model) if isinstance(model, ContinuousDynamics) else model
-    if not isinstance(discrete_model, DiscreteDynamics):
-        msg = f"Cannot discretize model {type(model).__name__}"
-        raise TypeError(msg)
+    discrete_model = model.discretize()
 
     aug_model = ControlRateModel(discrete_model)
     cost = control_rate_cost(R_delta, discrete_model.n, discrete_model.m)
@@ -252,10 +249,7 @@ def linearize_about(
             raise ValueError(msg)
         dt_arr, t_arr = _step_durations_and_times(t, dt, n_steps=U_arr.shape[0], dtype=X_arr.dtype)
 
-    discrete_model = _discretize(model) if isinstance(model, ContinuousDynamics) else model
-    if not isinstance(discrete_model, DiscreteDynamics):
-        msg = f"Cannot extract discrete dynamics from model {type(model).__name__}"
-        raise TypeError(msg)
+    discrete_model = model.discretize()
 
     def step_jacobians(
         xk: jax.Array,

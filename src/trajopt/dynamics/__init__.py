@@ -16,7 +16,6 @@ from trajopt.dynamics.integrators import (
     rk4_step,
 )
 from trajopt.dynamics.rollout import (
-    rollout,
     rollout_states,
 )
 
@@ -34,6 +33,5 @@ __all__ = [
     "euler_step",
     "implicit_midpoint_step",
     "rk4_step",
-    "rollout",
     "rollout_states",
 ]

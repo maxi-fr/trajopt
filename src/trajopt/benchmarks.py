@@ -13,8 +13,7 @@ from trajopt.constraints.linear import GoalConstraint
 from trajopt.constraints.rotations import QuatVecEq
 from trajopt.costs.objective import LQRObjective, Objective, TrackingObjective
 from trajopt.costs.rotations import QuatGeodesicCost
-from trajopt.dynamics.base import ContinuousDynamics, DiscreteDynamics
-from trajopt.dynamics.integrators import RK4, rk4_step
+from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
@@ -549,13 +548,7 @@ def measure_closed_loop_mpc(
 
         u0 = solved_state.controls()[0]
         t0_curr = float(curr_state.t0)
-        if isinstance(model, ContinuousDynamics):
-            x_next = rk4_step(model, curr_state.x0, u0, t0_curr, dt_val)
-        elif isinstance(model, DiscreteDynamics):
-            x_next = model.discrete_dynamics(curr_state.x0, u0, t0_curr, dt_val)
-        else:
-            msg = f"Model {type(model).__name__} is neither ContinuousDynamics nor DiscreteDynamics"
-            raise TypeError(msg)
+        x_next = model.discrete_dynamics(curr_state.x0, u0, t0_curr, dt_val)
         curr_state = solved_state.with_measurement(x_next, t0_curr + dt_val)
 
     t_total_loop = time.perf_counter() - t_loop_start

@@ -6,7 +6,6 @@ import numpy as np
 from trajopt.dynamics import (
     RK4,
     DiscretizedDynamics,
-    rollout,
     rollout_states,
 )
 from trajopt.models import Cartpole
@@ -26,7 +25,7 @@ def test_rollout_propagates_states_correctly() -> None:
 
     # 1. Rollout via scan
     traj_init = Trajectory(X=jnp.zeros((N, 4)), U=U, t=t, dt=dt)
-    traj_sim = rollout(disc_model, traj_init, x0=x0)
+    traj_sim = disc_model.rollout(traj_init, x0=x0)
     assert isinstance(traj_sim, Trajectory)
     assert traj_sim.N == N
     assert traj_sim.X.shape == (N, 4)
@@ -57,13 +56,13 @@ def test_rollout_with_trajectory_instance_and_x0_override() -> None:
     traj_init = Trajectory(X=X_zeros, U=U, t=t, dt=dt)
 
     # Rollout using initial trajectory state (which is zero)
-    traj_res = rollout(disc_model, traj_init)
+    traj_res = disc_model.rollout(traj_init)
     np.testing.assert_allclose(traj_res.X[0], jnp.zeros(4))
     assert traj_res.X.shape == (N, 4)
 
     # Rollout with initial condition override
     x0_new = jnp.array([1.0, 0.5, -0.5, 0.2])
-    traj_res_override = rollout(disc_model, traj_init, x0=x0_new)
+    traj_res_override = disc_model.rollout(traj_init, x0=x0_new)
     np.testing.assert_allclose(traj_res_override.X[0], x0_new)
 
     # Verify rollout_states helper
@@ -98,7 +97,7 @@ def test_rollout_jit_compilation() -> None:
 
     @eqx.filter_jit
     def run_sim(m: DiscretizedDynamics, tr: Trajectory) -> Trajectory:
-        return rollout(m, tr, x0=x0)
+        return m.rollout(tr, x0=x0)
 
     # Compile and run
     res1 = run_sim(disc_model, traj_in)

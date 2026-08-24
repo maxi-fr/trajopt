@@ -7,41 +7,14 @@ import jax.numpy as jnp
 
 from trajopt.constraints.constraint_list import BuiltConstraintList, ConstraintList
 from trajopt.costs.objective import Objective
-from trajopt.dynamics.base import (
-    AbstractModel,
-    ContinuousDynamics,
-    DiscreteDynamics,
-    DiscretizedDynamics,
-    IntegratorCallable,
-)
-from trajopt.dynamics.integrators import RK4, Integrator
+from trajopt.dynamics.base import AbstractModel, DiscreteDynamics, IntegratorCallable
+from trajopt.dynamics.integrators import Integrator
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
 
 
-def _extract_discrete_model(problem: "Problem | AbstractModel") -> DiscreteDynamics:
-    """Extract or construct a DiscreteDynamics model from Problem or AbstractModel."""
-    if isinstance(problem, Problem):
-        model = problem.model
-        integrator = problem.integrator
-    elif isinstance(problem, AbstractModel):
-        model = problem
-        integrator = None
-    else:
-        msg = f"Cannot extract dynamics model from {type(problem).__name__}"
-        raise TypeError(msg)
-
-    if isinstance(model, DiscreteDynamics):
-        return model
-    if isinstance(model, ContinuousDynamics):
-        integ = integrator if integrator is not None else RK4()
-        return DiscretizedDynamics(continuous_dynamics=model, integrator=integ)
-    msg = f"Model {type(model).__name__} is neither DiscreteDynamics nor ContinuousDynamics"
-    raise TypeError(msg)
-
-
 class Problem(eqx.Module):
-    """Problem structure holding model, objective, constraints, horizon, and integrator.
+    """Problem structure holding model, objective, constraints, and horizon.
 
     Parameters
     ----------
@@ -54,14 +27,13 @@ class Problem(eqx.Module):
     N : int | None, optional
         Horizon length. Defaults to obj.N.
     integrator : Integrator | IntegratorCallable | None, optional
-        Integrator instance for continuous models. Defaults to None.
+        Integrator instance for continuous models. Defaults to None, meaning RK4.
     """
 
-    model: AbstractModel
+    model: DiscreteDynamics
     obj: Objective
     constraints: BuiltConstraintList
     N: int = eqx.field(static=True)
-    integrator: Integrator | IntegratorCallable | None = eqx.field(static=True, default=None)
 
     def __init__(
         self,
@@ -75,22 +47,13 @@ class Problem(eqx.Module):
         m = int(model.m)
         N_val = int(N if N is not None else obj.N)
 
-        if constraints is None:
-            cl = ConstraintList(n=n, m=m, N=N_val)
-            built_con = cl.build()
-        elif isinstance(constraints, ConstraintList):
-            built_con = constraints.build()
-        elif isinstance(constraints, BuiltConstraintList):
-            built_con = constraints
-        else:
-            msg = f"Unsupported constraints type: {type(constraints).__name__}"
-            raise TypeError(msg)
+        cl = ConstraintList(n=n, m=m, N=N_val) if constraints is None else constraints
+        built_con = cl.build()
 
-        self.model = model
+        self.model = model.discretize(integrator)
         self.obj = obj
         self.constraints = built_con
         self.N = N_val
-        self.integrator = integrator
 
 
 class MPCState(eqx.Module):
@@ -425,45 +388,6 @@ def cost(problem: Problem, state: MPCState) -> jax.Array:
     from trajopt.transcription.transcription import eval_f  # noqa: PLC0415 -- avoid circular import
 
     return eval_f(problem, state.Z, state.t0, state.dt, state.xf)
-
-
-def rollout(
-    problem: Problem | AbstractModel,
-    state: MPCState | Trajectory,
-    x0: jax.Array | None = None,
-) -> Trajectory:
-    """Forward simulate dynamical system given Problem and MPCState or Model and Trajectory.
-
-    Parameters
-    ----------
-    problem : Problem | AbstractModel
-        Problem instance or continuous/discrete dynamical model.
-    state : MPCState | Trajectory
-        MPCState holding initial state and controls, or Trajectory holding controls and step durations.
-    x0 : jax.Array | None, optional
-        Initial state condition of shape (n,). Defaults to state's initial state.
-
-    Returns
-    -------
-    Trajectory
-        Simulated state and control trajectory.
-    """
-    from trajopt.dynamics.rollout import rollout as _rollout_traj  # noqa: PLC0415 -- avoid circular import
-    from trajopt.dynamics.rollout import rollout_states  # noqa: PLC0415 -- avoid circular import
-
-    if isinstance(problem, Problem) and isinstance(state, MPCState):
-        discrete_model = _extract_discrete_model(problem)
-        x0_val = state.x0 if x0 is None else jnp.asarray(x0, dtype=state.Z.dtype)
-        U_controls = state.controls()
-        X_sim = rollout_states(discrete_model, x0_val, U_controls, t=state.t0, dt=state.dt)
-        t_arr = state.t0 + jnp.concatenate([jnp.zeros(1, dtype=state.Z.dtype), jnp.cumsum(state.dt)])
-        return Trajectory(X=X_sim, U=U_controls, t=t_arr, dt=state.dt)
-
-    if isinstance(problem, (DiscreteDynamics, ContinuousDynamics)) and isinstance(state, Trajectory):
-        return _rollout_traj(problem, state, x0=x0)
-
-    msg = f"Unsupported argument types for rollout: problem={type(problem).__name__}, state={type(state).__name__}"
-    raise TypeError(msg)
 
 
 def _dispatch_solver(

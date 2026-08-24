@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from trajopt.rotations.quaternion import (
     Quaternion,
 )
+from trajopt.trajectory import Trajectory
 
 IntegratorCallable = Callable[
     ["ContinuousDynamics", jax.Array, jax.Array, float | jax.Array, float | jax.Array], jax.Array
@@ -49,6 +50,35 @@ class AbstractModel(eqx.Module):
         Continuous models return xdot of shape (n,) and take no extra arguments; discrete
         models return the next state of shape (n,) and take the step duration dt.
         """
+
+    @abstractmethod
+    def discretize(self, integrator: "IntegratorCallable | None" = None) -> "DiscreteDynamics":
+        """Return this model in discrete form, wrapping a continuous model with integrator (default RK4)."""
+
+    def rollout(self, trajectory: Trajectory, x0: jax.Array | None = None) -> Trajectory:
+        """Forward simulate this model over trajectory's controls, timestamps, and step durations.
+
+        Sets x_0 to x0 (defaulting to trajectory's first state) and propagates
+        x_{k+1} = f_d(x_k, u_k, t_k, dt_k) using the controls, timestamps, and step durations
+        stored in trajectory. A continuous model is discretized with RK4.
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Trajectory supplying the controls, timestamps, and step durations.
+        x0 : jax.Array | None, optional
+            Initial state of shape (n,). Defaults to the trajectory's first state.
+
+        Returns
+        -------
+        Trajectory
+            New Trajectory holding the simulated states X of shape (N, n) and the inputs it was given.
+        """
+        from trajopt.dynamics.rollout import _rollout_scan  # noqa: PLC0415 -- avoid circular import
+
+        x0_val = trajectory.X[0] if x0 is None else jnp.asarray(x0, dtype=trajectory.X.dtype)
+        X_sim = _rollout_scan(self.discretize(), x0_val, trajectory.U, trajectory.t, trajectory.dt)
+        return Trajectory(X=X_sim, U=trajectory.U, t=trajectory.t, dt=trajectory.dt)
 
     def state_jacobian(
         self,
@@ -119,6 +149,13 @@ class ContinuousDynamics(AbstractModel):
         """Evaluate xdot of shape (n,); extra arguments are not used by continuous models."""
         del args
         return self.dynamics(x, u, t)
+
+    def discretize(self, integrator: "IntegratorCallable | None" = None) -> "DiscreteDynamics":
+        """Wrap this model with integrator, defaulting to RK4."""
+        from trajopt.dynamics.integrators import RK4  # noqa: PLC0415 -- avoid circular import
+
+        integ = integrator if integrator is not None else RK4()
+        return DiscretizedDynamics(self, integ)
 
 
 class EuclideanModel(ContinuousDynamics):
@@ -226,6 +263,11 @@ class DiscreteDynamics(AbstractModel):
         """Evaluate the next state of shape (n,); the single extra argument is the step duration dt."""
         (dt,) = args
         return self.discrete_dynamics(x, u, t, dt)
+
+    def discretize(self, integrator: "IntegratorCallable | None" = None) -> "DiscreteDynamics":
+        """Return self; already discrete."""
+        del integrator
+        return self
 
 
 class DiscretizedDynamics(DiscreteDynamics):

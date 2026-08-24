@@ -9,7 +9,7 @@ import scipy.sparse as sp
 from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem, _extract_discrete_model
+from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     build_linear_constraint_block,
@@ -363,7 +363,7 @@ def solve_clarabel(  # noqa: PLR0913 -- solver configuration takes 8 arguments
         z_op=z_op,
     )
 
-    discrete_model = _extract_discrete_model(problem)
+    discrete_model = problem.model
     A_dyn, b_dyn, cones_dyn = _extract_conic_dynamics(
         discrete_model,
         N,
