@@ -1,15 +1,21 @@
-from typing import NamedTuple
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+import numpy as np
 
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.solvers.options import SolverOptions, TerminationStatus
+from trajopt.problem import MPCState, Problem
+from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus
 from trajopt.trajectory import Trajectory
+from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
+
+_EMPTY = np.zeros(0, dtype=np.float64)
 
 
 class DynamicRegularization(eqx.Module):
@@ -517,3 +523,287 @@ def forward_pass(  # noqa: PLR0913, PLR0917 -- model, objective, nominal, policy
         status=status,
         regularization=DynamicRegularization(rho=final.rho, drho=final.drho),
     )
+
+
+def _per_knot_gradient(d: jax.Array, U: jax.Array) -> jax.Array:
+    """Per-knot normalized feedforward magnitude `max_i |d_k[i]| / (|u_k[i]| + 1)`, shape `(N-1,)`."""
+    return jnp.max(jnp.abs(d) / (jnp.abs(U) + 1.0), axis=-1)
+
+
+def _feedforward_gradient(d: jax.Array, U: jax.Array) -> jax.Array:
+    """Compute the normalized feedforward magnitude `mean_k max_i |d_k[i]| / (|u_k[i]| + 1)`.
+
+    Not a cost gradient: it is the primal optimality residual `gradient_tolerance` compares
+    against, computed on the feedforward term `d` from the backward pass paired with the
+    *accepted* controls `U` (ticket 27).
+    """
+    return jnp.mean(_per_knot_gradient(d, U))
+
+
+class ILQRCarry(NamedTuple):
+    """Traced `lax.while_loop` state for one iLQR solve; see `ilqr_solve` for field meaning."""
+
+    i: jax.Array
+    trajectory: Trajectory
+    regularization: DynamicRegularization
+    stats: SolverStats
+    done: jax.Array
+    status: jax.Array
+
+
+def _ilqr_step(carry: ILQRCarry, problem: Problem, options: SolverOptions) -> ILQRCarry:
+    """One iLQR iteration: cost, expansions, backward pass, forward pass, accept, record, check.
+
+    Follows reference §4.1's order exactly: `J_prev` on the trajectory carried in, then
+    expansions, backward pass, forward pass, an unconditional accept, then `dJ` and `gradient`
+    computed on the accepted trajectory. `dJ_zero_counter` compares the raw (possibly NaN) `dJ`
+    to exactly `0.0`, matching Julia's `dJ ≈ 0` against a literal zero (default `isapprox`
+    tolerances make that an exact-equality test); `NaN == 0.0` is `False`, so a failed forward
+    pass neither increments the counter nor satisfies the cost-convergence criterion (ticket 27:
+    reproduced by letting IEEE NaN comparisons propagate, not by special-casing NaN).
+    """
+    traj = carry.trajectory
+    obj = problem.obj
+
+    J_prev = obj.cost(traj)
+    expansion = problem.dynamics_expansion(traj) + problem.cost_expansion(traj)
+    bp = backward_pass(expansion, carry.regularization, options)
+    fp = forward_pass(problem.model, obj, traj, bp.K, bp.d, bp.dV, J_prev, bp.regularization, options)
+
+    new_traj = fp.trajectory
+    dJ = J_prev - fp.J
+    grad = _feedforward_gradient(bp.d, new_traj.U)
+
+    dJ_zero = dJ == 0.0
+    new_dJ_counter = jnp.where(dJ_zero, carry.stats.dJ_zero_counter + 1, jnp.int32(0))
+
+    idx = carry.i
+    iter_num = carry.i + 1
+    stats = carry.stats
+    new_stats = SolverStats(
+        iterations=iter_num,
+        cost=stats.cost.at[idx].set(fp.J),
+        dJ=stats.dJ.at[idx].set(dJ),
+        c_max=stats.c_max.at[idx].set(jnp.zeros((), dtype=stats.c_max.dtype)),
+        gradient=stats.gradient.at[idx].set(grad),
+        penalty_max=stats.penalty_max.at[idx].set(jnp.zeros((), dtype=stats.penalty_max.dtype)),
+        dJ_zero_counter=new_dJ_counter,
+        ls_failed=fp.ls_failed,
+    )
+
+    status = _evaluate_convergence(dJ, grad, fp.ls_failed, fp.J, new_dJ_counter, iter_num, options)
+    done = status != jnp.int32(TerminationStatus.UNSOLVED)
+
+    return ILQRCarry(
+        i=iter_num,
+        trajectory=new_traj,
+        regularization=fp.regularization,
+        stats=new_stats,
+        done=done,
+        status=status,
+    )
+
+
+def _evaluate_convergence(  # noqa: PLR0913, PLR0917 -- one per Altro's evaluate_convergence input
+    dJ: jax.Array,
+    grad: jax.Array,
+    ls_failed: jax.Array,
+    J: jax.Array,
+    dJ_zero_counter: jax.Array,
+    iter_num: jax.Array,
+    options: SolverOptions,
+) -> jax.Array:
+    """Decide whether an iLQR iteration converged, matching `Altro.evaluate_convergence`.
+
+    First-match-wins in Altro's declared order (reference §4.4, ticket 27): the cost criterion
+    (needing all three of `0 <= dJ < cost_tolerance`, `grad < gradient_tolerance`, and
+    `not ls_failed`), then max iterations, then `dJ_zero_counter > dJ_counter_limit`, then max
+    cost. A NaN `dJ` or `J` makes every comparison touching it `False` under IEEE semantics, so
+    it neither converges nor is mistaken for `MAXIMUM_COST` -- it just fails to match any exit
+    (ticket 27: reproduced by letting NaN propagate rather than special-casing it).
+
+    Returns
+    -------
+    jax.Array
+        `TerminationStatus` ordinal as an int32 scalar, or `UNSOLVED` if no exit fired.
+    """
+    cost_converged = (dJ >= 0.0) & (dJ < options.cost_tolerance) & (grad < options.gradient_tolerance) & (~ls_failed)
+    max_iters_hit = iter_num >= options.iterations
+    no_progress = dJ_zero_counter > options.dJ_counter_limit
+    max_cost_hit = options.max_cost_value < J
+
+    return jnp.where(
+        cost_converged,
+        jnp.int32(TerminationStatus.SOLVE_SUCCEEDED),
+        jnp.where(
+            max_iters_hit,
+            jnp.int32(TerminationStatus.MAX_ITERATIONS),
+            jnp.where(
+                no_progress,
+                jnp.int32(TerminationStatus.NO_PROGRESS),
+                jnp.where(
+                    max_cost_hit,
+                    jnp.int32(TerminationStatus.MAXIMUM_COST),
+                    jnp.int32(TerminationStatus.UNSOLVED),
+                ),
+            ),
+        ),
+    )
+
+
+def ilqr_solve(
+    problem: Problem,
+    trajectory: Trajectory,
+    options: SolverOptions,
+) -> tuple[Trajectory, SolverStats, jax.Array]:
+    """Traced iLQR core, matching `Altro.iLQRSolver`'s `initialize!` + `solve!` loop.
+
+    A pure `(problem, trajectory, options) -> (trajectory, stats, status)` function built from
+    one `lax.while_loop`, jittable and vmappable end to end with `options` static. `trajectory`
+    is the warm-start guess; only its `X[0]`, `U`, `t`, `dt` are used, since `initialize!` does
+    an **open-loop** rollout (`problem.model.rollout`) rather than reusing any cached gains
+    (ticket 27 discards Altro's `closed_loop_initial_rollout` option and its docstring claim).
+
+    Parameters
+    ----------
+    problem : Problem
+        Supplies the model, objective, and the `dynamics_expansion` / `cost_expansion` methods
+        the loop body delegates to.
+    trajectory : Trajectory
+        Warm-start guess; only `X[0]`, `U`, `t`, `dt` are read.
+    options : SolverOptions
+        Static solve configuration; must not be traced.
+
+    Returns
+    -------
+    tuple[Trajectory, SolverStats, jax.Array]
+        The accepted trajectory at exit, the stats history (buffers sized `options.iterations`,
+        untrimmed), and the exit `TerminationStatus` ordinal as an int32 scalar.
+    """
+    init_traj = problem.model.rollout(trajectory)
+
+    init_carry = ILQRCarry(
+        i=jnp.int32(0),
+        trajectory=init_traj,
+        regularization=DynamicRegularization.initial(options),
+        stats=SolverStats.create(options),
+        done=jnp.asarray(False),  # noqa: FBT003 -- traced bool scalar, not a boolean-trap argument
+        status=jnp.int32(TerminationStatus.UNSOLVED),
+    )
+
+    def cond(carry: ILQRCarry) -> jax.Array:
+        return (~carry.done) & (carry.i < options.iterations)
+
+    def body(carry: ILQRCarry) -> ILQRCarry:
+        return _ilqr_step(carry, problem, options)
+
+    final = jax.lax.while_loop(cond, body, init_carry)
+    return final.trajectory, final.stats, final.status
+
+
+def _trim_stats(stats: SolverStats, n_iter: int) -> SolverStats:
+    """Slice a finished solve's fixed-size stats buffers down to the completed iteration count."""
+    return SolverStats(
+        iterations=stats.iterations,
+        cost=stats.cost[:n_iter],
+        dJ=stats.dJ[:n_iter],
+        c_max=stats.c_max[:n_iter],
+        gradient=stats.gradient[:n_iter],
+        penalty_max=stats.penalty_max[:n_iter],
+        dJ_zero_counter=stats.dJ_zero_counter,
+        ls_failed=stats.ls_failed,
+    )
+
+
+class ILQRResult(NamedTuple):
+    """Result of a native iLQR solve, satisfying the `SolverResult` protocol.
+
+    Parameters
+    ----------
+    trajectory : Trajectory
+        Optimal state and control trajectory.
+    success : bool
+        Whether the core exited with `TerminationStatus.SOLVE_SUCCEEDED`.
+    status : int
+        `TerminationStatus` ordinal the traced core exited with.
+    message : str
+        `TerminationStatus` member name.
+    cost : float
+        Final objective value.
+    Z : jax.Array
+        Optimal flat primal vector.
+    info : dict[str, Any]
+        Holds the trimmed `SolverStats` history under `"stats"`.
+    iterations : int, optional
+        Number of completed iLQR iterations. Defaults to 0.
+    constraint_violation : float, optional
+        Always 0.0: an unconstrained iLQR has no constraints. Defaults to 0.0.
+    lam : np.ndarray, optional
+        Always empty: an unconstrained iLQR has no duals. Defaults to empty.
+    mu : np.ndarray, optional
+        Always empty: an unconstrained iLQR has no duals. Defaults to empty.
+    """
+
+    trajectory: Trajectory
+    success: bool
+    status: int
+    message: str
+    cost: float
+    Z: jax.Array
+    info: dict[str, Any]
+    iterations: int = 0
+    constraint_violation: float = 0.0
+    lam: np.ndarray = _EMPTY
+    mu: np.ndarray = _EMPTY
+
+
+@dataclass(frozen=True)
+class ILQR:
+    """Native iLQR solver backend, satisfying the `Solver` protocol for an unconstrained problem.
+
+    A thin eager wrapper over the traced `ilqr_solve` core (ticket 27): `.solve()` builds the
+    warm-start trajectory from `state`, calls the jitted core, then converts the traced status
+    int and stats buffers into `success` / `message` / `info` at the boundary -- work that
+    cannot happen inside a trace. Swapping `ILQR()` for `Ipopt()` in `problem.solve(state,
+    solver=...)` is then a one-word change.
+
+    Parameters
+    ----------
+    options : SolverOptions, optional
+        Static solve configuration. Defaults to `SolverOptions()`.
+    """
+
+    options: SolverOptions = field(default_factory=SolverOptions)
+
+    def solve(self, problem: Problem, state: MPCState) -> ILQRResult:
+        """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result."""
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+
+        _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
+        assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
+        dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
+        t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+        X0, U0 = _z_to_trajectory(z0, N, n, m)
+        init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
+
+        problem_eff = problem
+        if xf_val is not None and problem.obj.regulates_to_goal:
+            problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+
+        final_traj, stats, status_int = ilqr_solve(problem_eff, init_traj, self.options)
+
+        status = TerminationStatus(int(status_int))
+        n_iter = int(stats.iterations)
+
+        return ILQRResult(
+            trajectory=final_traj,
+            success=status == TerminationStatus.SOLVE_SUCCEEDED,
+            status=int(status_int),
+            message=status.name,
+            cost=float(problem_eff.obj.cost(final_traj)),
+            Z=_trajectory_to_z(final_traj.X, final_traj.U),
+            info={"stats": _trim_stats(stats, n_iter)},
+            iterations=n_iter,
+        )
