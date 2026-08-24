@@ -187,7 +187,7 @@ def test_timing_breakdown_measurements() -> None:
     prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
 
     # 1. Setup timing
-    t_setup = measure_transcription_setup(prob, state, num_runs=5)
+    t_setup = measure_transcription_setup(prob, state.x0, num_runs=5)
     assert isinstance(t_setup, float)
     assert t_setup > 0.0
 

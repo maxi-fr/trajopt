@@ -132,7 +132,7 @@ def test_trajopt_dynamics_continuous() -> None:
     assert plant.dt == dt
     assert plant.n_inputs == 1
     np.testing.assert_allclose(plant.x, x0)
-    assert plant.integrator is not None
+    assert isinstance(plant.model, DiscretizedDynamics)
 
     u = np.array([1.0])
     x_next, log = plant.update(t=0.0, u=u)
@@ -153,7 +153,7 @@ def test_trajopt_dynamics_discrete() -> None:
 
     assert plant.dt == dt
     assert plant.n_inputs == 1
-    assert plant.integrator is None
+    assert plant.model is discrete_model
 
     u = np.array([1.0])
     x_next, log = plant.update(t=0.0, u=u)
@@ -177,8 +177,9 @@ def test_trajopt_dynamics_from_config_class_path() -> None:
             "x0": [0.0, 0.0, 0.0, 0.0],
         }
     )
-    assert isinstance(plant_dict.model, Cartpole)
-    assert plant_dict.model.mc == 1.5
+    assert isinstance(plant_dict.model, DiscretizedDynamics)
+    assert isinstance(plant_dict.model.continuous_dynamics, Cartpole)
+    assert plant_dict.model.continuous_dynamics.mc == 1.5
     assert plant_dict.model.n == 4
     assert plant_dict.model.m == 1
 

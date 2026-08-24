@@ -9,12 +9,12 @@ import numpy as np
 try:
     from simulate.controller import Controller
     from simulate.dynamics import Dynamics, StateLog
-    from simulate.integrator import Integrator, rk4
 except ImportError as err:
     msg = "The simulate package is required to use trajopt.simulate. Install with `pip install 'trajopt[simulate]'`."
     raise ImportError(msg) from err
 
-from trajopt.dynamics.base import AbstractModel, ContinuousDynamics, DiscreteDynamics
+from trajopt.dynamics.base import AbstractModel
+from trajopt.dynamics.integrators import Integrator
 from trajopt.problem import MPCState, Problem
 from trajopt.transcription.result import Solver
 
@@ -192,8 +192,8 @@ class TrajOptDynamics(Dynamics[StateLog]):
     x0 : np.ndarray | None, optional
         Initial state vector. Defaults to zeros.
     integrator : Integrator | None, optional
-        Integrator callable for continuous models. If None and the model is continuous,
-        defaults to simulate.integrator.rk4.
+        trajopt integrator forwarded to ``model.discretize()``. Ignored if the model is
+        already discrete. Defaults to RK4.
     """
 
     def __init__(
@@ -203,16 +203,13 @@ class TrajOptDynamics(Dynamics[StateLog]):
         x0: np.ndarray | None = None,
         integrator: Integrator | None = None,
     ) -> None:
-        if isinstance(model, ContinuousDynamics) and integrator is None:
-            integrator = rk4
-
-        super().__init__(dt, integrator=integrator)
-        self.model = model
+        super().__init__(dt, integrator=None)
+        self.model = model.discretize(integrator)
         self.n_inputs = int(model.m)
         self.x = np.asarray(x0 if x0 is not None else np.zeros(model.n), dtype=np.float64)
 
     def dynamics(self, t: float, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """Evaluate the model transition or continuous derivative.
+        """Evaluate the discretized model's next state.
 
         Parameters
         ----------
@@ -226,17 +223,12 @@ class TrajOptDynamics(Dynamics[StateLog]):
         Returns
         -------
         np.ndarray
-            State derivative (continuous) or next state (discrete), shape (n,).
+            Next state, shape (n,).
         """
         x_jax = jnp.asarray(x)
         u_jax = jnp.asarray(u)
-
-        if isinstance(self.model, DiscreteDynamics):
-            x_next = self.model.evaluate(x_jax, u_jax, t, self.dt)
-            return np.asarray(x_next, dtype=np.float64)
-
-        x_dot = self.model.evaluate(x_jax, u_jax, t)
-        return np.asarray(x_dot, dtype=np.float64)
+        x_next = self.model.evaluate(x_jax, u_jax, t, self.dt)
+        return np.asarray(x_next, dtype=np.float64)
 
     def _make_log(self) -> StateLog:
         """Snapshot pre-step state for simulate telemetry."""
@@ -250,7 +242,8 @@ class TrajOptDynamics(Dynamics[StateLog]):
         ----------
         config : dict[str, Any]
             Dictionary containing ``dt`` and ``model`` (as an AbstractModel instance or
-            {class_path, ...} dictionary). Optional keys: ``x0``, ``integrator``.
+            {class_path, ...} dictionary). Optional keys: ``x0``, ``integrator`` (an Integrator
+            instance or a class path string naming an Integrator subclass).
 
         Returns
         -------
@@ -259,9 +252,10 @@ class TrajOptDynamics(Dynamics[StateLog]):
         """
         integrator = config.get("integrator")
         if isinstance(integrator, str):
-            module_name, func_name = integrator.rsplit(".", 1)
+            module_name, class_name = integrator.rsplit(".", 1)
             module = importlib.import_module(module_name)
-            integrator = getattr(module, func_name)
+            integrator_cls = getattr(module, class_name)
+            integrator = integrator_cls()
 
         return cls(
             dt=float(config["dt"]),

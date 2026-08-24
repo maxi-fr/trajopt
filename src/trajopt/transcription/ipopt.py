@@ -164,6 +164,21 @@ class Ipopt:
 
     options: Mapping[str, Any] = field(default_factory=dict)
 
+    def transcription_callback(
+        self,
+        problem: Problem,
+        x0: jax.Array,
+        t0: float | jax.Array,
+        dt: float | jax.Array,
+        xf: jax.Array | None = None,
+    ) -> _IpoptCallback:
+        """Assemble the callback wrapper connecting the transcribed problem to cyipopt.
+
+        Exposed so callers (e.g. benchmarks) can measure transcription setup cost without
+        reaching into solver internals.
+        """
+        return _IpoptCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
+
     def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
         """Solve the transcribed optimal control problem using Ipopt via cyipopt."""
         import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
@@ -181,7 +196,7 @@ class Ipopt:
         zL, zU = primal_bounds(problem)
         gL, gU = constraint_bounds(problem)
 
-        cb = _IpoptCallback(problem=problem, x0=x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
+        cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
 
         problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
         nlp = problem_cls(

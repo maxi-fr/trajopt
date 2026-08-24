@@ -19,7 +19,7 @@ from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import Ipopt, IpoptResult, _IpoptCallback
+from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
     constraint_bounds,
     primal_bounds,
@@ -377,26 +377,27 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
 
 def measure_transcription_setup(
     problem: Problem,
-    x0: jax.Array | MPCState,
+    x0: jax.Array,
     *,
     dt: float | jax.Array = 0.05,
     num_runs: int = 20,
 ) -> float:
     """Measure the time in seconds to assemble sparsity patterns, bound vectors, and transcription structures."""
     N = int(problem.N)
-    x0_arr = jnp.asarray(x0.x0 if isinstance(x0, MPCState) else x0, dtype=jnp.float64)
+    x0_arr = jnp.asarray(x0, dtype=jnp.float64)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
+    ipopt = Ipopt()
 
     # Warm up
     _ = primal_bounds(problem)
     _ = constraint_bounds(problem)
-    _ = _IpoptCallback(problem=problem, x0=x0_arr, t0=0.0, dt=dt_arr)
+    _ = ipopt.transcription_callback(problem, x0_arr, 0.0, dt_arr)
 
     t_start = time.perf_counter()
     for _ in range(num_runs):
         _ = primal_bounds(problem)
         _ = constraint_bounds(problem)
-        _ = _IpoptCallback(problem=problem, x0=x0_arr, t0=0.0, dt=dt_arr)
+        _ = ipopt.transcription_callback(problem, x0_arr, 0.0, dt_arr)
     t_end = time.perf_counter()
 
     return (t_end - t_start) / num_runs
@@ -598,7 +599,7 @@ def run_benchmark(
         opts.update(solver_options)
 
     # 1. Setup timing
-    t_setup = measure_transcription_setup(problem, state)
+    t_setup = measure_transcription_setup(problem, state.x0)
 
     # 2. Derivative timing
     deriv_timing = measure_derivative_evaluations(problem, state, num_evals=20)
