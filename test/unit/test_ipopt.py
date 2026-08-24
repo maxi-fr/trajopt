@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-import trajopt
+import trajopt._env
 
 
 def test_ipopt_rosenbrock() -> None:

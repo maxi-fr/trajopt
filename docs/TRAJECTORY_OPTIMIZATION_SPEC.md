@@ -62,7 +62,7 @@ a de facto engine with an Ipopt-shaped interface.
 | Rotations | JPL convention, scalar-last |
 | Error map | `δθ = 2·vec(q_err)` |
 | Objective | One stage cost + one terminal cost, parameters stacked over `k` |
-| Naming | Pythonic (`rollout()`, `set_states()`), no Julia bang-suffix mirroring |
+| Naming | Pythonic (`model.rollout(traj)`, `traj.with_states(X)`), no Julia bang-suffix mirroring |
 | SO(3) support | v1, not deferred |
 | Constraint catalog | Full section 10 catalog ships in v1 |
 
@@ -213,8 +213,8 @@ cannot be `vmap`ed without a gather. The interleaving is owned exclusively by
 
 ### Methods
 
-- `states()`, `controls()`, `times()` — return the stacked arrays.
-- `set_states(X)`, `set_controls(U)` — return a new trajectory (arrays are immutable).
+- `X`, `U`, `t` — fields holding the stacked arrays directly.
+- `with_states(X)`, `with_controls(U)` — return a new trajectory (arrays are immutable).
 - `with_initial_time(t0)` — shift timestamps.
 - `shift(dt)` — shift the trajectory forward one step for MPC warm-starting.
 
@@ -256,7 +256,7 @@ $x_{k+1} - x_k - \Delta t \cdot f\!\left(\tfrac{x_k + x_{k+1}}{2}, u_k, t_k + \t
 
 ### Rollout
 
-`rollout(problem, state)` sets $x_1 = x_0$ and propagates $x_{k+1} = f_d(x_k, u_k)$ using
+`model.rollout(trajectory)` sets $x_1 = x_0$ and propagates $x_{k+1} = f_d(x_k, u_k)$ using
 `jax.lax.scan`. A Python loop over `N` knot points is the loop-latency pitfall verbatim and is
 never used in a hot path.
 
@@ -570,12 +570,13 @@ for no gain.
 
 ### Interface
 
-Three composable pure functions producing an `Expansion` module of stacked arrays:
+Three composable methods on the owning objects, each producing an `Expansion` module of
+stacked arrays:
 
 ```python
-dynamics_expansion(problem, state) -> Expansion
-cost_expansion(problem, state) -> Expansion
-augmented_lagrangian_expansion(problem, state, expansion, lam, mu) -> Expansion
+problem.dynamics_expansion(traj) -> Expansion
+problem.cost_expansion(traj) -> Expansion
+problem.augmented_lagrangian_expansion(traj, expansion, lam, mu) -> Expansion
 ```
 
 | Field | Shape |
@@ -680,13 +681,15 @@ makes "change the mass without recompiling" actually true.
 
 ### Methods
 
-- `cost(problem, state)`
-- `rollout(problem, state)`
-- `states(state)`, `controls(state)`
+- `problem.cost(state)` — scalar objective at `state.Z`.
+- `problem.solve(state, solver=None)` — solve from `state`, returning an updated `MPCState`;
+  `solver` defaults to `Ipopt()` and also accepts `OSQP()` or `Clarabel()`.
+- `state.states`, `state.controls` — properties unpacking `state.Z` into the stacked state and
+  control arrays.
 - `state.with_measurement(x, t)` — new state with updated $x_0$, $t_0$
 - `state.with_goal(xf)` — new state with updated $x_f$
 - `state.shift(dt)` — warm-start shift
-- `initial_states(state, X0)`, `initial_controls(state, U0)`
+- `state.with_states(X0)`, `state.with_controls(U0)` — new state with `state.Z` replaced
 
 ### Control loop
 
@@ -697,8 +700,8 @@ state   = MPCState.initial(problem, x0, t0)
 loop:
     state = state.with_measurement(x_measured, t_current)
     state = state.with_goal(xf)                 # optional
-    state = solve(problem, state)               # Ipopt / OSQP / ALTRO
-    u_command = controls(state)[0]
+    state = problem.solve(state)                # Ipopt() / OSQP() / Clarabel()
+    u_command = state.controls[0]
     state = state.shift(dt)                     # warm start next solve
 ```
 
@@ -728,7 +731,7 @@ the Jacobian.
 
 - `with_control_rate_penalty(model, R_delta)` — augments the state with $u_{k-1}$ so that a
   control-rate penalty becomes an ordinary stage cost, preserving the section 1 invariant.
-- `linearize_about(model, X_ref, U_ref)` — trajectory linearization for MPC.
+- `model.linearize(trajectory)` — trajectory linearization for MPC.
 
 ---
 

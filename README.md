@@ -76,6 +76,7 @@ Run `uv sync` to create the virtual environment and install dependencies:
 
 ```powershell
 # On Windows (ensures Cython build tools are available before compiling cyipopt):
+uv venv
 uv pip install Cython setuptools wheel
 uv sync --all-extras
 ```

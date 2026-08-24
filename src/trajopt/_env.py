@@ -5,6 +5,8 @@ from pathlib import Path
 
 import jax
 
+__version__ = "0.1.0"
+
 # Enable 64-bit precision by default across JAX
 jax.config.update("jax_enable_x64", val=True)
 

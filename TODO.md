@@ -12,3 +12,9 @@
 * add examples marimo notebooks
 
 * make configurable
+
+* MPCState: .X, .U, .t instead of states, controls, etc.
+
+* solver and problem have solve methods?
+
+* when should a method be implemented by a base class and when should it be a function?

@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import trajopt
+from trajopt import _env
 from trajopt.cones import (
     AbstractCone,
     NegativeOrthant,
@@ -15,7 +15,7 @@ from trajopt.cones import (
 
 def test_jax_x64_enabled() -> None:
     """Verify that 64-bit precision is enabled upon package import."""
-    assert trajopt.__version__ == "0.1.0"
+    assert _env.__version__ == "0.1.0"
     assert jax.config.jax_enable_x64 is True
     # Verify default-constructed JAX arrays are float64
     arr_float = jnp.array([1.0, 2.0, 3.0])
