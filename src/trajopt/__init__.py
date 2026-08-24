@@ -87,10 +87,6 @@ from trajopt.problem import (
 )
 from trajopt.rotations.quaternion import (
     Quaternion,
-    attitude_jacobian,
-    error_map,
-    from_hamilton,
-    to_hamilton,
 )
 from trajopt.trajectory import (
     KnotPoint,
@@ -193,7 +189,6 @@ __all__ = [
     "TrackingObjective",
     "Trajectory",
     "ZeroCone",
-    "attitude_jacobian",
     "augmented_lagrangian_expansion",
     "compute_constraint_violation",
     "constraint_bounds",
@@ -204,14 +199,12 @@ __all__ = [
     "cost_and_grad",
     "cost_expansion",
     "dynamics_expansion",
-    "error_map",
     "euler_step",
     "eval_f",
     "eval_g",
     "eval_grad_f",
     "eval_h",
     "eval_jac_g",
-    "from_hamilton",
     "hessian",
     "hessian_sparsity_pattern",
     "implicit_midpoint_step",
@@ -228,7 +221,6 @@ __all__ = [
     "solve_ipopt",
     "solve_osqp",
     "states",
-    "to_hamilton",
     "trajectory_to_z",
     "update_reference",
     "with_control_rate_penalty",

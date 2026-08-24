@@ -8,9 +8,6 @@ import pytest
 from trajopt.dynamics.base import RigidBody
 from trajopt.rotations.quaternion import (
     Quaternion,
-    attitude_jacobian,
-    error_map,
-    to_hamilton,
 )
 
 SQRT_HALF = float(np.sqrt(0.5))
@@ -43,7 +40,7 @@ X_Y_PAIR = (jpl_axis_angle([1.0, 0.0, 0.0], 0.9), jpl_axis_angle([0.0, 1.0, 0.0]
 
 def _py_to_julia_unitquat(jl: Any, q: Quaternion) -> Any:
     """Convert Python JPL quaternion to Julia UnitQuaternion (Hamilton scalar-first: w, x, y, z)."""
-    h = to_hamilton(q)  # [-v0, -v1, -v2, w]
+    h = q.to_hamilton()  # [-v0, -v1, -v2, w]
     return jl.Rotations.UnitQuaternion(float(h[3]), float(h[0]), float(h[1]), float(h[2]))
 
 
@@ -141,7 +138,7 @@ def test_explicit_rotation_error_map_cross(jl_to: Any) -> None:
         np.testing.assert_allclose(mrp_jl, -r_ref.T @ mrp_py, rtol=1e-13, atol=1e-13)
 
         # 3. Multiplicative small-angle error delta_theta = 2 * vec(q_err)
-        dtheta_py = np.array(error_map(q, q_ref))
+        dtheta_py = np.array(q.error_map(q_ref))
         delta_q_jl = jl.seval("function(q, q0) q0 \\ q end")(q_jl, q_ref_jl)
         dtheta_jl = 2.0 * np.array(jl.Rotations.params(delta_q_jl))[1:4]
         np.testing.assert_allclose(dtheta_jl, -r_ref.T @ dtheta_py, rtol=1e-13, atol=1e-13)
@@ -219,7 +216,7 @@ def test_attitude_jacobian_cross(jl_to: Any) -> None:
     for q, _ in [X_Y_PAIR, *random_pairs(seed=200, count=50)]:
         q_jl = _py_to_julia_unitquat(jl, q)
         G_jl = np.array(jl_diff(q_jl))
-        G_py = np.array(attitude_jacobian(q))
+        G_py = np.array(q.attitude_jacobian())
         R_ref = np.array(q.to_rot_mat())
 
         # Assert derived relation: T @ G_py = -0.5 * G_jl @ R^T

@@ -8,10 +8,6 @@ from scipy.spatial.transform import Rotation
 
 from trajopt.rotations.quaternion import (
     Quaternion,
-    attitude_jacobian,
-    error_map,
-    from_hamilton,
-    to_hamilton,
 )
 
 SQRT_HALF = float(np.sqrt(0.5))
@@ -78,37 +74,46 @@ def test_bridge_against_hardcoded_hamilton_values():
     # Its Hamilton image is the active rotation by -t about the same axis, (v, w) -> (-v, w).
     q = jpl_axis_angle([1.0, 0.0, 0.0], np.pi / 2)
     np.testing.assert_allclose(q.to_array(), [SQRT_HALF, 0.0, 0.0, SQRT_HALF], atol=1e-15)
-    np.testing.assert_allclose(to_hamilton(q), [-SQRT_HALF, 0.0, 0.0, SQRT_HALF], atol=1e-15)
+    np.testing.assert_allclose(q.to_hamilton(), [-SQRT_HALF, 0.0, 0.0, SQRT_HALF], atol=1e-15)
+    np.testing.assert_allclose(q.to_hamilton(scalar_first=True), [SQRT_HALF, -SQRT_HALF, 0.0, 0.0], atol=1e-15)
 
     # Active matrix of that Hamilton quaternion is the hardcoded -90 deg x-rotation.
     expected = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
-    np.testing.assert_allclose(ham_matrix(to_hamilton(q)), expected, atol=1e-15)
+    np.testing.assert_allclose(ham_matrix(q.to_hamilton()), expected, atol=1e-15)
 
 
 def test_bridge_is_an_involution_and_self_inverse():
     """Verify to_hamilton and from_hamilton form a self-inverse bijection."""
     identity = Quaternion(np.zeros(3), 1.0)
-    np.testing.assert_allclose(to_hamilton(identity), [0.0, 0.0, 0.0, 1.0], atol=1e-15)
-    np.testing.assert_allclose(from_hamilton(to_hamilton(identity)).to_array(), identity.to_array(), atol=1e-15)
+    np.testing.assert_allclose(identity.to_hamilton(), [0.0, 0.0, 0.0, 1.0], atol=1e-15)
+    np.testing.assert_allclose(
+        Quaternion.from_hamilton(identity.to_hamilton()).to_array(), identity.to_array(), atol=1e-15
+    )
 
     q = jpl_axis_angle([0.0, 1.0, 0.0], 0.7)
-    h = to_hamilton(q)
-    q_recovered = from_hamilton(h)
+    h = q.to_hamilton()
+    q_recovered = Quaternion.from_hamilton(h)
     np.testing.assert_allclose(q_recovered.to_array(), q.to_array(), atol=1e-15)
-    np.testing.assert_allclose(to_hamilton(q_recovered), h, atol=1e-15)
+    np.testing.assert_allclose(q_recovered.to_hamilton(), h, atol=1e-15)
+
+    # Round trip with scalar_first
+    h_sf = q.to_hamilton(scalar_first=True)
+    q_recovered_sf = Quaternion.from_hamilton(h_sf, scalar_first=True)
+    np.testing.assert_allclose(q_recovered_sf.to_array(), q.to_array(), atol=1e-15)
+    np.testing.assert_allclose(q_recovered_sf.to_hamilton(scalar_first=True), h_sf, atol=1e-15)
 
 
 def test_bridge_preserves_rotation_matrix():
     """Verify R_JPL(q) == R_Ham(to_hamilton(q))."""
     for axis, angle in [([1.0, 0, 0], 0.4), ([0, 1.0, 0], 1.1), ([0, 0, 1.0], -2.3)]:
         q = jpl_axis_angle(axis, angle)
-        np.testing.assert_allclose(q.to_rot_mat(), ham_matrix(to_hamilton(q)), atol=1e-14)
+        np.testing.assert_allclose(q.to_rot_mat(), ham_matrix(q.to_hamilton()), atol=1e-14)
 
 
 def test_bridge_is_product_isomorphism():
     """Verify B(a (x)_JPL b) == B(a) (x)_Ham B(b)."""
     for a, b in random_pairs(seed=0, count=50):
-        np.testing.assert_allclose(to_hamilton(a * b), ham_mul(to_hamilton(a), to_hamilton(b)), atol=1e-14)
+        np.testing.assert_allclose((a * b).to_hamilton(), ham_mul(a.to_hamilton(), b.to_hamilton()), atol=1e-14)
 
 
 # --------------------------------------------------------------------------------------
@@ -230,9 +235,14 @@ def test_kinematics_matrix_and_derivative():
 def test_attitude_jacobian():
     """Verify attitude_jacobian returns 0.5 * Xi(q) of shape (4, 3)."""
     q = jpl_axis_angle([1.0, -1.0, 0.5], 1.2)
-    G = attitude_jacobian(q)
+    G = q.attitude_jacobian()
     assert G.shape == (4, 3)
     np.testing.assert_allclose(G, 0.5 * q.xi(), atol=1e-15)
+
+    # Scalar-first option
+    G_sf = q.attitude_jacobian(scalar_first=True)
+    assert G_sf.shape == (4, 3)
+    np.testing.assert_allclose(G_sf, 0.5 * q.xi(scalar_first=True), atol=1e-15)
 
 
 # --------------------------------------------------------------------------------------
@@ -244,13 +254,13 @@ def test_error_map_is_multiplicative_small_angle():
     """Verify error_map produces 2 * vec(q (x) q_ref^-1) without division or branch guard."""
     for q, q_ref in random_pairs(seed=50, count=30):
         q_err = q.error_to(q_ref)
-        dtheta = error_map(q, q_ref)
+        dtheta = q.error_map(q_ref)
         assert dtheta.shape == (3,)
         np.testing.assert_allclose(dtheta, 2.0 * q_err.vec, atol=1e-15)
 
     # Identical attitudes have zero error
     q_same = jpl_axis_angle([0.5, 0.5, 0.0], 0.9)
-    np.testing.assert_allclose(error_map(q_same, q_same), np.zeros(3), atol=1e-15)
+    np.testing.assert_allclose(q_same.error_map(q_same), np.zeros(3), atol=1e-15)
 
 
 # --------------------------------------------------------------------------------------
@@ -274,7 +284,7 @@ def test_double_cover_behaviour():
         err_pos = q.error_to(q_ref)
         err_neg = q_neg.error_to(q_ref)
         assert np.linalg.norm(err_pos.vec) == pytest.approx(np.linalg.norm(err_neg.vec), abs=1e-15)
-        assert np.linalg.norm(error_map(q, q_ref)) == pytest.approx(np.linalg.norm(error_map(q_neg, q_ref)), abs=1e-15)
+        assert np.linalg.norm(q.error_map(q_ref)) == pytest.approx(np.linalg.norm(q_neg.error_map(q_ref)), abs=1e-15)
 
 
 # --------------------------------------------------------------------------------------
@@ -372,7 +382,7 @@ def test_attitude_jacobian_matches_julia_right_hamilton_perturbation():
     np.testing.assert_allclose(T_QUAT @ np.asarray(q.xi()), NABLA_DIFFERENTIAL_JL, atol=1e-15)
 
     # With the error map folded in, the same one half stands on both sides.
-    np.testing.assert_allclose(T_QUAT @ np.asarray(attitude_jacobian(q)), 0.5 * NABLA_DIFFERENTIAL_JL, atol=1e-15)
+    np.testing.assert_allclose(T_QUAT @ np.asarray(q.attitude_jacobian()), 0.5 * NABLA_DIFFERENTIAL_JL, atol=1e-15)
 
 
 def test_attitude_jacobian_test_case_refutes_the_order_preserving_rival():
@@ -404,8 +414,8 @@ def test_attitude_jacobian_one_half_is_the_error_map_derivative():
 
     eps = 1e-6
     columns = [(q_of_theta(eps * e) - q_of_theta(-eps * e)) / (2.0 * eps) for e in np.eye(3)]
-    np.testing.assert_allclose(np.column_stack(columns), np.asarray(attitude_jacobian(q)), atol=1e-9)
+    np.testing.assert_allclose(np.column_stack(columns), np.asarray(q.attitude_jacobian()), atol=1e-9)
 
     # The error map that fixes the factor: delta theta = 2 vec(q (x) q_ref^-1).
-    delta_theta = np.asarray(error_map(Quaternion(q.vec, q.scalar), q))
+    delta_theta = np.asarray(Quaternion(q.vec, q.scalar).error_map(q))
     np.testing.assert_allclose(delta_theta, np.zeros(3), atol=1e-15)

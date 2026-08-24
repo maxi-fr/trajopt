@@ -163,6 +163,11 @@ class CostFunction(eqx.Module):
         del N
         return self
 
+    def unstacked(self, k: int) -> "CostFunction":
+        """Cost at stage k, the inverse of `stacked`; a cost with no horizon axis is its own stage cost."""
+        del k
+        return self
+
     def as_terminal(self) -> "CostFunction":
         """Terminal cost derived from this cost; a parameterless cost is its own terminal cost."""
         return self
@@ -323,6 +328,12 @@ class QuadraticCostFunction(CostFunction):
     def stacked(self, N: int) -> "QuadraticCostFunction":
         """Repeat every parameter over N - 1 stages, adding a leading axis of that length."""
         return jax.tree.map(lambda leaf: jnp.repeat(leaf[None], N - 1, axis=0), self)
+
+    def unstacked(self, k: int) -> "QuadraticCostFunction":
+        """Cost at stage k, dropping the leading horizon axis from every parameter."""
+        if not self.is_stacked:
+            return self
+        return jax.tree.map(lambda leaf: leaf[k], self)
 
     def as_terminal(self) -> "QuadraticCostFunction":
         """Terminal cost built from this cost's state parameters Q, q, c."""

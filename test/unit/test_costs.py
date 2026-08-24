@@ -395,6 +395,44 @@ def test_objective_indexing_and_properties() -> None:
         _ = obj[-N - 1]
 
 
+def test_objective_indexing_leaves_unstacked_stage_cost_whole() -> None:
+    """Assert a stage cost with no horizon axis is shared, not sliced, when m collides with N - 1."""
+    n, m, N = 13, 4, 5  # m == N - 1, the shape collision that a leading-dimension test cannot see
+    xf = jnp.zeros(n).at[6].set(1.0)
+    stage_cost = QuatGeodesicCost(Q=jnp.ones(n), R=jnp.full((m,), 0.01), q_ref=xf[3:7], m=m)
+    term_cost = QuatGeodesicCost(Q=jnp.ones(n), q_ref=xf[3:7], terminal=True)
+    obj = Objective(stage_cost=stage_cost, terminal_cost=term_cost, N=N)
+
+    assert not obj.stage_cost.is_stacked
+    for k in range(N - 1):
+        assert obj[k] is obj.stage_cost
+
+    # The cost stays evaluable, which is what the sliced parameters broke
+    obj[0].evaluate(jnp.zeros(n), jnp.zeros(m))
+
+
+def test_objective_indexing_slices_stacked_cost_with_broadcast_parameters() -> None:
+    """Assert stacked costs carry the horizon axis on every parameter, including defaulted ones."""
+    n, m, N = 3, 4, 5  # m == N - 1 again, this time on a genuinely stacked cost
+    Q = jnp.tile(jnp.eye(n), (N - 1, 1, 1))
+    R = jnp.tile(jnp.eye(m), (N - 1, 1, 1))
+    stage_cost = QuadraticCost(Q=Q, R=R)
+    assert stage_cost.is_stacked
+    assert stage_cost.q.shape == (N - 1, n)
+    assert stage_cost.r.shape == (N - 1, m)
+    assert stage_cost.c.shape == (N - 1,)
+
+    obj = Objective(stage_cost=stage_cost, terminal_cost=QuadraticCost(Q=jnp.eye(n), terminal=True, m=m))
+    cost_0 = obj[0]
+    assert isinstance(cost_0, QuadraticCost)
+    assert cost_0.Q.shape == (n, n)
+    assert cost_0.R.shape == (m, m)
+    assert cost_0.H.shape == (m, n)
+    assert cost_0.q.shape == (n,)
+    assert cost_0.r.shape == (m,)
+    assert cost_0.c.shape == ()
+
+
 def test_quat_geodesic_cost_evaluation_and_subgradient_branches() -> None:
     """Assert QuatGeodesicCost evaluation and gradient on both subgradient branches."""
     n, m = 13, 4

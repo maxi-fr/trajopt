@@ -15,6 +15,15 @@ def diag_matrix(v: jax.Array) -> jax.Array:
     return v[..., :, None] * jnp.eye(v.shape[-1], dtype=v.dtype)
 
 
+def _stack_over(param: jax.Array, shape: tuple[int, ...]) -> jax.Array:
+    """Broadcast a single-knot parameter to the stacked shape, leaving an already-stacked one alone.
+
+    Compares ndim rather than the leading length, which a single-knot parameter can match by
+    coincidence whenever a state or control dimension equals the number of stages.
+    """
+    return param if param.ndim == len(shape) else jnp.broadcast_to(param, shape)
+
+
 class DiagonalCost(QuadraticCostFunction):
     """Diagonal quadratic cost function storing weights as 1D vectors rather than matrices.
 
@@ -86,6 +95,14 @@ class DiagonalCost(QuadraticCostFunction):
 
         q_arr = jnp.zeros_like(Q_arr) if q is None else jnp.asarray(q, dtype=Q_arr.dtype)
         c_arr = jnp.asarray(c, dtype=Q_arr.dtype)
+
+        # A stacked cost carries the horizon axis on every parameter, so that is_stacked holds
+        # of each one and slicing a stage out never has to guess which leaves are stacked
+        if Q_arr.ndim == _EXPECTED_NDIM_2D:
+            n_stages = int(Q_arr.shape[0])
+            q_arr = _stack_over(q_arr, (n_stages, n))
+            r_arr = _stack_over(r_arr, (n_stages, m_val))
+            c_arr = _stack_over(c_arr, (n_stages,))
 
         super().__init__(n=n, m=m_val, terminal=terminal)
         self.Q = Q_arr
@@ -405,6 +422,16 @@ class QuadraticCost(QuadraticCostFunction):
 
         q_arr = jnp.zeros((n,), dtype=Q_arr.dtype) if q is None else jnp.asarray(q, dtype=Q_arr.dtype)
         c_arr = jnp.asarray(c, dtype=Q_arr.dtype)
+
+        # A stacked cost carries the horizon axis on every parameter, so that is_stacked holds
+        # of each one and slicing a stage out never has to guess which leaves are stacked
+        if Q_arr.ndim == _EXPECTED_NDIM_3D:
+            n_stages = int(Q_arr.shape[0])
+            R_arr = _stack_over(R_arr, (n_stages, m_val, m_val))
+            H_arr = _stack_over(H_arr, (n_stages, m_val, n))
+            q_arr = _stack_over(q_arr, (n_stages, n))
+            r_arr = _stack_over(r_arr, (n_stages, m_val))
+            c_arr = _stack_over(c_arr, (n_stages,))
 
         super().__init__(n=n, m=m_val, terminal=terminal)
         self.Q = Q_arr

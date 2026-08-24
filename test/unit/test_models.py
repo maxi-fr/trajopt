@@ -6,7 +6,7 @@ import numpy as np
 from trajopt import models
 from trajopt.dynamics.base import RigidBody
 from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
-from trajopt.rotations.quaternion import Quaternion, attitude_jacobian, error_map
+from trajopt.rotations.quaternion import Quaternion
 
 
 class _ConcreteRigidBody(RigidBody):
@@ -35,7 +35,7 @@ def test_rigid_body_properties_and_error_interface() -> None:
     dx = model.state_diff(x, x0)
     assert dx.shape == (12,)
     np.testing.assert_allclose(dx[:3], x[:3] - x0[:3])
-    np.testing.assert_allclose(dx[3:6], error_map(q1, q0))
+    np.testing.assert_allclose(dx[3:6], q1.error_map(q0))
     np.testing.assert_allclose(dx[6:9], x[7:10] - x0[7:10])
     np.testing.assert_allclose(dx[9:12], x[10:13] - x0[10:13])
 
@@ -53,7 +53,7 @@ def test_rigid_body_properties_and_error_interface() -> None:
     np.testing.assert_allclose(G[:3, :3], eye3)
     np.testing.assert_allclose(G[:3, 3:], np.zeros((3, 9)))
     np.testing.assert_allclose(G[3:7, :3], np.zeros((4, 3)))
-    np.testing.assert_allclose(G[3:7, 3:6], attitude_jacobian(q1))
+    np.testing.assert_allclose(G[3:7, 3:6], q1.attitude_jacobian())
     np.testing.assert_allclose(G[3:7, 6:], np.zeros((4, 6)))
     np.testing.assert_allclose(G[7:10, :6], np.zeros((3, 6)))
     np.testing.assert_allclose(G[7:10, 6:9], eye3)

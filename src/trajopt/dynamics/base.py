@@ -7,8 +7,6 @@ import jax.numpy as jnp
 
 from trajopt.rotations.quaternion import (
     Quaternion,
-    attitude_jacobian,
-    error_map,
 )
 
 IntegratorCallable = Callable[
@@ -174,7 +172,7 @@ class RigidBody(ContinuousDynamics):
         dr = x[:3] - x0[:3]
         q = Quaternion.from_array(x[3:7])
         q0 = Quaternion.from_array(x0[3:7])
-        dtheta = error_map(q, q0)
+        dtheta = q.error_map(q0)
         dv = x[7:10] - x0[7:10]
         domega = x[10:13] - x0[10:13]
         return jnp.concatenate([dr, dtheta, dv, domega])
@@ -193,7 +191,7 @@ class RigidBody(ContinuousDynamics):
             Error-state Jacobian blockdiag(I_3, 0.5 * Xi(q), I_3, I_3) of shape (13, 12).
         """
         q = Quaternion.from_array(x[3:7])
-        g_rot = attitude_jacobian(q)
+        g_rot = q.attitude_jacobian()
         eye3 = jnp.eye(3, dtype=x.dtype)
         z33 = jnp.zeros((3, 3), dtype=x.dtype)
         z43 = jnp.zeros((4, 3), dtype=x.dtype)

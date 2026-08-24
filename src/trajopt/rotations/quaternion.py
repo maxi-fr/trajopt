@@ -34,6 +34,20 @@ class Quaternion(eqx.Module):
         return jnp.array([self.vec[0], self.vec[1], self.vec[2], self.scalar])
 
     @classmethod
+    def from_hamilton(cls, h: Sequence[float] | jax.Array | np.ndarray, *, scalar_first: bool = False) -> Self:
+        """Create a Quaternion from a Hamilton quaternion array of shape (4,)."""
+        arr = jnp.asarray(h, dtype=float)
+        if scalar_first:
+            return cls(-arr[1:], arr[0])
+        return cls(-arr[:3], arr[3])
+
+    def to_hamilton(self, *, scalar_first: bool = False) -> jax.Array:
+        """Convert quaternion to a Hamilton quaternion array of shape (4,)."""
+        if scalar_first:
+            return jnp.array([self.scalar, -self.vec[0], -self.vec[1], -self.vec[2]])
+        return jnp.array([-self.vec[0], -self.vec[1], -self.vec[2], self.scalar])
+
+    @classmethod
     def from_scipy(cls, rot: Rotation, *, canonical: bool = True) -> Self:
         """Create a Quaternion from a SciPy Rotation object."""
         q = rot.as_quat(canonical=canonical, scalar_first=False)
@@ -41,7 +55,7 @@ class Quaternion(eqx.Module):
 
     def to_scipy(self) -> Rotation:
         """Convert quaternion to a SciPy Rotation object."""
-        h = to_hamilton(self)
+        h = self.to_hamilton()
         return Rotation.from_quat(np.asarray(h))
 
     def to_rot_mat(self) -> jax.Array:
@@ -79,6 +93,10 @@ class Quaternion(eqx.Module):
         """Attitude error quaternion relative to reference q_err = q (x) q_ref^-1."""
         return self * reference.conjugate()
 
+    def error_map(self, reference: "Quaternion") -> jax.Array:
+        """Compute multiplicative small-angle attitude error 2 * vec(q (x) q_ref^-1) of shape (3,)."""
+        return 2.0 * self.error_to(reference).vec
+
     def apply(self, v: Sequence[float] | jax.Array | np.ndarray) -> jax.Array:
         """Rotate vector of shape (3,) using passive Frame rotation."""
         v_arr = jnp.asarray(v, dtype=float)
@@ -103,6 +121,10 @@ class Quaternion(eqx.Module):
             return jnp.roll(res, 1, axis=0)
         return res
 
+    def attitude_jacobian(self, *, scalar_first: bool = False) -> jax.Array:
+        """Compute attitude Jacobian rotation block 0.5 * Xi(q) of shape (4, 3)."""
+        return 0.5 * self.xi(scalar_first=scalar_first)
+
     def kinematics(self, omega: Sequence[float] | jax.Array | np.ndarray, *, scalar_first: bool = False) -> jax.Array:
         """Calculate quaternion time derivative dq/dt = 0.5 * Xi(q) @ omega of shape (4,)."""
         omega_arr = jnp.asarray(omega, dtype=float)
@@ -111,24 +133,3 @@ class Quaternion(eqx.Module):
     def __neg__(self) -> "Quaternion":
         """Negate quaternion [-v, -w]."""
         return Quaternion(-self.vec, -self.scalar)
-
-
-def to_hamilton(q: Quaternion) -> jax.Array:
-    """Convert JPL Quaternion to Hamilton quaternion array of shape (4,)."""
-    return jnp.array([-q.vec[0], -q.vec[1], -q.vec[2], q.scalar])
-
-
-def from_hamilton(h: Sequence[float] | jax.Array | np.ndarray) -> Quaternion:
-    """Convert Hamilton quaternion array of shape (4,) to JPL Quaternion."""
-    arr = jnp.asarray(h, dtype=float)
-    return Quaternion(-arr[:3], arr[3])
-
-
-def error_map(q: Quaternion, q_ref: Quaternion) -> jax.Array:
-    """Compute multiplicative small-angle attitude error 2 * vec(q (x) q_ref^-1) of shape (3,)."""
-    return 2.0 * q.error_to(q_ref).vec
-
-
-def attitude_jacobian(q: Quaternion) -> jax.Array:
-    """Compute attitude Jacobian rotation block 0.5 * Xi(q) of shape (4, 3)."""
-    return 0.5 * q.xi()

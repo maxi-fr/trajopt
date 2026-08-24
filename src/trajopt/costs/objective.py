@@ -206,7 +206,11 @@ class Objective(eqx.Module):
         return self.N
 
     def __getitem__(self, idx: int) -> CostFunction:
-        """Return the unstacked cost function at knot point idx, which may be negative."""
+        """Return the cost function at knot point idx, which may be negative.
+
+        A stacked stage cost is sliced at idx; a stage cost carrying no horizon axis, such as a
+        `QuatGeodesicCost` repeated over the horizon, is returned whole.
+        """
         if not isinstance(idx, int):
             msg = f"Objective index must be an integer, got {type(idx).__name__}"
             raise TypeError(msg)
@@ -216,12 +220,7 @@ class Objective(eqx.Module):
             raise IndexError(msg)
         if k == self.N - 1:
             return self.terminal_cost
-        return jax.tree.map(
-            lambda leaf: (
-                leaf[k] if (hasattr(leaf, "shape") and len(leaf.shape) > 0 and leaf.shape[0] == self.N - 1) else leaf
-            ),
-            self.stage_cost,
-        )
+        return self.stage_cost.unstacked(k)
 
 
 def LQRObjective(  # noqa: N802, PLR0913, PLR0917

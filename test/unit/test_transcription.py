@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from trajopt.benchmarks import quadrotor_obstacle_benchmark
 from trajopt.cones import NegativeOrthant, PositiveOrthant, ZeroCone
 from trajopt.constraints.bounds import ControlBound, StateBound
 from trajopt.constraints.constraint_list import ConstraintList
@@ -446,3 +447,13 @@ def test_unconstrained_solve() -> None:
     res = solve_ipopt(prob, x0=x0, dt=0.05, options={"print_level": 0})
     assert res.success
     np.testing.assert_allclose(res.trajectory.X[0], x0, atol=1e-4)
+
+
+def test_hessian_with_unstacked_stage_cost_at_colliding_horizon() -> None:
+    """Assert the Lagrangian Hessian builds when the control dimension equals N - 1."""
+    prob, state, _ = quadrotor_obstacle_benchmark(N=5)  # m == 4 == N - 1
+    hess_val = hessian(prob, state.Z, dt=state.dt, xf=state.xf)
+
+    hess_rows, _ = hessian_sparsity_pattern(prob.N, prob.model.n, prob.model.m)
+    assert hess_val.shape == hess_rows.shape
+    assert np.all(np.isfinite(np.asarray(hess_val)))
