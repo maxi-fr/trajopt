@@ -4,10 +4,7 @@ import jax.numpy as jnp
 
 from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.base import AbstractModel, DiscreteDynamics
-from trajopt.dynamics.rollout import _step_durations_and_times
 from trajopt.trajectory import Trajectory
-
-_EXPECTED_NDIM_2D = 2
 
 
 def control_rate_cost(
@@ -202,12 +199,9 @@ class LinearTrajectoryModel(eqx.Module):
         self.N = int(self.A.shape[0]) + 1
 
 
-def linearize_about(
+def _linearize_about(
     model: AbstractModel,
-    X_ref: Trajectory | jax.Array,
-    U_ref: jax.Array | None = None,
-    t: jax.Array | float | None = None,
-    dt: jax.Array | float | None = None,
+    traj: Trajectory,
 ) -> LinearTrajectoryModel:
     """Linearize a dynamics model about a reference trajectory.
 
@@ -218,36 +212,19 @@ def linearize_about(
     ----------
     model : AbstractModel
         Dynamics model to linearize. If continuous, discretized with RK4 by default.
-    X_ref : Trajectory | jax.Array
-        Reference trajectory holding states of shape (N, n), or Trajectory instance.
-    U_ref : jax.Array | None, optional
-        Reference controls of shape (N-1, m). Required when X_ref is an array.
-    t : jax.Array | float | None, optional
-        Timestamps of shape (N,) or initial timestamp.
-    dt : jax.Array | float | None, optional
-        Step durations of shape (N-1,) or scalar step duration. Defaults to 0.01.
+    traj : Trajectory
+        Reference trajectory holding states X of shape (N, n), controls U of shape (N-1, m),
+        times t of shape (N,), and step durations dt of shape (N-1,).
 
     Returns
     -------
     LinearTrajectoryModel
         Linearized model exposing stacked Jacobians A and B.
     """
-    if isinstance(X_ref, Trajectory):
-        traj = X_ref
-        X_arr = traj.X
-        U_arr = traj.U
-        t_arr = traj.t
-        dt_arr = traj.dt
-    else:
-        if U_ref is None:
-            msg = "U_ref must be provided when X_ref is an array."
-            raise ValueError(msg)
-        X_arr = jnp.asarray(X_ref)
-        U_arr = jnp.asarray(U_ref)
-        if U_arr.ndim != _EXPECTED_NDIM_2D:
-            msg = f"Reference controls U_ref must have 2 dimensions (N-1, m), got shape {U_arr.shape}"
-            raise ValueError(msg)
-        dt_arr, t_arr = _step_durations_and_times(t, dt, n_steps=U_arr.shape[0], dtype=X_arr.dtype)
+    X_arr = traj.X
+    U_arr = traj.U
+    t_arr = traj.t
+    dt_arr = traj.dt
 
     discrete_model = model.discretize()
 

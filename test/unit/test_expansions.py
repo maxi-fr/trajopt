@@ -28,12 +28,7 @@ from trajopt.dynamics import (
     DiscretizedDynamics,
     Euler,
 )
-from trajopt.expansions import (
-    Expansion,
-    augmented_lagrangian_expansion,
-    cost_expansion,
-    dynamics_expansion,
-)
+from trajopt.expansions import Expansion
 from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
 from trajopt.problem import Problem
 from trajopt.rotations.quaternion import Quaternion
@@ -149,7 +144,7 @@ def test_dynamics_expansion_discrete_finite_differences() -> None:
         dt=jnp.diff(t_np),
     )
 
-    exp = dynamics_expansion(discrete, traj)
+    exp = discrete.dynamics_expansion(traj)
 
     assert exp.A.shape == (N - 1, n, n)
     assert exp.B.shape == (N - 1, n, m)
@@ -208,7 +203,7 @@ def test_dynamics_expansion_problem_wrapper() -> None:
         dt=jnp.ones(5) * 0.1,
     )
 
-    exp = dynamics_expansion(problem, traj)
+    exp = problem.dynamics_expansion(traj)
     assert exp.A.shape == (5, 2, 2)
     assert exp.B.shape == (5, 2, 1)
 
@@ -240,7 +235,7 @@ def test_cost_expansion_diagonal_lqr() -> None:
         dt=jnp.diff(jnp.linspace(0.0, 0.5, N)),
     )
 
-    exp = cost_expansion(obj, traj)
+    exp = obj.cost_expansion(traj)
 
     assert exp.q.shape == (N, n)
     assert exp.r.shape == (N - 1, m)
@@ -310,7 +305,7 @@ def test_cost_expansion_dense_quadratic_cross_coupling() -> None:
         dt=jnp.diff(jnp.linspace(0.0, 0.4, N)),
     )
 
-    exp = cost_expansion(obj, traj)
+    exp = obj.cost_expansion(traj)
 
     for k in range(N - 1):
         xk = X_np[k]
@@ -360,7 +355,7 @@ def _setup_generic_cost_fixture() -> tuple[Objective, Trajectory, np.ndarray, np
 
 def test_cost_expansion_generic_stage_gradients() -> None:
     obj, traj, X_np, U_np = _setup_generic_cost_fixture()
-    exp = cost_expansion(obj, traj)
+    exp = obj.cost_expansion(traj)
     eps = 1e-5
     n, m, N = 2, 1, 5
     stage = obj.stage_cost
@@ -390,7 +385,7 @@ def test_cost_expansion_generic_stage_gradients() -> None:
 
 def test_cost_expansion_generic_stage_hessians() -> None:
     obj, traj, X_np, U_np = _setup_generic_cost_fixture()
-    exp = cost_expansion(obj, traj)
+    exp = obj.cost_expansion(traj)
     eps = 1e-5
     n, m, N = 2, 1, 5
     stage = obj.stage_cost
@@ -444,7 +439,7 @@ def test_cost_expansion_generic_stage_hessians() -> None:
 
 def test_cost_expansion_generic_terminal() -> None:
     obj, traj, X_np, _ = _setup_generic_cost_fixture()
-    exp = cost_expansion(obj, traj)
+    exp = obj.cost_expansion(traj)
     eps = 1e-5
     n = 2
     term = obj.terminal_cost
@@ -494,13 +489,13 @@ def test_augmented_lagrangian_expansion_goal_equality() -> None:
         dt=jnp.diff(jnp.linspace(0.0, 0.5, N)),
     )
 
-    base_exp = cost_expansion(obj, traj)
+    base_exp = obj.cost_expansion(traj)
 
     lam_term = jnp.array([0.5, -0.8, 1.2])
     mu = 4.0
     lam_list = [jnp.zeros(0) for _ in range(N - 1)] + [lam_term]
 
-    al_exp = augmented_lagrangian_expansion(built_cons, traj, base_exp, lam=lam_list, mu=mu)
+    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
 
     # Stages 0..N-2 should have no AL changes
     for k in range(N - 1):
@@ -557,12 +552,12 @@ def test_augmented_lagrangian_expansion_bounds_inequality() -> None:
     )
     traj = Trajectory(X=X, U=U, t=jnp.linspace(0.0, 0.4, N), dt=jnp.diff(jnp.linspace(0.0, 0.4, N)))
 
-    base_exp = cost_expansion(obj, traj)
+    base_exp = obj.cost_expansion(traj)
     mu = 10.0
     lam_stage = jnp.array([0.1, 0.2, 0.3])
     lam_list = [lam_stage] * (N - 1) + [jnp.zeros(0)]
 
-    al_exp = augmented_lagrangian_expansion(built_cons, traj, base_exp, lam=lam_list, mu=mu)
+    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
 
     # Knot 0 (active violation) -> should have significant positive Hessian contributions
     Q_al_0 = np.array(al_exp.Q[0] - base_exp.Q[0])
@@ -600,12 +595,12 @@ def test_augmented_lagrangian_expansion_soc() -> None:
     U = jnp.zeros((N - 1, m))
     traj = Trajectory(X=X, U=U, t=jnp.linspace(0.0, 0.3, N), dt=jnp.diff(jnp.linspace(0.0, 0.3, N)))
 
-    base_exp = cost_expansion(obj, traj)
+    base_exp = obj.cost_expansion(traj)
     mu = 5.0
     lam_knot = jnp.array([0.1, 0.2, 0.3])
     lam_list = [lam_knot] * (N - 1) + [jnp.zeros(0)]
 
-    al_exp = augmented_lagrangian_expansion(built_cons, traj, base_exp, lam=lam_list, mu=mu)
+    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
 
     # Verify that AL gradient and Hessian at knot 0 match finite differences of AL penalty
     eps = 1e-5
@@ -686,7 +681,7 @@ def test_error_coordinates_with_mock_attitude_jacobian() -> None:
     traj = Trajectory(X=X, U=U, t=jnp.linspace(0.0, 0.3, N), dt=jnp.diff(jnp.linspace(0.0, 0.3, N)))
 
     # 1. Dynamics expansion in error coordinates
-    exp_dyn = dynamics_expansion(discrete, traj)
+    exp_dyn = discrete.dynamics_expansion(traj)
     assert exp_dyn.A.shape == (N - 1, ne, ne)
     assert exp_dyn.B.shape == (N - 1, ne, m)
     assert exp_dyn.q.shape == (N, ne)
@@ -704,7 +699,7 @@ def test_error_coordinates_with_mock_attitude_jacobian() -> None:
     # 2. Cost expansion in error coordinates
     obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), jnp.zeros(n), N)
     problem = Problem(model=model, obj=obj, N=N)
-    exp_cost = cost_expansion(problem, traj)
+    exp_cost = problem.cost_expansion(traj)
 
     assert exp_cost.q.shape == (N, ne)
     assert exp_cost.Q.shape == (N, ne, ne)
@@ -746,7 +741,7 @@ def test_quadrotor_sandwiched_dynamics_expansion() -> None:
     discrete = DiscretizedDynamics(model, RK4())
     ne, m, N = 12, 4, 5
 
-    exp_dyn = dynamics_expansion(discrete, traj)
+    exp_dyn = discrete.dynamics_expansion(traj)
     assert exp_dyn.A.shape == (N - 1, ne, ne)
     assert exp_dyn.B.shape == (N - 1, ne, m)
     assert exp_dyn.ne == ne
@@ -781,7 +776,7 @@ def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
     obj = Objective(stage_cost=stage_cost, terminal_cost=term_cost, N=N)
     problem = Problem(model=model, obj=obj, N=N)
 
-    exp_cost = cost_expansion(problem, traj)
+    exp_cost = problem.cost_expansion(traj)
     assert exp_cost.q.shape == (N, ne)
     assert exp_cost.Q.shape == (N, ne, ne)
     assert exp_cost.r.shape == (N - 1, m)
@@ -795,7 +790,7 @@ def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
 
     lam_list = [jnp.zeros(built_cons.p[k]) for k in range(N)]
     lam_list[-1] = jnp.array([0.5, -0.5, 0.2])
-    al_exp = augmented_lagrangian_expansion(problem, traj, exp_cost, lam=lam_list, mu=10.0)
+    al_exp = problem.augmented_lagrangian_expansion(traj, exp_cost, lam=lam_list, mu=10.0)
     assert al_exp.q.shape == (N, ne)
     assert al_exp.Q.shape == (N, ne, ne)
 
@@ -875,7 +870,7 @@ def test_engine_agrees_with_transcription_on_euclidean_derivatives(weights: str)
     Z = trajectory_to_z(traj.X, traj.U)
 
     # 1. Cost gradients against eval_grad_f, unpacked from the flat Z layout.
-    cost_exp = cost_expansion(problem, traj)
+    cost_exp = problem.cost_expansion(traj)
     grad_X, grad_U = z_to_trajectory(eval_grad_f(problem, Z, t0, dt), N, n, m)
     np.testing.assert_allclose(np.asarray(cost_exp.q), np.asarray(grad_X), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.asarray(cost_exp.r), np.asarray(grad_U), rtol=1e-12, atol=1e-12)
@@ -894,7 +889,7 @@ def test_engine_agrees_with_transcription_on_euclidean_derivatives(weights: str)
 
     # 3. Dynamics Jacobians against the defect rows of the constraint Jacobian, which carry
     #    -[A_k, B_k] followed by the identity block of x_{k+1}.
-    dyn_exp = dynamics_expansion(problem, traj)
+    dyn_exp = problem.dynamics_expansion(traj)
     _, jac = constraints_and_jac(problem, Z, traj.X[0], t0, dt)
     jac_np = np.asarray(jac)
     offset = n * n  # the initial-condition identity block

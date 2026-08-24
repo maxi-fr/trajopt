@@ -5,11 +5,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from trajopt.constraints.constraint_list import BuiltConstraintList, BuiltKnotConstraint, ConstraintList
+from trajopt.constraints.constraint_list import BuiltConstraintList, BuiltKnotConstraint
 from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import DiagonalCost, QuadraticCost
 from trajopt.dynamics.base import AbstractModel
-from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 
 _EXPECTED_NDIM_2D = 2
@@ -187,45 +186,13 @@ class Expansion(eqx.Module):
         )
 
 
-def _extract_model(
-    problem: Problem | AbstractModel | Objective | BuiltConstraintList | ConstraintList,
-) -> AbstractModel | None:
-    """Extract the model from problem for error coordinates, if present."""
-    if isinstance(problem, Problem):
-        return problem.model
-    if isinstance(problem, AbstractModel):
-        return problem
-    return None
-
-
-def _extract_objective(problem: Problem | Objective) -> Objective:
-    """Extract an Objective instance from problem."""
-    if isinstance(problem, Problem):
-        return problem.obj
-    if isinstance(problem, Objective):
-        return problem
-    msg = f"Cannot extract Objective from problem of type {type(problem).__name__}"
-    raise TypeError(msg)
-
-
-def _extract_constraints(problem: Problem | BuiltConstraintList | ConstraintList) -> BuiltConstraintList | None:
-    """Extract a BuiltConstraintList from problem, building it if needed."""
-    if isinstance(problem, Problem):
-        return problem.constraints
-    if isinstance(problem, BuiltConstraintList):
-        return problem
-    if isinstance(problem, ConstraintList):
-        return problem.build()
-    return None
-
-
-def dynamics_expansion(problem: Problem | AbstractModel, state: Trajectory) -> Expansion:
+def _dynamics_expansion(model: AbstractModel, state: Trajectory) -> Expansion:
     """Compute the stacked first-order dynamics expansion in error coordinates.
 
     Parameters
     ----------
-    problem : Problem | AbstractModel
-        Problem instance or model exposing continuous or discrete dynamics.
+    model : AbstractModel
+        Model exposing continuous or discrete dynamics.
     state : Trajectory
         Trajectory holding stacked states X of shape (N, n), controls U of shape (N-1, m),
         times t of shape (N,), and step durations dt of shape (N-1,).
@@ -235,7 +202,7 @@ def dynamics_expansion(problem: Problem | AbstractModel, state: Trajectory) -> E
     Expansion
         Expansion holding stacked A of shape (N-1, ne, ne) and B of shape (N-1, ne, m).
     """
-    discrete_model = problem.model if isinstance(problem, Problem) else problem.discretize()
+    discrete_model = model.discretize()
 
     X = state.X
     U = state.U
@@ -373,8 +340,8 @@ def _terminal_cost_expansion(
     return q_term, Q_term
 
 
-def cost_expansion(
-    problem: Problem | Objective,
+def _cost_expansion(
+    obj: Objective,
     state: Trajectory,
     model: AbstractModel | None = None,
 ) -> Expansion:
@@ -382,13 +349,13 @@ def cost_expansion(
 
     Parameters
     ----------
-    problem : Problem | Objective
-        Problem instance or Objective containing stage and terminal costs.
+    obj : Objective
+        Objective containing stage and terminal costs.
     state : Trajectory
         Trajectory holding stacked states X of shape (N, n), controls U of shape (N-1, m),
         and times t of shape (N,).
     model : AbstractModel | None, optional
-        Model defining the error state coordinates. If None, extracted from problem.
+        Model defining the error state coordinates. Defaults to None, meaning Euclidean.
 
     Returns
     -------
@@ -396,8 +363,7 @@ def cost_expansion(
         Expansion holding stacked q of shape (N, ne), r of shape (N-1, m), Q of shape (N, ne, ne),
         R of shape (N-1, m, m), and H of shape (N-1, m, ne) in error coordinates.
     """
-    obj = _extract_objective(problem)
-    resolved_model = model if model is not None else _extract_model(problem)
+    resolved_model = model
 
     X = state.X
     U = state.U
@@ -560,8 +526,8 @@ def _knot_al_expansion(
     return q_al, None, Q_al, None, None
 
 
-def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion takes problem, state, expansion, lam, mu, model
-    problem: Problem | BuiltConstraintList | ConstraintList,
+def _augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion takes constraints, state, expansion, lam, mu, model
+    constraints: BuiltConstraintList,
     state: Trajectory,
     expansion: Expansion,
     lam: Sequence[jax.Array] | jax.Array | None = None,
@@ -572,8 +538,8 @@ def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion ta
 
     Parameters
     ----------
-    problem : Problem | BuiltConstraintList | ConstraintList
-        Problem or constraint list holding active constraints and active knot-point ranges.
+    constraints : BuiltConstraintList
+        Built constraint list holding active constraints and active knot-point ranges.
         Box bounds are penalised alongside the constraint rows, since a native solver has no
         variable bounds of its own; each knot's multipliers run constraint rows then bound rows.
     state : Trajectory
@@ -586,17 +552,17 @@ def augmented_lagrangian_expansion(  # noqa: PLR0913, PLR0917 -- AL expansion ta
     mu : float | jax.Array, optional
         Penalty parameter (scalar or array of length N). Default is 1.0.
     model : AbstractModel | None, optional
-        Model defining error state coordinates. If None, extracted from problem.
+        Model defining error state coordinates. Defaults to None, meaning Euclidean.
 
     Returns
     -------
     Expansion
         New Expansion with augmented Lagrangian gradient and Hessian terms added.
     """
-    built_constraints = _extract_constraints(problem)
-    resolved_model = model if model is not None else _extract_model(problem)
+    built_constraints = constraints
+    resolved_model = model
 
-    if built_constraints is None or len(built_constraints.knot_evaluators) == 0:
+    if len(built_constraints.knot_evaluators) == 0:
         return expansion
 
     X = state.X

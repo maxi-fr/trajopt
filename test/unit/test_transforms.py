@@ -11,13 +11,11 @@ from trajopt.dynamics import (
     ImplicitMidpoint,
     rollout_states,
 )
-from trajopt.expansions import dynamics_expansion
 from trajopt.models import Cartpole, DubinsCar, Pendulum, Quadrotor
 from trajopt.models.transforms import (
     ControlRateModel,
     LinearTrajectoryModel,
     control_rate_cost,
-    linearize_about,
     with_control_rate_penalty,
 )
 from trajopt.rotations.quaternion import Quaternion
@@ -319,7 +317,7 @@ def test_composition_with_integrators_and_rollout() -> None:
 
 
 def test_linearize_about_euclidean_models() -> None:
-    """Assert linearize_about produces stacked state and control Jacobians along reference trajectory."""
+    """Assert model.linearize produces stacked state and control Jacobians along reference trajectory."""
     # 1. Cartpole with RK4
     cartpole = Cartpole()
     disc_cartpole = DiscretizedDynamics(cartpole, RK4())
@@ -330,8 +328,9 @@ def test_linearize_about_euclidean_models() -> None:
     U_ref = jnp.array(rng.uniform(-1.5, 1.5, size=(N - 1, 1)))
     x0 = jnp.array([0.0, 0.1, 0.0, 0.0])
     X_ref = rollout_states(disc_cartpole, x0, U_ref, dt=dt)
+    traj_ref = Trajectory(X=X_ref, U=U_ref, t=jnp.arange(N) * dt, dt=jnp.full(N - 1, dt))
 
-    lin = linearize_about(disc_cartpole, X_ref, U_ref, dt=dt)
+    lin = disc_cartpole.linearize(traj_ref)
     assert isinstance(lin, LinearTrajectoryModel)
     assert lin.A.shape == (N - 1, 4, 4)
     assert lin.B.shape == (N - 1, 4, 1)
@@ -350,19 +349,13 @@ def test_linearize_about_euclidean_models() -> None:
         np.testing.assert_allclose(lin.B[k], Bk_expected, rtol=1e-14, atol=1e-14)
 
     # 2. Continuous model without explicit discretization (defaults to RK4)
-    lin_cont = linearize_about(cartpole, X_ref, U_ref, dt=dt)
+    lin_cont = cartpole.linearize(traj_ref)
     np.testing.assert_allclose(lin_cont.A, lin.A)
     np.testing.assert_allclose(lin_cont.B, lin.B)
 
-    # 3. Trajectory input signature
-    traj = Trajectory(X=X_ref, U=U_ref, t=jnp.arange(N) * dt, dt=jnp.full(N - 1, dt))
-    lin_traj = linearize_about(disc_cartpole, traj)
-    np.testing.assert_allclose(lin_traj.A, lin.A)
-    np.testing.assert_allclose(lin_traj.B, lin.B)
-
 
 def test_linearize_about_rigidbody_quadrotor() -> None:
-    """Assert linearize_about applies error-state sandwich for RigidBody Quadrotor."""
+    """Assert model.linearize applies error-state sandwich for RigidBody Quadrotor."""
     quad = Quadrotor()
     disc_quad = DiscretizedDynamics(quad, RK4())
     N = 8
@@ -373,8 +366,9 @@ def test_linearize_about_rigidbody_quadrotor() -> None:
     q0 = Quaternion.from_array([0.0, 0.0, 0.0, 1.0])
     x0 = jnp.array([0.0, 0.0, 1.0, *q0.to_array(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     X_ref = rollout_states(disc_quad, x0, U_ref, dt=dt)
+    traj = Trajectory(X=X_ref, U=U_ref, t=jnp.arange(N) * dt, dt=jnp.full(N - 1, dt))
 
-    lin = linearize_about(disc_quad, X_ref, U_ref, dt=dt)
+    lin = disc_quad.linearize(traj)
     assert lin.A.shape == (N - 1, 12, 12)
     assert lin.B.shape == (N - 1, 12, 4)
     assert lin.n == 13
@@ -382,8 +376,7 @@ def test_linearize_about_rigidbody_quadrotor() -> None:
     assert lin.ne == 12
 
     # Cross-verify with dynamics_expansion
-    traj = Trajectory(X=X_ref, U=U_ref, t=jnp.arange(N) * dt, dt=jnp.full(N - 1, dt))
-    exp = dynamics_expansion(disc_quad, traj)
+    exp = disc_quad.dynamics_expansion(traj)
     np.testing.assert_allclose(lin.A, exp.A, rtol=1e-14, atol=1e-14)
     np.testing.assert_allclose(lin.B, exp.B, rtol=1e-14, atol=1e-14)
 
@@ -398,8 +391,9 @@ def test_linearize_about_taylor_prediction() -> None:
     u_ref = jnp.array([1.2])
     X_ref = jnp.stack([x_ref, disc_cartpole.discrete_dynamics(x_ref, u_ref, 0.0, dt)], axis=0)
     U_ref = jnp.expand_dims(u_ref, axis=0)
+    traj_ref = Trajectory(X=X_ref, U=U_ref, t=jnp.array([0.0, dt]), dt=jnp.array([dt]))
 
-    lin = linearize_about(disc_cartpole, X_ref, U_ref, dt=dt)
+    lin = disc_cartpole.linearize(traj_ref)
     A0 = lin.A[0]
     B0 = lin.B[0]
 
@@ -440,7 +434,8 @@ def test_transforms_equinox_jit_compatibility() -> None:
 
     @eqx.filter_jit
     def lin_traj(m: DiscretizedDynamics, X: jax.Array, U: jax.Array) -> LinearTrajectoryModel:
-        return linearize_about(m, X, U, dt=0.05)
+        traj = Trajectory(X=X, U=U, t=jnp.arange(6) * 0.05, dt=jnp.full(5, 0.05))
+        return m.linearize(traj)
 
     X_ref = jnp.zeros((6, 4))
     U_ref = jnp.zeros((5, 1))

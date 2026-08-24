@@ -7,7 +7,6 @@ from trajopt.models.transforms import (
     ControlRateModel,
     LinearTrajectoryModel,
     control_rate_cost,
-    linearize_about,
     with_control_rate_penalty,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "Quadrotor",
     "RigidBody",
     "control_rate_cost",
-    "linearize_about",
     "with_control_rate_penalty",
 ]

@@ -1,5 +1,6 @@
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -9,6 +10,10 @@ from trajopt.rotations.quaternion import (
     Quaternion,
 )
 from trajopt.trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from trajopt.expansions import Expansion
+    from trajopt.models.transforms import LinearTrajectoryModel
 
 IntegratorCallable = Callable[
     ["ContinuousDynamics", jax.Array, jax.Array, float | jax.Array, float | jax.Array], jax.Array
@@ -79,6 +84,33 @@ class AbstractModel(eqx.Module):
         x0_val = trajectory.X[0] if x0 is None else jnp.asarray(x0, dtype=trajectory.X.dtype)
         X_sim = _rollout_scan(self.discretize(), x0_val, trajectory.U, trajectory.t, trajectory.dt)
         return Trajectory(X=X_sim, U=trajectory.U, t=trajectory.t, dt=trajectory.dt)
+
+    def dynamics_expansion(self, trajectory: Trajectory) -> "Expansion":
+        """Stacked first-order dynamics expansion in error coordinates along trajectory."""
+        from trajopt.expansions import _dynamics_expansion  # noqa: PLC0415 -- avoid an import cycle
+
+        return _dynamics_expansion(self, trajectory)
+
+    def linearize(self, trajectory: Trajectory) -> "LinearTrajectoryModel":
+        """Linearize this model about trajectory, in error coordinates.
+
+        A continuous model is discretized with RK4 before linearizing.
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Reference trajectory holding states X of shape (N, n), controls U of shape (N-1, m),
+            times t of shape (N,), and step durations dt of shape (N-1,).
+
+        Returns
+        -------
+        LinearTrajectoryModel
+            Linearized model exposing stacked Jacobians A of shape (N-1, ne, ne) and
+            B of shape (N-1, ne, m).
+        """
+        from trajopt.models.transforms import _linearize_about  # noqa: PLC0415 -- avoid an import cycle
+
+        return _linearize_about(self, trajectory)
 
     def state_jacobian(
         self,

@@ -18,12 +18,7 @@ from trajopt.dynamics import (
     RK4,
     DiscretizedDynamics,
 )
-from trajopt.expansions import (
-    Expansion,
-    augmented_lagrangian_expansion,
-    cost_expansion,
-    dynamics_expansion,
-)
+from trajopt.expansions import Expansion
 from trajopt.models import Cartpole, Pendulum
 from trajopt.trajectory import Trajectory
 
@@ -52,7 +47,7 @@ def test_cross_dynamics_expansion_cartpole(jl_to: Any) -> None:
         dt=jnp.diff(t_np),
     )
 
-    exp_py = dynamics_expansion(discrete_py, traj_py)
+    exp_py = discrete_py.dynamics_expansion(traj_py)
 
     jl_rk4_jac = jl.seval("""
     function (model, x, u, t, dt)
@@ -98,7 +93,7 @@ def test_cross_dynamics_expansion_pendulum(jl_to: Any) -> None:
         dt=jnp.diff(t_np),
     )
 
-    exp_py = dynamics_expansion(discrete_py, traj_py)
+    exp_py = discrete_py.dynamics_expansion(traj_py)
 
     jl_rk4_jac = jl.seval("""
     function (model, x, u, t, dt)
@@ -185,7 +180,7 @@ def test_cross_cost_expansion_lqr_objective(jl_to: Any) -> None:
     """)
     traj_jl = jl_create_traj(X_np, U_np, N, dt)
 
-    exp_py = cost_expansion(obj_py, traj_py)
+    exp_py = obj_py.cost_expansion(traj_py)
 
     jl_knot_grad = jl.seval("""
     function (obj, traj, k)
@@ -290,7 +285,7 @@ def test_cross_cost_expansion_tracking_objective(jl_to: Any) -> None:
     )
     traj_pert_jl = jl_create_traj(X_pert, U_pert, N, dt)
 
-    exp_py = cost_expansion(obj_track_py, traj_pert_py)
+    exp_py = obj_track_py.cost_expansion(traj_pert_py)
 
     jl_track_grad = jl.seval("""
     function (obj, traj, k)
@@ -373,7 +368,7 @@ def test_cross_augmented_lagrangian_expansion(jl_to: Any) -> None:
         p_k = built_cons.p[k] + built_cons.bound_evaluators[k].p
         lam_list.append(jnp.array(rng.standard_normal(p_k)))
 
-    al_exp_py = augmented_lagrangian_expansion(built_cons, traj_py, base_exp, lam=lam_list, mu=mu)
+    al_exp_py = built_cons.augmented_lagrangian_expansion(traj_py, base_exp, lam=lam_list, mu=mu)
 
     jl_al_grad_hess = jl.seval("""
     function (X, U, x_min, x_max, u_min, u_max, x_goal, lam_stages, lam_term, mu, N)

@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -8,6 +9,11 @@ import numpy as np
 from trajopt.constraints.base import Constraint
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.constraints.linear import GoalConstraint
+
+if TYPE_CHECKING:
+    from trajopt.dynamics.base import AbstractModel
+    from trajopt.expansions import Expansion
+    from trajopt.trajectory import Trajectory
 
 BoxBound = (StateBound, ControlBound, BoundConstraint)
 
@@ -304,6 +310,19 @@ class BuiltConstraintList(eqx.Module):
     def build(self) -> "BuiltConstraintList":
         """Return self; already built."""
         return self
+
+    def augmented_lagrangian_expansion(
+        self,
+        state: "Trajectory",
+        expansion: "Expansion",
+        lam: "Sequence[jax.Array] | jax.Array | None" = None,
+        mu: "float | jax.Array" = 1.0,
+        model: "AbstractModel | None" = None,
+    ) -> "Expansion":
+        """Add augmented Lagrangian gradient and Hessian contributions into an existing Expansion."""
+        from trajopt.expansions import _augmented_lagrangian_expansion  # noqa: PLC0415 -- avoid an import cycle
+
+        return _augmented_lagrangian_expansion(self, state, expansion, lam, mu, model)
 
 
 class ConstraintList:

@@ -10,7 +10,6 @@ from trajopt.dynamics import (
     Euler,
     ImplicitMidpoint,
 )
-from trajopt.expansions import dynamics_expansion
 from trajopt.models import DubinsCar, Pendulum, Quadrotor
 from trajopt.rotations.quaternion import Quaternion
 from trajopt.trajectory import Trajectory

@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -5,6 +7,10 @@ import jax.numpy as jnp
 from trajopt.costs.base import CostFunction, QuadraticCostFunction
 from trajopt.costs.quadratic import promote_weights
 from trajopt.trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from trajopt.dynamics.base import AbstractModel
+    from trajopt.expansions import Expansion
 
 _MIN_HORIZON = 2
 
@@ -158,6 +164,12 @@ class Objective(eqx.Module):
         """Total cost sum_k l_k over the trajectory, as a scalar, in one batched pass."""
         stage_c = self.stage_cost.stage_costs(traj.X[:-1], traj.U, traj.t[:-1])
         return jnp.sum(stage_c) + self.terminal_cost.evaluate(traj.X[-1], None, traj.t[-1])
+
+    def cost_expansion(self, traj: Trajectory, model: "AbstractModel | None" = None) -> "Expansion":
+        """Stacked first- and second-order cost expansion in error coordinates along traj."""
+        from trajopt.expansions import _cost_expansion  # noqa: PLC0415 -- avoid an import cycle
+
+        return _cost_expansion(self, traj, model)
 
     def invert(self) -> "Objective":
         """Objective holding the inverted stage and terminal cost parameters."""

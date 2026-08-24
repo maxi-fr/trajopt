@@ -58,9 +58,6 @@ from trajopt.dynamics import (
 )
 from trajopt.expansions import (
     Expansion,
-    augmented_lagrangian_expansion,
-    cost_expansion,
-    dynamics_expansion,
 )
 from trajopt.models import (
     Cartpole,
@@ -71,7 +68,6 @@ from trajopt.models import (
     Quadrotor,
     RigidBody,
     control_rate_cost,
-    linearize_about,
     with_control_rate_penalty,
 )
 from trajopt.problem import (
@@ -198,7 +194,6 @@ __all__ = [
     "TrackingObjective",
     "Trajectory",
     "ZeroCone",
-    "augmented_lagrangian_expansion",
     "compute_constraint_violation",
     "constraint_bounds",
     "constraints_and_jac",
@@ -206,8 +201,6 @@ __all__ = [
     "controls",
     "cost",
     "cost_and_grad",
-    "cost_expansion",
-    "dynamics_expansion",
     "euler_step",
     "eval_f",
     "eval_g",
@@ -220,7 +213,6 @@ __all__ = [
     "initial_controls",
     "initial_states",
     "jacobian_sparsity_pattern",
-    "linearize_about",
     "primal_bounds",
     "rk4_step",
     "rollout_states",

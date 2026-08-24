@@ -13,6 +13,7 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import trajectory_to_z, z_to_trajectory
 
 if TYPE_CHECKING:
+    from trajopt.expansions import Expansion
     from trajopt.transcription.result import Solver, SolverStatus
 
 
@@ -57,6 +58,24 @@ class Problem(eqx.Module):
         self.obj = obj
         self.constraints = built_con
         self.N = N_val
+
+    def cost_expansion(self, traj: Trajectory) -> "Expansion":
+        """Stacked first- and second-order cost expansion in error coordinates along traj."""
+        return self.obj.cost_expansion(traj, self.model)
+
+    def dynamics_expansion(self, traj: Trajectory) -> "Expansion":
+        """Stacked first-order dynamics expansion in error coordinates along traj."""
+        return self.model.dynamics_expansion(traj)
+
+    def augmented_lagrangian_expansion(
+        self,
+        traj: Trajectory,
+        expansion: "Expansion",
+        lam: "Sequence[jax.Array] | jax.Array | None" = None,
+        mu: "float | jax.Array" = 1.0,
+    ) -> "Expansion":
+        """Add augmented Lagrangian gradient and Hessian contributions into an existing Expansion."""
+        return self.constraints.augmented_lagrangian_expansion(traj, expansion, lam, mu, self.model)
 
     def solve(self, state: "MPCState", solver: "Solver | None" = None) -> "MPCState":
         """Solve this problem from `state` with `solver`, returning an updated MPCState.
