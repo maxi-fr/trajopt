@@ -1,7 +1,5 @@
 # AGENT instructions
 
-Project: Model predictive control for closed-loop neurostimulation.
-
 ## Commands
 
 `uv` runs everything. Add dependencies with `uv add <package>` instead of editing `pyproject.toml`.
@@ -28,9 +26,10 @@ Make the goal verifiable first, a failing test that reproduces the bug or tests 
 
 ## Changes
 
-No unrelated churn. Reformatting, comment rewrites, and renames the task didn't call for bury the real change. Don't refactor code the task doesn't touch. Do restructure what you do touch: split the function you're editing if it needs it, change the surrounding structure rather than contorting new code into it, and say so.
+No unrelated churn. Don't refactor code the task doesn't touch. Do restructure what you do touch: split the function you're editing if it needs it, change the surrounding structure rather than contorting new code into it, and say so.
 
 Write the minimum that solves the problem. No features beyond the ask, no abstractions for single-use code, no configurability nobody requested, no error handling for states that can't happen.
+No unnecessary backward compatibility
 
 ## Conventions
 

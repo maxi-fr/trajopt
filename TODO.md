@@ -12,11 +12,3 @@
 * add examples marimo notebooks
 
 * make configurable
-
-* refactor Julia looking code to be more pythonic:
-
-  ```python
-  opt_state = solve(prob, state)
-  X = states(opt_state)
-  U = controls(opt_state)
-  ```
