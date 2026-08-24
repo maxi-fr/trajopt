@@ -47,6 +47,7 @@ packages = ["src/trajopt"]
 testpaths = ["test"]
 markers = [
     "julia: tests requiring Julia runtime and juliacall cross-verification (deselect with '-m \"not julia\"')",
+    "altro: julia cross-verification tests that also load Altro.jl, heavier than plain julia tests (deselect with '-m \"not altro\"')",
     "slow: correctness tests dominated by full nonlinear solves (deselect with '-m \"not slow\"')",
 ]
 
