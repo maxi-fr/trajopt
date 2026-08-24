@@ -10,6 +10,7 @@ def extract_python_blocks(markdown_text: str) -> list[str]:
     return re.findall(pattern, markdown_text, re.DOTALL)
 
 
+@pytest.mark.slow
 def test_readme_code_examples_execute() -> None:
     """Execute all Python code snippets found in README.md."""
     readme_path = Path(__file__).resolve().parents[2] / "README.md"

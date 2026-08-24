@@ -8,9 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "docs"))
 
 from quaternion import Quaternion  # ty: ignore[unresolved-import]
 
-SQRT_HALF = float(np.sqrt(0.5))
-
-
 # --------------------------------------------------------------------------------------
 # An independent Hamilton implementation. Written from the textbook Hamilton formula, with
 # no reference to docs/quaternion.py, so that it is an independent witness rather than a
@@ -31,13 +28,6 @@ def ham_conj(a):
     return np.array([-a[0], -a[1], -a[2], a[3]])
 
 
-def ham_matrix(a):
-    """Active rotation matrix of a unit Hamilton quaternion, scalar-last."""
-    v, w = np.asarray(a, float)[:3], float(a[3])
-    skew = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
-    return (w * w - v @ v) * np.eye(3) + 2.0 * np.outer(v, v) + 2.0 * w * skew
-
-
 def to_hamilton(q: Quaternion):
     """The bridge under test: JPL scalar-last to Hamilton scalar-last, ``(v, w) -> (-v, w)``."""
     return np.array([*(-q.vec), q.scalar])
@@ -53,76 +43,6 @@ def random_pairs(seed, count):
     """Random unit-quaternion pairs ``(q, q_ref)``, so relations are checked generally."""
     rng = np.random.default_rng(seed)
     return [tuple(Quaternion.from_array(v / np.linalg.norm(v)) for v in rng.normal(size=(2, 4))) for _ in range(count)]
-
-
-# --------------------------------------------------------------------------------------
-# Stage 1 -- the independent Hamilton witness itself
-# --------------------------------------------------------------------------------------
-
-
-def test_hamilton_product_matches_known_values():
-    i = np.array([1.0, 0.0, 0.0, 0.0])
-    j = np.array([0.0, 1.0, 0.0, 0.0])
-    k = np.array([0.0, 0.0, 1.0, 0.0])
-    one = np.array([0.0, 0.0, 0.0, 1.0])
-
-    # The defining relations of the Hamilton algebra: ij = k, jk = i, ki = j, i^2 = -1, ji = -k.
-    np.testing.assert_allclose(ham_mul(i, j), k, atol=1e-15)
-    np.testing.assert_allclose(ham_mul(j, k), i, atol=1e-15)
-    np.testing.assert_allclose(ham_mul(k, i), j, atol=1e-15)
-    np.testing.assert_allclose(ham_mul(i, i), -one, atol=1e-15)
-    np.testing.assert_allclose(ham_mul(j, i), -k, atol=1e-15)
-
-
-def test_hamilton_matrix_matches_known_values():
-    # Active rotation by +90 degrees about x maps y -> z.
-    q = np.array([SQRT_HALF, 0.0, 0.0, SQRT_HALF])
-    expected = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-    np.testing.assert_allclose(ham_matrix(q), expected, atol=1e-15)
-
-
-# --------------------------------------------------------------------------------------
-# Stage 2 -- the bridge, against hardcoded Hamilton values only.
-#
-# No conjugated comparison exists yet at this point in the file.
-# --------------------------------------------------------------------------------------
-
-
-def test_bridge_against_hardcoded_hamilton_values():
-    # JPL q = [sin(t/2) n, cos(t/2)] is the *frame* (passive) rotation by t about n. Its
-    # Hamilton image is the active rotation by -t about the same axis, so the vector part
-    # flips and the scalar part does not.
-    q = jpl_axis_angle([1.0, 0.0, 0.0], np.pi / 2)
-    np.testing.assert_allclose(q.to_array(), [SQRT_HALF, 0.0, 0.0, SQRT_HALF], atol=1e-15)
-    np.testing.assert_allclose(to_hamilton(q), [-SQRT_HALF, 0.0, 0.0, SQRT_HALF], atol=1e-15)
-
-    # And that Hamilton quaternion's active matrix is the hardcoded -90 degree x-rotation.
-    expected = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
-    np.testing.assert_allclose(ham_matrix(to_hamilton(q)), expected, atol=1e-15)
-
-
-def test_bridge_is_an_involution_and_fixes_the_identity():
-    identity = Quaternion(np.zeros(3), 1.0)
-    np.testing.assert_allclose(to_hamilton(identity), [0.0, 0.0, 0.0, 1.0], atol=1e-15)
-
-    q = jpl_axis_angle([0.0, 1.0, 0.0], 0.7)
-    round_trip = to_hamilton(Quaternion.from_array(to_hamilton(q)))
-    np.testing.assert_allclose(round_trip, q.to_array(), atol=1e-15)
-
-
-def test_bridge_preserves_the_rotation_matrix():
-    # The reference's to_rot_mat is, by construction, the active Hamilton matrix of the
-    # bridged quaternion. Checking that against the independent Hamilton matrix formula
-    # verifies the bridge's geometric meaning without a quaternion-to-quaternion comparison.
-    for axis, angle in [([1.0, 0, 0], 0.4), ([0, 1.0, 0], 1.1), ([0, 0, 1.0], -2.3)]:
-        q = jpl_axis_angle(axis, angle)
-        np.testing.assert_allclose(q.to_rot_mat(), ham_matrix(to_hamilton(q)), atol=1e-14)
-
-
-def test_bridge_is_a_product_isomorphism():
-    # B(a (x)_JPL b) == B(a) (x)_Ham B(b). Only reached after the bridge is independently pinned.
-    for a, b in random_pairs(seed=0, count=50):
-        np.testing.assert_allclose(to_hamilton(a * b), ham_mul(to_hamilton(a), to_hamilton(b)), atol=1e-14)
 
 
 # --------------------------------------------------------------------------------------

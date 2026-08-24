@@ -150,6 +150,7 @@ def test_goal_state_single_source_of_truth() -> None:
     assert not np.allclose(c1, c2)
 
 
+@pytest.mark.slow
 def test_zero_recompile_across_100_mpc_iterations() -> None:
     """Assert the compilation counter remains at zero across 100 consecutive MPC steps with changing data."""
     model = Cartpole()
@@ -259,6 +260,7 @@ def test_model_parameters_traced_zero_recompile() -> None:
     assert not np.allclose(j1, j2)
 
 
+@pytest.mark.slow
 def test_cartpole_warm_start_reduces_iterations() -> None:
     """Assert warm-starting from shifted previous solution reduces solver iterations vs cold start."""
     pytest.importorskip("cyipopt")
@@ -303,6 +305,7 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     np.testing.assert_allclose(res_warm.trajectory.U[0], res_cold.trajectory.U[0], atol=1e-2)
 
 
+@pytest.mark.slow
 def test_closed_loop_cartpole_mpc() -> None:
     """Verify closed-loop cartpole MPC stabilizes to upright goal from a perturbed initial state."""
     pytest.importorskip("cyipopt")

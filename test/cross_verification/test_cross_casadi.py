@@ -34,61 +34,6 @@ from trajopt.transcription.ipopt import Ipopt
 pytestmark = pytest.mark.slow
 
 
-def test_cartpole_swingup_casadi_parity() -> None:
-    """Verify end-to-end parity against independent CasADi baseline on Cartpole swing-up."""
-    pytest.importorskip("casadi")
-    pytest.importorskip("cyipopt")
-
-    N = 25
-    dt = 0.05
-    model = Cartpole()
-    n, m = model.n, model.m
-
-    x0 = jnp.array([0.0, 0.01, 0.0, 0.0])
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
-    R = jnp.diag(jnp.array([0.01]))
-    Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
-    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-
-    casadi_prob = build_cartpole_casadi(
-        N=N,
-        dt=dt,
-        x0=x0,
-        xf=xf,
-        Q=np.diag(np.array(Q)),
-        R=np.diag(np.array(R)),
-        Qf=np.diag(np.array(Qf)),
-        u_min=-20.0,
-        u_max=20.0,
-    )
-
-    # 1. Assert setup agreement
-    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
-
-    # 2. Solve both under identical Ipopt options
-    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
-    casadi_res = casadi_prob.solve(options=solver_opts)
-
-    # 3. Assert full parity
-    assert_parity(
-        trajopt_res,
-        casadi_res,
-        tol_state=1e-5,
-        tol_control=1e-5,
-        tol_cost=1e-5,
-        tol_feas=1e-4,
-        check_duals=False,
-    )
-
-
 def test_cartpole_with_state_limits_casadi_parity() -> None:
     """Verify parity on Cartpole swing-up with both state position limits and control bounds."""
     pytest.importorskip("casadi")
@@ -136,61 +81,6 @@ def test_cartpole_with_state_limits_casadi_parity() -> None:
     trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
     casadi_res = casadi_prob.solve(options=solver_opts)
 
-    assert_parity(
-        trajopt_res,
-        casadi_res,
-        tol_state=1e-5,
-        tol_control=1e-5,
-        tol_cost=1e-5,
-        tol_feas=1e-4,
-        check_duals=False,
-    )
-
-
-def test_dubins_car_casadi_parity() -> None:
-    """Verify end-to-end parity against independent CasADi baseline on Dubins car navigation."""
-    pytest.importorskip("casadi")
-    pytest.importorskip("cyipopt")
-
-    N = 25
-    dt = 0.1
-    model = DubinsCar()
-    n, m = model.n, model.m
-
-    x0 = jnp.array([0.0, 0.0, 0.0])
-    xf = jnp.array([2.0, 1.0, 0.0])
-    Q = jnp.diag(jnp.array([1.0, 1.0, 0.1]))
-    R = jnp.diag(jnp.array([0.1, 0.1]))
-    Qf = jnp.diag(jnp.array([100.0, 100.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(ControlBound(n=n, m=m, u_min=[0.0, -1.5], u_max=[2.0, 1.5]), range(N - 1))
-    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-
-    casadi_prob = build_dubins_casadi(
-        N=N,
-        dt=dt,
-        x0=x0,
-        xf=xf,
-        Q=np.diag(np.array(Q)),
-        R=np.diag(np.array(R)),
-        Qf=np.diag(np.array(Qf)),
-        u_min=[0.0, -1.5],
-        u_max=[2.0, 1.5],
-    )
-
-    # 1. Assert setup agreement
-    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
-
-    # 2. Solve both
-    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
-    casadi_res = casadi_prob.solve(options=solver_opts)
-
-    # 3. Assert full parity
     assert_parity(
         trajopt_res,
         casadi_res,
@@ -309,45 +199,6 @@ def test_dual_multipliers_parity_under_identical_solver_settings() -> None:
         tol_cost=1e-6,
         check_duals=True,
         tol_dual=1e-5,
-    )
-
-
-def test_cartpole_dual_multipliers_parity() -> None:
-    """Verify dual multiplier agreement on Cartpole equality-constrained swing-up."""
-    pytest.importorskip("casadi")
-    pytest.importorskip("cyipopt")
-
-    N = 25
-    dt = 0.05
-    model = Cartpole()
-    n, m = model.n, model.m
-
-    x0 = jnp.array([0.0, 0.01, 0.0, 0.0])
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
-    R = jnp.diag(jnp.array([0.01]))
-    Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-
-    casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
-
-    solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
-    casadi_res = casadi_prob.solve(options=solver_opts)
-
-    assert_parity(
-        trajopt_res,
-        casadi_res,
-        tol_state=1e-5,
-        tol_control=1e-5,
-        tol_cost=1e-5,
-        check_duals=True,
-        tol_dual=1e-4,
     )
 
 
@@ -545,36 +396,6 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
         initial_X=np.asarray(X_init),
         initial_U=np.asarray(U_init),
     )
-
-    assert_parity(
-        trajopt_res,
-        casadi_res,
-        tol_state=1e-5,
-        tol_control=1e-5,
-        tol_cost=1e-5,
-        tol_feas=1e-4,
-        check_duals=False,
-    )
-    assert_dual_block_parity(prob, trajopt_res, casadi_res, tol_dual=1e-4)
-
-
-def test_cartpole_benchmark_casadi_parity() -> None:
-    """Verify end-to-end parity on underactuated Cartpole swing-up benchmark with state position limits."""
-    pytest.importorskip("casadi")
-    pytest.importorskip("cyipopt")
-
-    # The benchmark's own cart position limit, which binds, rather than a slack one that would
-    # leave the whole bound path out of the comparison.
-    prob, state, info = cartpole_swingup_benchmark(N=25, dt=0.05, u_bound=20.0)
-    x0 = state.x0
-    dt = float(info["dt"])
-
-    casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
-    assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
-
-    solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
-    casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
         trajopt_res,

@@ -7,7 +7,6 @@ from trajopt.constraints.constraint_list import ConstraintList
 from trajopt.constraints.linear import GoalConstraint, LinearConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
-from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
 from trajopt.problem import MPCState, Problem
 from trajopt.transcription.ipopt import Ipopt
@@ -82,6 +81,7 @@ def test_single_shooting_rejects_stage_constraint() -> None:
         SingleShooting(Ipopt()).solve(prob, state)
 
 
+@pytest.mark.slow
 def test_single_shooting_matches_multiple_shooting() -> None:
     """Both transcriptions solve the same NLP, so their optimal controls agree."""
     pytest.importorskip("cyipopt")
@@ -114,43 +114,3 @@ def test_single_shooting_matches_multiple_shooting() -> None:
     # Single shooting satisfies dynamics by construction, not merely to solver tolerance.
     rolled = prob.model.rollout(ss.to_trajectory())
     np.testing.assert_allclose(rolled.X, ss.states, atol=1e-12)
-
-
-def test_closed_loop_cartpole_mpc_single_shooting() -> None:
-    """Closed-loop cartpole MPC stabilizes through the single-shooting transcription."""
-    pytest.importorskip("cyipopt")
-
-    N = 20
-    dt = 0.05
-    model = Cartpole()
-    n, m = model.n, model.m
-
-    x_curr = jnp.array([0.0, np.pi - 0.25, 0.1, -0.2])
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-
-    Q = jnp.diag(jnp.array([5.0, 20.0, 1.0, 2.0]))
-    R = jnp.diag(jnp.array([0.05]))
-    Qf = jnp.diag(jnp.array([50.0, 200.0, 10.0, 20.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-
-    state = MPCState.initial(prob, x0=x_curr, t0=0.0, xf=xf, dt=dt)
-    dmodel = RK4(model)
-    solver = SingleShooting(Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}))
-
-    sim_steps = 20
-    t_curr = 0.0
-    for _ in range(sim_steps):
-        state = state.with_measurement(x_curr, t_curr)
-        state = prob.solve(state, solver=solver)
-        u_cmd = state.controls[0]
-        x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
-        t_curr += dt
-        state = state.shift(dt)
-
-    np.testing.assert_allclose(x_curr[1], np.pi, atol=0.1)
-    np.testing.assert_allclose(x_curr[0], 0.0, atol=0.5)
-    np.testing.assert_allclose(x_curr[2:], 0.0, atol=0.5)

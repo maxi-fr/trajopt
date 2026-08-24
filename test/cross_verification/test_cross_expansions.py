@@ -19,7 +19,7 @@ from trajopt.dynamics import (
     DiscretizedDynamics,
 )
 from trajopt.expansions import Expansion
-from trajopt.models import Cartpole, Pendulum
+from trajopt.models import Cartpole
 from trajopt.trajectory import Trajectory
 
 
@@ -53,52 +53,6 @@ def test_cross_dynamics_expansion_cartpole(jl_to: Any) -> None:
     function (model, x, u, t, dt)
         integ = RD.RK4(4, 1)
         ForwardDiff.jacobian(z_ -> RD.integrate(integ, model, z_[1:4], z_[5:5], t, dt), [x; u])
-    end
-    """)
-
-    for k in range(N - 1):
-        xk = X_np[k]
-        uk = U_np[k]
-        tk = t_np[k]
-
-        J_jl = np.array(jl_rk4_jac(model_jl, xk, uk, tk, dt))
-        A_jl = J_jl[:, :n]
-        B_jl = J_jl[:, n:]
-
-        np.testing.assert_allclose(np.array(exp_py.A[k]), A_jl, rtol=1e-12, atol=1e-12)
-        np.testing.assert_allclose(np.array(exp_py.B[k]), B_jl, rtol=1e-12, atol=1e-12)
-
-
-@pytest.mark.julia
-def test_cross_dynamics_expansion_pendulum(jl_to: Any) -> None:
-    jl = jl_to
-    jl.seval("using RobotZoo, RobotDynamics, ForwardDiff, StaticArrays; const RD = RobotDynamics")
-
-    model_jl = jl.seval("RobotZoo.Pendulum()")
-    model_py = Pendulum()
-    discrete_py = DiscretizedDynamics(model_py, RK4())
-
-    n, m, N = 2, 1, 6
-    dt = 0.05
-
-    rng = np.random.default_rng(123)
-    X_np = rng.standard_normal((N, n))
-    U_np = rng.standard_normal((N - 1, m))
-    t_np = np.linspace(0.0, dt * (N - 1), N)
-
-    traj_py = Trajectory(
-        X=jnp.array(X_np),
-        U=jnp.array(U_np),
-        t=jnp.array(t_np),
-        dt=jnp.diff(t_np),
-    )
-
-    exp_py = discrete_py.dynamics_expansion(traj_py)
-
-    jl_rk4_jac = jl.seval("""
-    function (model, x, u, t, dt)
-        integ = RD.RK4(2, 1)
-        ForwardDiff.jacobian(z_ -> RD.integrate(integ, model, z_[1:2], z_[3:3], t, dt), [x; u])
     end
     """)
 

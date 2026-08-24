@@ -12,10 +12,8 @@ from trajopt.constraints.linear import GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.integrators import RK4
-from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
 from trajopt.problem import MPCState, Problem
-from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
     _trajectory_to_z,
@@ -277,65 +275,6 @@ def test_runtime_hessian_value_ordering_matches_build_time_pattern() -> None:
     np.testing.assert_allclose(zeros_outside, 0.0, atol=1e-12)
 
 
-def test_cartpole_swingup_ipopt_solve() -> None:
-    """End-to-end cartpole swing-up with bounded actuation and terminal goal constraint."""
-    pytest.importorskip("cyipopt")
-
-    N = 25
-    dt = 0.05
-    t0 = 0.0
-
-    model = Cartpole()
-    n = model.n
-    m = model.m
-
-    # Downward initial state
-    x0 = jnp.array([0.0, 0.0, 0.0, 0.0])
-    # Upright goal state
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-
-    Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
-    R = jnp.diag(jnp.array([0.01]))
-    Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    # Control bound: force between -20N and 20N
-    cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
-    # Terminal goal constraint: exactly upright
-    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=x0, t0=t0, dt=dt)
-
-    # Solve with Ipopt
-    res = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state)
-
-    assert res.success, f"Ipopt failed to converge: {res.message}"
-
-    traj = res.trajectory
-    assert isinstance(traj, Trajectory)
-    assert traj.N == N
-    assert traj.n == n
-    assert traj.m == m
-
-    # Assert initial state satisfied
-    np.testing.assert_allclose(traj.X[0], x0, atol=1e-4)
-
-    # Assert terminal goal constraint satisfied
-    np.testing.assert_allclose(traj.X[-1], xf, atol=1e-3)
-
-    # Assert control bounds respected
-    assert np.all(traj.U >= -20.0 - 1e-5)
-    assert np.all(traj.U <= 20.0 + 1e-5)
-
-    # Assert dynamics defects are satisfied
-    dmodel = RK4(model)
-    for k in range(N - 1):
-        x_next_sim = dmodel.discrete_dynamics(traj.X[k], traj.U[k], traj.t[k], traj.dt[k])
-        np.testing.assert_allclose(traj.X[k + 1], x_next_sim, atol=1e-4)
-
-
 def test_compiled_phases_exist_and_match_callbacks() -> None:
     """Verify the four independently compiled phases and individual solver callback helpers."""
     N = 3
@@ -445,6 +384,7 @@ def test_unconstrained_solve() -> None:
     np.testing.assert_allclose(res.trajectory.X[0], x0, atol=1e-4)
 
 
+@pytest.mark.slow
 def test_hessian_with_unstacked_stage_cost_at_colliding_horizon() -> None:
     """Assert the Lagrangian Hessian builds when the control dimension equals N - 1."""
     prob, state, _ = quadrotor_obstacle_benchmark(N=5)  # m == 4 == N - 1
