@@ -469,180 +469,6 @@ def test_cost_expansion_generic_terminal() -> None:
     np.testing.assert_allclose(np.array(exp.Q[-1]), Q_term_fd, rtol=1e-4, atol=1e-4)
 
 
-def test_augmented_lagrangian_expansion_goal_equality() -> None:
-    n, m, N = 3, 2, 6
-    xf = jnp.array([1.0, 2.0, -1.0])
-    gcon = GoalConstraint(n=n, xf=xf, m=m)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(gcon, N - 1)
-    built_cons = cl.build()
-
-    obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), xf, N)
-    rng = np.random.default_rng(10)
-    X_np = rng.standard_normal((N, n))
-    U_np = rng.standard_normal((N - 1, m))
-    traj = Trajectory(
-        X=jnp.array(X_np),
-        U=jnp.array(U_np),
-        t=jnp.linspace(0.0, 0.5, N),
-        dt=jnp.diff(jnp.linspace(0.0, 0.5, N)),
-    )
-
-    base_exp = obj.cost_expansion(traj)
-
-    lam_term = jnp.array([0.5, -0.8, 1.2])
-    mu = 4.0
-    lam_list = [jnp.zeros(0) for _ in range(N - 1)] + [lam_term]
-
-    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
-
-    # Stages 0..N-2 should have no AL changes
-    for k in range(N - 1):
-        np.testing.assert_allclose(al_exp.q[k], base_exp.q[k])
-        np.testing.assert_allclose(al_exp.Q[k], base_exp.Q[k])
-        np.testing.assert_allclose(al_exp.r[k], base_exp.r[k])
-        np.testing.assert_allclose(al_exp.R[k], base_exp.R[k])
-        np.testing.assert_allclose(al_exp.H[k], base_exp.H[k])
-
-    # Terminal stage should have exact AL contribution
-    c_term = X_np[-1] - np.array(xf)
-    expected_q_al = 2.0 * np.array(lam_term) + mu * c_term
-    expected_Q_al = mu * np.eye(n)
-
-    q_diff = np.array(al_exp.q[-1] - base_exp.q[-1])
-    Q_diff = np.array(al_exp.Q[-1] - base_exp.Q[-1])
-
-    np.testing.assert_allclose(q_diff, expected_q_al, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(Q_diff, expected_Q_al, rtol=1e-12, atol=1e-12)
-
-
-def test_augmented_lagrangian_expansion_bounds_inequality() -> None:
-    n, m, N = 2, 1, 5
-    x_max = jnp.array([2.0, 1.0])
-    u_max = jnp.array([0.5])
-
-    sbnd = StateBound(n=n, x_max=x_max, m=m)
-    ubnd = ControlBound(m=m, u_max=u_max, n=n)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(sbnd, range(N - 1))
-    cl.add_constraint(ubnd, range(N - 1))
-    built_cons = cl.build()
-
-    obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), jnp.zeros(n), N)
-
-    # Choose states such that knot 0 violates bounds (active) and knot 1 is well below (inactive)
-    X = jnp.array(
-        [
-            [2.5, 1.2],  # Violates x_max (active)
-            [-1.0, -0.5],  # Well below x_max (inactive)
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [0.0, 0.0],
-        ]
-    )
-    U = jnp.array(
-        [
-            [1.0],  # Violates u_max (active)
-            [-2.0],  # Inactive
-            [0.0],
-            [0.0],
-        ]
-    )
-    traj = Trajectory(X=X, U=U, t=jnp.linspace(0.0, 0.4, N), dt=jnp.diff(jnp.linspace(0.0, 0.4, N)))
-
-    base_exp = obj.cost_expansion(traj)
-    mu = 10.0
-    lam_stage = jnp.array([0.1, 0.2, 0.3])
-    lam_list = [lam_stage] * (N - 1) + [jnp.zeros(0)]
-
-    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
-
-    # Knot 0 (active violation) -> should have significant positive Hessian contributions
-    Q_al_0 = np.array(al_exp.Q[0] - base_exp.Q[0])
-    R_al_0 = np.array(al_exp.R[0] - base_exp.R[0])
-    np.testing.assert_allclose(Q_al_0, mu * np.eye(n), rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(R_al_0, mu * np.eye(m), rtol=1e-12, atol=1e-12)
-
-    # Knot 1 (inactive) -> shift is negative, max(0, shift) = 0 -> AL contribution is 0
-    Q_al_1 = np.array(al_exp.Q[1] - base_exp.Q[1])
-    R_al_1 = np.array(al_exp.R[1] - base_exp.R[1])
-    np.testing.assert_allclose(Q_al_1, np.zeros((n, n)), atol=1e-12)
-    np.testing.assert_allclose(R_al_1, np.zeros((m, m)), atol=1e-12)
-
-
-def test_augmented_lagrangian_expansion_soc() -> None:
-    n, m, N = 3, 1, 4
-    norm_con = NormConstraint(n=n, m=m, val=2.0, inds=[0, 1], sense=SecondOrderCone())
-    assert isinstance(norm_con.cone, SecondOrderCone)
-
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(norm_con, range(N - 1))
-    built_cons = cl.build()
-
-    obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), jnp.zeros(n), N)
-
-    # Knot 0 outside cone (||v|| = 3.0 > s = 2.0) -> active penalty
-    X = jnp.array(
-        [
-            [3.0, 0.0, 0.0],
-            [0.5, 0.5, 0.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        ]
-    )
-    U = jnp.zeros((N - 1, m))
-    traj = Trajectory(X=X, U=U, t=jnp.linspace(0.0, 0.3, N), dt=jnp.diff(jnp.linspace(0.0, 0.3, N)))
-
-    base_exp = obj.cost_expansion(traj)
-    mu = 5.0
-    lam_knot = jnp.array([0.1, 0.2, 0.3])
-    lam_list = [lam_knot] * (N - 1) + [jnp.zeros(0)]
-
-    al_exp = built_cons.augmented_lagrangian_expansion(traj, base_exp, lam=lam_list, mu=mu)
-
-    # Verify that AL gradient and Hessian at knot 0 match finite differences of AL penalty
-    eps = 1e-5
-    xk = X[0]
-    uk = U[0]
-
-    def al_pen(x_in: jax.Array, u_in: jax.Array) -> jax.Array:
-        val = norm_con.evaluate(x_in, u_in, 0.0)
-        shifted = val + lam_knot / mu
-        proj = norm_con.cone.project_dual(shifted)
-        return jnp.dot(lam_knot, proj) + 0.5 * mu * jnp.dot(proj, proj)
-
-    # Gradient q_al
-    q_fd = np.zeros(n)
-    for i in range(n):
-        dx = np.zeros(n)
-        dx[i] = eps
-        p_plus = float(al_pen(xk + dx, uk))
-        p_minus = float(al_pen(xk - dx, uk))
-        q_fd[i] = (p_plus - p_minus) / (2.0 * eps)
-
-    q_al_actual = np.array(al_exp.q[0] - base_exp.q[0])
-    np.testing.assert_allclose(q_al_actual, q_fd, rtol=1e-4, atol=1e-4)
-
-    # Hessian Q_al
-    Q_fd = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            dxi = np.zeros(n)
-            dxj = np.zeros(n)
-            dxi[i] = eps
-            dxj[j] = eps
-            p_pp = float(al_pen(xk + dxi + dxj, uk))
-            p_pm = float(al_pen(xk + dxi - dxj, uk))
-            p_mp = float(al_pen(xk - dxi + dxj, uk))
-            p_mm = float(al_pen(xk - dxi - dxj, uk))
-            Q_fd[i, j] = (p_pp - p_pm - p_mp + p_mm) / (4.0 * eps * eps)
-
-    Q_al_actual = np.array(al_exp.Q[0] - base_exp.Q[0])
-    np.testing.assert_allclose(Q_al_actual, Q_fd, rtol=1e-4, atol=1e-4)
-
-
 def test_error_coordinates_with_mock_attitude_jacobian() -> None:
     # Test error coordinates on a mock system where n=3, ne=2, and G(x) is 3x2 with G^T G = I_2
     class MockManifoldModel(ContinuousDynamics):
@@ -764,10 +590,10 @@ def test_quadrotor_sandwiched_dynamics_expansion() -> None:
         np.testing.assert_allclose(exp_dyn.B[k], B_bar, rtol=1e-12, atol=1e-12)
 
 
-def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
-    """Assert Quadrotor cost and AL expansions are properly sandwiched in 12-dimensional error coordinates."""
+def test_quadrotor_sandwiched_cost_expansion() -> None:
+    """Assert Quadrotor cost expansion is properly sandwiched in 12-dimensional error coordinates."""
     model, traj = _sample_quadrotor_trajectory(n_knots=5)
-    n, ne, m, N = 13, 12, 4, 5
+    ne, m, N = 12, 4, 5
 
     xf = traj.X[-1]
     uf = jnp.zeros(m)
@@ -782,21 +608,6 @@ def test_quadrotor_sandwiched_cost_and_al_expansion() -> None:
     assert exp_cost.r.shape == (N - 1, m)
     assert exp_cost.R.shape == (N - 1, m, m)
     assert exp_cost.H.shape == (N - 1, m, ne)
-
-    cons = ConstraintList(n=n, m=m, N=N)
-    q_target = xf[3:7]
-    cons.add_constraint(QuatVecEq(n=n, qf=q_target, m=m), N - 1)
-    built_cons = cons.build()
-
-    lam_list = [jnp.zeros(built_cons.p[k]) for k in range(N)]
-    lam_list[-1] = jnp.array([0.5, -0.5, 0.2])
-    al_exp = problem.augmented_lagrangian_expansion(traj, exp_cost, lam=lam_list, mu=10.0)
-    assert al_exp.q.shape == (N, ne)
-    assert al_exp.Q.shape == (N, ne, ne)
-
-    assert al_exp.r.shape == (N - 1, m)
-    assert al_exp.R.shape == (N - 1, m, m)
-    assert al_exp.H.shape == (N - 1, m, ne)
 
 
 def _euclidean_dubins_problem(weights: str) -> tuple[Problem, Trajectory, float, jax.Array]:

@@ -14,6 +14,7 @@ from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
 if TYPE_CHECKING:
     from trajopt.expansions import Expansion
+    from trajopt.solvers.al import ALConstraints
     from trajopt.transcription.result import Solver, SolverStatus
 
 
@@ -67,16 +68,6 @@ class Problem(eqx.Module):
         """Stacked first-order dynamics expansion in error coordinates along traj."""
         return self.model.dynamics_expansion(traj)
 
-    def augmented_lagrangian_expansion(
-        self,
-        traj: Trajectory,
-        expansion: "Expansion",
-        lam: "Sequence[jax.Array] | jax.Array | None" = None,
-        mu: "float | jax.Array" = 1.0,
-    ) -> "Expansion":
-        """Add augmented Lagrangian gradient and Hessian contributions into an existing Expansion."""
-        return self.constraints.augmented_lagrangian_expansion(traj, expansion, lam, mu, self.model)
-
     def solve(self, state: "MPCState", solver: "Solver | None" = None) -> "MPCState":
         """Solve this problem from `state` with `solver`, returning an updated MPCState.
 
@@ -121,6 +112,7 @@ class Problem(eqx.Module):
             m=state.m,
             N=state.N,
             status=normalize_status(success=res.success, message=res.message),
+            al=state.al,
         )
 
     def cost(self, state: "MPCState") -> jax.Array:
@@ -160,6 +152,10 @@ class MPCState(eqx.Module):
     status : SolverStatus | None
         Normalized outcome of the last solve ("converged", "infeasible", "iteration_limit",
         "error"), or None before any solve has run.
+    al : ALConstraints | None
+        Padded augmented-Lagrangian duals and penalties (ticket 28), or None before an AL solve
+        has populated them. Distinct from `lam` / `mu`, which keep their transcription meaning;
+        carried as a pytree field so AL warm-starts survive across MPC steps.
     """
 
     x0: jax.Array
@@ -173,6 +169,7 @@ class MPCState(eqx.Module):
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
     status: "SolverStatus | None" = eqx.field(static=True, default=None)
+    al: "ALConstraints | None" = None
 
     @classmethod
     def initial(  # noqa: PLR0913 -- Initial state factory takes 7 arguments
@@ -297,6 +294,7 @@ class MPCState(eqx.Module):
             m=self.m,
             N=self.N,
             status=self.status,
+            al=self.al,
         )
 
     def with_goal(self, xf: jax.Array | Sequence[float]) -> "MPCState":
@@ -333,6 +331,7 @@ class MPCState(eqx.Module):
             m=self.m,
             N=self.N,
             status=self.status,
+            al=self.al,
         )
 
     def shift(self, dt: float | jax.Array | None = None) -> "MPCState":
@@ -370,6 +369,7 @@ class MPCState(eqx.Module):
             m=self.m,
             N=self.N,
             status=self.status,
+            al=self.al,
         )
 
     @property
@@ -411,6 +411,7 @@ class MPCState(eqx.Module):
             m=self.m,
             N=self.N,
             status=self.status,
+            al=self.al,
         )
 
     def with_controls(self, U0: jax.Array) -> "MPCState":
@@ -440,6 +441,7 @@ class MPCState(eqx.Module):
             m=self.m,
             N=self.N,
             status=self.status,
+            al=self.al,
         )
 
     def to_trajectory(self) -> Trajectory:
