@@ -59,7 +59,7 @@ repos:
 
       - id: pytest
         name: pytest
-        entry: uv run pytest -n 4
+        entry: uv run pytest -n 2
         language: system
         pass_filenames: false
         always_run: true

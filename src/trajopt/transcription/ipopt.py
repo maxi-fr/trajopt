@@ -181,7 +181,16 @@ class Ipopt:
 
     def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
         """Solve the transcribed optimal control problem using Ipopt via cyipopt."""
-        import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
+        try:
+            import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
+        except ImportError as e:
+            msg = (
+                "cyipopt is not installed. It is part of the `solvers` extra: install with "
+                '`pip install "trajopt[solvers]"` or `uv add "trajopt[solvers]"`, which compiles '
+                "cyipopt against a system Ipopt (see the README's Installation section). "
+                "Alternatively, pass a different solver to Problem.solve, e.g. OSQP() or ALTRO()."
+            )
+            raise ImportError(msg) from e
 
         N = int(problem.N)
         n = int(problem.model.n)

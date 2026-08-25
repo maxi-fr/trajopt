@@ -250,7 +250,14 @@ class OSQP:
 
     def solve(self, problem: Problem, state: MPCState) -> OSQPResult:
         """Solve the transcribed optimal control problem using OSQP."""
-        import osqp  # noqa: PLC0415 -- osqp is an optional solver dependency
+        try:
+            import osqp  # noqa: PLC0415 -- osqp is an optional solver dependency
+        except ImportError as e:
+            msg = (
+                "osqp is not installed. It is part of the `solvers` extra: install with "
+                '`pip install "trajopt[solvers]"` or `uv add "trajopt[solvers]"`.'
+            )
+            raise ImportError(msg) from e
 
         N = int(problem.N)
         n = int(problem.model.n)

@@ -303,7 +303,14 @@ class Clarabel:
 
     def solve(self, problem: Problem, state: MPCState) -> ClarabelResult:
         """Solve the transcribed optimal control problem using Clarabel."""
-        import clarabel  # noqa: PLC0415 -- clarabel is an optional solver dependency
+        try:
+            import clarabel  # noqa: PLC0415 -- clarabel is an optional solver dependency
+        except ImportError as e:
+            msg = (
+                "clarabel is not installed. It is part of the `solvers` extra: install with "
+                '`pip install "trajopt[solvers]"` or `uv add "trajopt[solvers]"`.'
+            )
+            raise ImportError(msg) from e
 
         settings_cls: Any = getattr(clarabel, "DefaultSettings")  # noqa: B009 -- clarabel is an untyped C-extension
         solver_cls: Any = getattr(clarabel, "DefaultSolver")  # noqa: B009 -- clarabel is an untyped C-extension

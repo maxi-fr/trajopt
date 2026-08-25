@@ -28,5 +28,4 @@ build/
 htmlcov/
 .julia_env/
 .env
-!.env.example
 scratch/

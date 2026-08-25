@@ -11,41 +11,15 @@ __version__ = "0.1.0"
 jax.config.update("jax_enable_x64", val=True)
 
 
-def load_env_file(dotenv_path: str | Path | None = None) -> None:
-    """Load key-value pairs from a .env file into os.environ if not already present."""
-    if dotenv_path is None:
-        # Search current working directory and parent directories (up to 4 levels)
-        cwd = Path.cwd()
-        for p in [cwd, *cwd.parents[:4]]:
-            candidate = p / ".env"
-            if candidate.is_file():
-                dotenv_path = candidate
-                break
-
-    if not dotenv_path or not Path(dotenv_path).is_file():
-        return
-
-    with (
-        contextlib.suppress(OSError, UnicodeDecodeError),
-        Path(dotenv_path).open(encoding="utf-8") as f,
-    ):
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip("'\"")
-            if key and key not in os.environ:
-                os.environ[key] = val
-
-
 def setup_ipopt_dlls() -> None:
-    """On Windows, ensure Ipopt DLL directories are added to Python's DLL search paths."""
+    """On Windows, register Ipopt's DLL directory so cyipopt can load it at runtime.
+
+    Reads ``IPOPT_DIR`` or ``IPOPT_BIN_DIR`` from the environment (set to the extracted COIN-OR
+    Ipopt install; see the README), falling back to conventional install locations. A no-op on
+    Linux and macOS, where Ipopt is found through the system library search.
+    """
     if sys.platform != "win32":
         return
-
-    load_env_file()
 
     ipopt_dir = os.environ.get("IPOPT_DIR")
     search_dirs = [
@@ -61,5 +35,5 @@ def setup_ipopt_dlls() -> None:
                 os.add_dll_directory(directory)
 
 
-# Automatically configure environment and DLL paths upon module import
+# Register Ipopt's DLL directory on Windows at import time.
 setup_ipopt_dlls()

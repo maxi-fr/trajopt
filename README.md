@@ -16,13 +16,24 @@ Inspired by the Julia library [`TrajectoryOptimization.jl`](https://github.com/R
 
 ---
 
-## Installation (Python / `uv`)
+## Installation
 
-This project uses [`uv`](https://docs.astral.sh/uv/) for fast, reproducible Python environment and dependency management.
+### Using the package in your own project
 
-### 1. Prerequisites (Ipopt & Build Tools)
+`trajopt` is installed from git. To use the external solvers (Ipopt, OSQP, Clarabel), install the `solvers` extra:
 
-Because `cyipopt` compiles C++ extensions against the underlying COIN-OR Ipopt solver, ensure system prerequisites are installed:
+```bash
+# uv
+uv add Cython setuptools wheel
+uv add "trajopt[solvers]" --git https://github.com/maxi-fr/trajopt.git
+
+# pip
+pip install Cython setuptools wheel
+pip install "trajopt[solvers] @ git+https://github.com/maxi-fr/trajopt.git"
+```
+
+- **OSQP and Clarabel** install as prebuilt wheels — they work immediately, with no system dependencies.
+- **cyipopt (the Ipopt backend)** compiles from source against the underlying COIN-OR Ipopt solver, so ensure these system prerequisites are installed:
 
 #### Windows
 
@@ -55,29 +66,30 @@ export PKG_CONFIG_PATH="$(brew --prefix ipopt)/lib/pkgconfig:$PKG_CONFIG_PATH"
 
 ---
 
-### 2. Configure Environment (`.env`)
+#### Runtime: finding Ipopt on Windows
 
-Copy `.env.example` to `.env` (or create `.env`) and set the path to your Ipopt installation:
+`trajopt` registers the Ipopt DLL directory with `os.add_dll_directory()` at import on Windows, so no manual DLL loading code is needed in your scripts. Set one of these environment variables to your extracted Ipopt install:
 
 ```ini
-# Ipopt installation directory (Windows / Custom source builds)
 IPOPT_DIR="C:/Ipopt/Ipopt-3.14.19-win64-msvs2022-md"
+# or, to point directly at the binaries:
 IPOPT_BIN_DIR="C:/Ipopt/Ipopt-3.14.19-win64-msvs2022-md/bin"
-PKG_CONFIG_PATH="C:/Ipopt/Ipopt-3.14.19-win64-msvs2022-md/lib/pkgconfig"
 ```
 
-> **Note for Windows:** `trajopt` automatically reads `.env` on import and registers the DLL directory with `os.add_dll_directory()`, so you do not need manual DLL loading code in your scripts.
+On Linux and macOS no runtime variable is needed — Ipopt is found through the system library search.
+
+`Problem.solve(state)` defaults to the Ipopt backend. Install the `solvers` extra above (a bare install raises a guided `ImportError`), or pass a backend explicitly — `OSQP()` from `trajopt.transcription.osqp`, `Clarabel()` from `trajopt.transcription.clarabel`, or the native `ALTRO()` from `trajopt.solvers.altro`, which needs no external installs at all.
 
 ---
 
-### 3. Sync & Install with `uv`
+### Developing this repository
 
-Run `uv sync` to create the virtual environment and install dependencies:
+Clone the repo and sync with [`uv`](https://docs.astral.sh/uv/) for fast, reproducible environment and dependency management:
 
 ```powershell
 # On Windows (ensures Cython build tools are available before compiling cyipopt):
 uv venv
-uv pip install Cython setuptools wheel
+uv add Cython setuptools wheel
 uv sync --all-extras
 ```
 
@@ -159,10 +171,11 @@ solver loop is a `lax.while_loop`/`lax.scan`, so a whole solve is one jittable, 
 repeatedly-solved path (e.g. receding-horizon MPC via `jax.jit`/`jax.vmap` over the traced core),
 not feature parity: the native solvers are not reverse-mode differentiable, and constraints go
 through shooting (`ILQR`/`AL`/`ALTRO`) or PN's own multiple-shooting layout, not the general NLP
-transcription `transcription/` builds for Ipopt. `ALTRO().solve()` is a *thin eager wrapper* that
-does not itself `jax.jit` the traced core, so a bare one-off call pays full untraced dispatch
-overhead; see `docs/adr/0001-altro-port-divergences.md`'s benchmark section for measured numbers
-against Ipopt, both as called through `.solve()` and hand-jitted.
+transcription `transcription/` builds for Ipopt. `ALTRO().solve()` is a *thin eager wrapper* around
+the traced core, but does call `jax.jit` on it internally, caching the compiled closure per solver
+instance and problem identity -- so a bare first call pays a one-off compile, and every repeated
+`.solve()` call on the same instance and problem (e.g. an MPC loop) reuses that compilation; see
+`docs/adr/0001-altro-port-divergences.md`'s benchmark section for measured numbers against Ipopt.
 
 - **`ILQR`** -- unconstrained (or box-only, via the control-limited variant below) iterative LQR.
   Cheapest of the three; reach for it when the problem has no general constraints, or when a

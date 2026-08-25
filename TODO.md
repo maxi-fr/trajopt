@@ -2,10 +2,9 @@
 
 * Clean up the __init__.py
 * make tests faster
-  * split workers (2) between cross_verification and others maybe
-  * cross tests very slow
+  * new ALTRO tests
 
-* Implement: SQP adapter, ALTRO, iLQR
+* Implement: SQP adapter
 
 * Remove unnecessary configurability. Many if else blocks
 
@@ -18,3 +17,9 @@
 * solver and problem have solve methods?
 
 * when should a method be implemented by a base class and when should it be a function?
+
+* I want a configurable benchmark: bring your own predictor and decide which solver works the best for your case
+
+* OSQP deprecation warning
+
+* ALTRO profiling and optimization
