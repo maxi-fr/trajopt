@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.cones import ZeroCone
+from trajopt.cones import AbstractCone, NegativeOrthant, ZeroCone
 from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
@@ -52,6 +52,12 @@ class ALConstraints(eqx.Module):
         (`ZeroCone`); False maps to `Inequality` (`NegativeOrthant`, including every box bound).
     p_cons_max : int
         Padded width of the constraint-only block (excludes the box-bound rows).
+    is_conic : bool, optional
+        Which sign convention `lam` was built/updated under (finding E): False (default) is the
+        non-conic `lambda_bar = lambda + mu*c` convention this class's own duals normally carry;
+        True marks a `lam` produced by `conic_dual_update`'s `lambda_bar = lambda - mu*c`
+        convention instead. Purely a tag for `AL.solve` to catch a warm-start across the switch
+        (ticket 31) -- nothing here converts between the two automatically. Defaults to False.
     """
 
     lam: jax.Array
@@ -59,14 +65,23 @@ class ALConstraints(eqx.Module):
     row_mask: jax.Array
     is_equality: jax.Array
     p_cons_max: int = eqx.field(static=True)
+    is_conic: bool = eqx.field(default=False, static=True)
 
     @classmethod
-    def build(cls, constraints: BuiltConstraintList, penalty_initial: float = 1.0) -> "ALConstraints":
+    def build(
+        cls,
+        constraints: BuiltConstraintList,
+        penalty_initial: float = 1.0,
+        *,
+        use_conic_cost: bool = False,
+    ) -> "ALConstraints":
         """Allocate a fresh padded AL layout for `constraints`, lambda=0 and mu=penalty_initial on real rows.
 
         Structural (row_mask, is_equality) computation is eager Python/NumPy over `constraints`,
         run once when a Problem is set up rather than under trace, since it depends only on
-        constraint structure, not on any trajectory.
+        constraint structure, not on any trajectory. `use_conic_cost` only tags the resulting
+        `is_conic` field (lambda=0 either way, so the sign convention is moot until the first
+        dual update); pass `options.use_conic_cost` so `AL.solve`'s warm-start check has it.
         """
         N = constraints.N
         n = constraints.n
@@ -101,7 +116,9 @@ class ALConstraints(eqx.Module):
         lam = jnp.zeros((N, p_max), dtype=jnp.float64)
         mu = jnp.where(row_mask, jnp.asarray(penalty_initial, dtype=jnp.float64), 0.0)
 
-        return cls(lam=lam, mu=mu, row_mask=row_mask, is_equality=is_equality, p_cons_max=p_cons_max)
+        return cls(
+            lam=lam, mu=mu, row_mask=row_mask, is_equality=is_equality, p_cons_max=p_cons_max, is_conic=use_conic_cost
+        )
 
 
 def _evaluate_constraint_block(
@@ -320,13 +337,254 @@ def add_al_expansion(
     )
 
 
-def dual_update(al: ALConstraints, C: jax.Array, options: SolverOptions) -> ALConstraints:
+class ConeBlock(NamedTuple):
+    """One structural (knots, row-range, cone) block of the padded AL row layout.
+
+    A conic penalty projects a whole constraint's residual vector onto its cone at once, not
+    row by row (reference ticket 31: this is exactly what the non-conic path's row-independent
+    `is_equality` mask cannot express for `SecondOrderCone`). `_cone_blocks` computes these
+    eagerly from `constraints`' static structure; every field here is Python/static, never traced.
+
+    Parameters
+    ----------
+    knots : tuple[int, ...]
+        Knot indices this block applies to.
+    row_start : int
+        Column offset into the padded `(N, p_max)` layout where this block's rows begin.
+    row_len : int
+        Number of columns (`p_c`) this block spans.
+    cone : AbstractCone
+        The constraint's own (primal) cone `K`; the conic penalty projects onto its dual `K*`.
+    """
+
+    knots: tuple[int, ...]
+    row_start: int
+    row_len: int
+    cone: AbstractCone
+
+
+def _cone_blocks(al: ALConstraints, constraints: BuiltConstraintList) -> tuple[ConeBlock, ...]:
+    """Build static per-constraint row blocks for the conic penalty path, one per `constraints.groups` entry.
+
+    Mirrors `ALConstraints.build`'s row offsets exactly: within each structural group, blocks are
+    laid out in `group.evaluator.constraints` order, matching how `_evaluate_constraint_block`
+    concatenates constituent constraints' `evaluate()`/`jacobian()` outputs into that group's
+    columns. One trailing block covers the padded box-bound columns for every knot; `NegativeOrthant`
+    acts elementwise, so treating all `2n + 2m` bound columns as one block is exact, not an
+    approximation, and reuses the same block machinery instead of special-casing bounds.
+    """
+    blocks: list[ConeBlock] = []
+    for g in constraints.groups:
+        off = 0
+        for c in g.evaluator.constraints:
+            if c.p > 0:
+                blocks.append(ConeBlock(knots=g.knots, row_start=off, row_len=c.p, cone=c.cone))
+            off += c.p
+
+    n, m, N = constraints.n, constraints.m, constraints.N
+    bound_width = 2 * n + 2 * m
+    if bound_width > 0:
+        blocks.append(
+            ConeBlock(knots=tuple(range(N)), row_start=al.p_cons_max, row_len=bound_width, cone=NegativeOrthant())
+        )
+    return tuple(blocks)
+
+
+def _conic_cost_block(cone: AbstractCone, lam: jax.Array, mu: jax.Array, c: jax.Array, mask: jax.Array) -> jax.Array:
+    """One knot's block conic penalty cost, Altro's generic `alcost(alcon, i)`: `0.5*(lamp'lams - lam'Iu*lam)`."""
+    dual_cone = cone.dual()
+    mu_safe = jnp.where(mask, mu, 1.0)
+    lam_bar = lam - mu_safe * c
+    lam_p = jnp.where(mask, dual_cone.project(lam_bar), 0.0)
+    mu_inv = jnp.where(mask, 1.0 / mu_safe, 0.0)
+    return 0.5 * (jnp.sum(lam_p * mu_inv * lam_p) - jnp.sum(lam * mu_inv * lam))
+
+
+def _conic_grad_hess_block(  # noqa: PLR0913, PLR0917 -- one array per Altro `algrad!`/`alhess!` input, no bundle helps
+    cone: AbstractCone, lam: jax.Array, mu: jax.Array, c: jax.Array, Jc: jax.Array, mask: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """One knot's block conic penalty grad/Gauss-Newton-plus-second-order hess, Altro's generic `algrad!`/`alhess!`.
+
+    Finding D: `grad = -Jc' Iu proj' lams` (the reference's `-nabla c' nabla Pi' lams` is missing
+    the `Iu` factor `algrad!` actually applies). The Hessian carries `algrad!`'s dual-cone
+    Jacobian and `alhess!`'s second-order projection term; both are recomputed here from `lam_bar`
+    rather than threaded in from a prior call, so nothing depends on call order (ticket 31).
+    """
+    dual_cone = cone.dual()
+    mu_safe = jnp.where(mask, mu, 0.0)
+    lam_bar = lam - mu_safe * c
+    iu_jc = mu_safe[:, None] * Jc
+    dproj = dual_cone.jacobian(lam_bar)
+    lam_p = dual_cone.project(lam_bar)
+    mu_inv = jnp.where(mask, 1.0 / jnp.where(mask, mu, 1.0), 0.0)
+    lam_s = mu_inv * lam_p
+
+    tmp = -dproj @ iu_jc
+    grad = tmp.T @ lam_s
+
+    iu_dproj = mu_inv[:, None] * dproj
+    d2proj = dual_cone.hessian(lam_bar, lam_s) + dproj.T @ iu_dproj
+    hess = iu_jc.T @ (d2proj @ iu_jc)
+    return grad, hess
+
+
+def _conic_dual_update_block(
+    cone: AbstractCone, lam: jax.Array, mu: jax.Array, c: jax.Array, mask: jax.Array
+) -> jax.Array:
+    """One knot's block conic dual update, Altro's generic `dualupdate!`: `lam <- Pi_{K*}(lam - mu*c)`."""
+    dual_cone = cone.dual()
+    mu_safe = jnp.where(mask, mu, 0.0)
+    return dual_cone.project(lam - mu_safe * c)
+
+
+def conic_al_cost(al: ALConstraints, C: jax.Array, constraints: BuiltConstraintList) -> jax.Array:
+    """Compute the generic conic augmented Lagrangian penalty cost (`options.use_conic_cost=True`), Altro's `alcost`.
+
+    Sums `_conic_cost_block` over every `_cone_blocks(al, constraints)` block; block count is
+    bounded by constraint structure, not `N`, matching the non-conic path's scaling.
+
+    Parameters
+    ----------
+    al : ALConstraints
+        Current duals and penalties, in the **conic** sign convention (finding E).
+    C : jax.Array
+        Padded constraint residuals of shape (N, p_max), from `evaluate_al_constraints`.
+    constraints : BuiltConstraintList
+        Supplies the per-constraint cone structure `_cone_blocks` needs.
+
+    Returns
+    -------
+    jax.Array
+        Scalar penalty cost.
+    """
+    total = jnp.zeros((), dtype=C.dtype)
+    for block in _cone_blocks(al, constraints):
+        knots = jnp.asarray(block.knots)
+        rows = slice(block.row_start, block.row_start + block.row_len)
+        cost_b = jax.vmap(_conic_cost_block, in_axes=(None, 0, 0, 0, 0))(
+            block.cone, al.lam[knots, rows], al.mu[knots, rows], C[knots, rows], al.row_mask[knots, rows]
+        )
+        total = total + jnp.sum(cost_b)
+    return total
+
+
+def conic_al_grad_hess(
+    al: ALConstraints,
+    C: jax.Array,
+    Jx_err: jax.Array,
+    Ju: jax.Array,
+    constraints: BuiltConstraintList,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Compute the generic conic augmented Lagrangian gradient/Hessian (`options.use_conic_cost=True`), Altro's `algrad!`/`alhess!`.
+
+    Unlike the non-conic `al_grad_hess`, the Hessian is not pure Gauss-Newton: it includes the
+    dual cone's second-order projection term (reference §5.3, finding D), so it is not exact for
+    affine constraints in general -- only for cones (`ZeroCone`, `NegativeOrthant`) whose
+    projection Jacobian is constant, where the second-order term is structurally zero.
+
+    Parameters
+    ----------
+    al : ALConstraints
+        Current duals and penalties, in the **conic** sign convention (finding E).
+    C : jax.Array
+        Padded constraint residuals of shape (N, p_max).
+    Jx_err : jax.Array
+        Padded state Jacobian in error coordinates, shape (N, p_max, ne).
+    Ju : jax.Array
+        Padded control Jacobian, shape (N, p_max, m).
+    constraints : BuiltConstraintList
+        Supplies the per-constraint cone structure `_cone_blocks` needs.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+        `(grad_x, grad_u, Hxx, Huu, Hux)` of shapes (N, ne), (N, m), (N, ne, ne), (N, m, m),
+        (N, m, ne), summed over every block a knot participates in.
+    """
+    N, ne = Jx_err.shape[0], Jx_err.shape[-1]
+    m = Ju.shape[-1]
+    dtype = C.dtype
+    grad_x = jnp.zeros((N, ne), dtype=dtype)
+    grad_u = jnp.zeros((N, m), dtype=dtype)
+    Hxx = jnp.zeros((N, ne, ne), dtype=dtype)
+    Huu = jnp.zeros((N, m, m), dtype=dtype)
+    Hux = jnp.zeros((N, m, ne), dtype=dtype)
+
+    for block in _cone_blocks(al, constraints):
+        knots = jnp.asarray(block.knots)
+        rows = slice(block.row_start, block.row_start + block.row_len)
+        jc = jnp.concatenate([Jx_err[knots, rows, :], Ju[knots, rows, :]], axis=-1)
+        grad_b, hess_b = jax.vmap(_conic_grad_hess_block, in_axes=(None, 0, 0, 0, 0, 0))(
+            block.cone, al.lam[knots, rows], al.mu[knots, rows], C[knots, rows], jc, al.row_mask[knots, rows]
+        )
+        grad_x = grad_x.at[knots].add(grad_b[:, :ne])
+        grad_u = grad_u.at[knots].add(grad_b[:, ne:])
+        Hxx = Hxx.at[knots].add(hess_b[:, :ne, :ne])
+        Huu = Huu.at[knots].add(hess_b[:, ne:, ne:])
+        Hux = Hux.at[knots].add(hess_b[:, ne:, :ne])
+
+    return grad_x, grad_u, Hxx, Huu, Hux
+
+
+def conic_dual_update(
+    al: ALConstraints, C: jax.Array, constraints: BuiltConstraintList, options: SolverOptions
+) -> ALConstraints:
+    """Apply the generic conic dual update (`options.use_conic_cost=True`), Altro's `dualupdate!`: `lam <- Pi_{K*}(lam - mu*c)`.
+
+    Clamped to `+-dual_max` afterward, same as the non-conic `dual_update`. Marks the returned
+    `ALConstraints.is_conic = True`, so `AL.solve` can detect a later warm-start under the
+    opposite convention (finding E).
+    """
+    new_lam = al.lam
+    for block in _cone_blocks(al, constraints):
+        knots = jnp.asarray(block.knots)
+        rows = slice(block.row_start, block.row_start + block.row_len)
+        mask_b = al.row_mask[knots, rows]
+        updated_b = jax.vmap(_conic_dual_update_block, in_axes=(None, 0, 0, 0, 0))(
+            block.cone, al.lam[knots, rows], al.mu[knots, rows], C[knots, rows], mask_b
+        )
+        clamped_b = jnp.clip(updated_b, -options.dual_max, options.dual_max)
+        new_lam = new_lam.at[knots, rows].set(jnp.where(mask_b, clamped_b, 0.0))
+    # is_conic is a static field (aux_data, not a pytree leaf): eqx.tree_at can only target leaves,
+    # so setting it requires rebuilding the Module directly rather than tree_at-ing it alongside lam.
+    return ALConstraints(
+        lam=new_lam, mu=al.mu, row_mask=al.row_mask, is_equality=al.is_equality, p_cons_max=al.p_cons_max, is_conic=True
+    )
+
+
+def dual_update(
+    al: ALConstraints,
+    C: jax.Array,
+    options: SolverOptions,
+    constraints: "BuiltConstraintList | None" = None,
+) -> ALConstraints:
     """Update lambda, Altro's `dualupdate!`: equality `lam <- lam + mu*c`, inequality `lam <- max(0, lam + mu*c)`.
 
     Uses the full `mu`, not the active-gated `a` (Altro's dual update always applies the full
     penalty). Both branches are then clamped to `+-dual_max`, matching the unconditional clamp
     Altro applies after the cone-specific branch. Masked rows stay at lambda = 0.
+
+    When `options.use_conic_cost` is set, dispatches to `conic_dual_update` instead (finding E's
+    opposite sign convention), which needs `constraints` for its per-constraint cone structure.
+    `options` is static Python config (never traced), so this is a plain `if`, not a traced
+    select -- resolved once when the caller's `lax.while_loop` body is traced.
+
+    Parameters
+    ----------
+    al : ALConstraints
+        Current duals and penalties.
+    C : jax.Array
+        Padded constraint residuals of shape (N, p_max).
+    options : SolverOptions
+        Supplies `dual_max` and `use_conic_cost`.
+    constraints : BuiltConstraintList | None, optional
+        Required (and only used) when `options.use_conic_cost` is True. Defaults to None.
     """
+    if options.use_conic_cost:
+        if constraints is None:
+            msg = "dual_update(..., options.use_conic_cost=True) requires `constraints`."
+            raise ValueError(msg)
+        return conic_dual_update(al, C, constraints, options)
     raw = al.lam + al.mu * C
     updated = jnp.where(al.is_equality, raw, jnp.maximum(0.0, raw))
     clamped = jnp.clip(updated, -options.dual_max, options.dual_max)
@@ -375,12 +633,17 @@ class _ALObjective(eqx.Module):
     constraints: BuiltConstraintList
     model: AbstractModel
     al: ALConstraints
+    options: SolverOptions = eqx.field(static=True)
 
     def cost(self, traj: Trajectory) -> jax.Array:
-        """Add the augmented-Lagrangian penalty cost `al_cost` onto the base unconstrained cost."""
+        """Add the augmented-Lagrangian penalty cost onto the base unconstrained cost.
+
+        Dispatches to `conic_al_cost` when `options.use_conic_cost` (ticket 31), else `al_cost`.
+        """
         base = self.obj.cost(traj)
         C, _Jx, _Ju = evaluate_al_constraints(self.al, self.constraints, self.model, traj)
-        return base + al_cost(self.al, C)
+        penalty = conic_al_cost(self.al, C, self.constraints) if self.options.use_conic_cost else al_cost(self.al, C)
+        return base + penalty
 
 
 class _ALProblem(eqx.Module):
@@ -394,6 +657,7 @@ class _ALProblem(eqx.Module):
 
     problem: Problem
     al: ALConstraints
+    options: SolverOptions = eqx.field(static=True)
 
     @property
     def model(self) -> AbstractModel:
@@ -403,17 +667,33 @@ class _ALProblem(eqx.Module):
     @property
     def obj(self) -> _ALObjective:
         """Build the AL-augmented cost-function adapter fresh from the current duals."""
-        return _ALObjective(self.problem.obj, self.problem.constraints, self.problem.model, self.al)
+        return _ALObjective(self.problem.obj, self.problem.constraints, self.problem.model, self.al, self.options)
 
     def dynamics_expansion(self, traj: Trajectory) -> Expansion:
         """Pass through the wrapped problem's unconstrained dynamics expansion."""
         return self.problem.dynamics_expansion(traj)
 
     def cost_expansion(self, traj: Trajectory) -> Expansion:
-        """Add the AL penalty's gradient/Hessian onto the base cost expansion, via `add_al_expansion`."""
+        """Add the AL penalty's gradient/Hessian onto the base cost expansion.
+
+        Dispatches to `conic_al_grad_hess` when `options.use_conic_cost` (ticket 31), else
+        `add_al_expansion`'s Gauss-Newton form.
+        """
         base = self.problem.cost_expansion(traj)
-        C, Jx_err, Ju = evaluate_al_constraints(self.al, self.problem.constraints, self.problem.model, traj)
-        return add_al_expansion(base, self.al, C, Jx_err, Ju)
+        constraints = self.problem.constraints
+        C, Jx_err, Ju = evaluate_al_constraints(self.al, constraints, self.problem.model, traj)
+        if not self.options.use_conic_cost:
+            return add_al_expansion(base, self.al, C, Jx_err, Ju)
+        grad_x, grad_u, Hxx, Huu, Hux = conic_al_grad_hess(self.al, C, Jx_err, Ju, constraints)
+        return Expansion(
+            A=base.A,
+            B=base.B,
+            q=base.q + grad_x,
+            r=base.r + grad_u[:-1],
+            Q=base.Q + Hxx,
+            R=base.R + Huu[:-1],
+            H=base.H + Hux[:-1],
+        )
 
 
 class ALStats(eqx.Module):
@@ -563,7 +843,7 @@ def _al_step(
     cost_tol = jnp.where(is_last, options.cost_tolerance, options.cost_tolerance_intermediate)
     grad_tol = jnp.where(is_last, options.gradient_tolerance, options.gradient_tolerance_intermediate)
 
-    wrapped = _ALProblem(problem=problem, al=carry.al)
+    wrapped = _ALProblem(problem=problem, al=carry.al, options=options)
     # _ALProblem duck-types Problem's (model, obj, dynamics_expansion, cost_expansion) surface --
     # the whole composition seam -- without being one; ilqr_solve only ever calls through that
     # surface, so the cast is a type-checker formality, not a behavioral claim.
@@ -579,7 +859,7 @@ def _al_step(
     inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
 
     C, _Jx_err, _Ju = evaluate_al_constraints(carry.al, problem.constraints, problem.model, new_traj)
-    J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al).cost(new_traj)
+    J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al, options).cost(new_traj)
     c_max = max_violation(carry.al, C)
     mu_max = max_penalty(carry.al)
 
@@ -597,7 +877,7 @@ def _al_step(
     conv_status, conv_done = _evaluate_al_convergence(c_max, mu_max, inner_stats.iterations, iter_num, options)
 
     skip_dual_update = inner_failed | conv_done
-    al_updated = penalty_update(dual_update(carry.al, C, options), options)
+    al_updated = penalty_update(dual_update(carry.al, C, options, problem.constraints), options)
     new_al = jax.tree.map(lambda new, old: jnp.where(skip_dual_update, old, new), al_updated, carry.al)
 
     final_status = jnp.where(inner_failed, inner_status, conv_status)
@@ -748,12 +1028,32 @@ class AL:
     options: SolverOptions = field(default_factory=SolverOptions)
 
     def solve(self, problem: Problem, state: MPCState) -> ALResult:
-        """Run the traced AL outer loop from `state`'s warm-start trajectory/duals and boundary-convert the result."""
+        """Run the traced AL outer loop from `state`'s warm-start trajectory/duals and boundary-convert the result.
+
+        Raises
+        ------
+        ValueError
+            `state.al` carries duals built under the opposite `use_conic_cost` convention
+            (finding E: the conic and non-conic paths store lambda with opposite signs) and
+            `options.reset_duals` is False, so warm-starting them would silently reinterpret the
+            sign (ticket 31). Set `options.reset_duals=True` to discard the old duals instead.
+        """
         options = self.options
         problem_eff, init_traj = build_warm_start(problem, state)
 
-        fresh_al = ALConstraints.build(problem_eff.constraints, penalty_initial=options.penalty_initial)
+        fresh_al = ALConstraints.build(
+            problem_eff.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
+        )
         if state.al is not None:
+            if not options.reset_duals and bool(state.al.is_conic) != options.use_conic_cost:
+                msg = (
+                    f"state.al was built with use_conic_cost={bool(state.al.is_conic)}, but "
+                    f"options.use_conic_cost={options.use_conic_cost}. The two conventions store "
+                    "lambda with opposite signs (finding E), so warm-starting across the switch "
+                    "would silently reinterpret it. Set options.reset_duals=True to discard the "
+                    "old duals, or keep use_conic_cost consistent with the state that produced them."
+                )
+                raise ValueError(msg)
             lam = fresh_al.lam if options.reset_duals else state.al.lam
             mu = fresh_al.mu if options.reset_penalties else state.al.mu
             init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))
@@ -765,7 +1065,7 @@ class AL:
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
         C, _Jx, _Ju = evaluate_al_constraints(final_al, problem_eff.constraints, problem_eff.model, final_traj)
-        final_cost = _ALObjective(problem_eff.obj, problem_eff.constraints, problem_eff.model, final_al).cost(
+        final_cost = _ALObjective(problem_eff.obj, problem_eff.constraints, problem_eff.model, final_al, options).cost(
             final_traj
         )
 
