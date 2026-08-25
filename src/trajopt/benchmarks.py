@@ -594,9 +594,14 @@ class NativeVsIpoptTiming(NamedTuple):
     Parameters
     ----------
     ipopt_time_s : float
-        Ipopt solve duration in seconds, discarded warmup solve excluded.
+        Ipopt solve duration in seconds, mean over `n_repeats` warm calls (the one-off Ipopt
+        process/extension warmup excluded).
     altro_time_s : float
-        Native ALTRO solve duration in seconds, discarded (JIT-compiling) warmup solve excluded.
+        Native ALTRO solve duration in seconds, mean over `n_repeats` warm calls -- i.e. the
+        `ALTRO().solve()` path the library ships, which calls `altro.py`'s module-level cached
+        `jax.jit` core, so the one-off compile (the first, discarded call) is excluded and every
+        measured call reuses that same compilation, the repeated-call MPC regime the cache exists
+        for.
     speedup : float
         `ipopt_time_s / altro_time_s`; greater than one means ALTRO solved faster.
     """
@@ -612,24 +617,35 @@ def measure_altro_vs_ipopt(
     *,
     ipopt_options: Mapping[str, Any] | None = None,
     altro_options: SolverOptions | None = None,
+    n_repeats: int = 5,
 ) -> NativeVsIpoptTiming:
     """Time a native `ALTRO` solve against the `Ipopt` adapter on the same problem and initial state.
 
-    Each solver runs once and is discarded first, so the measured solve is not dominated by
-    Ipopt's C++ extension warmup or ALTRO's `lax.while_loop` JIT compilation, matching
-    `measure_solver_runtime`'s pattern.
+    Each solver runs once and is discarded first (Ipopt's C++ extension warmup, ALTRO's
+    `jax.jit` compile), then `n_repeats` further calls are timed and averaged, so the reported
+    number is the warm/repeat-call regime `ALTRO`'s jitted core is designed for (repeated
+    `.solve()` calls on the same solver instance and problem shape, e.g. MPC), not a single
+    sample that could land on a compilation.
+
+    Parameters
+    ----------
+    n_repeats : int, optional
+        Number of warm calls averaged per solver, after the one discarded warmup call. Defaults
+        to 5.
     """
     ipopt = Ipopt(options=dict(ipopt_options) if ipopt_options else {})
     _ = ipopt.solve(problem, state)
     t_start = time.perf_counter()
-    _ = ipopt.solve(problem, state)
-    t_ipopt = time.perf_counter() - t_start
+    for _ in range(n_repeats):
+        _ = ipopt.solve(problem, state)
+    t_ipopt = (time.perf_counter() - t_start) / n_repeats
 
     altro = ALTRO(options=altro_options or SolverOptions())
     _ = altro.solve(problem, state)
     t_start = time.perf_counter()
-    _ = altro.solve(problem, state)
-    t_altro = time.perf_counter() - t_start
+    for _ in range(n_repeats):
+        _ = altro.solve(problem, state)
+    t_altro = (time.perf_counter() - t_start) / n_repeats
 
     return NativeVsIpoptTiming(
         ipopt_time_s=t_ipopt,

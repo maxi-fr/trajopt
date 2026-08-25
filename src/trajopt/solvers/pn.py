@@ -36,6 +36,7 @@ import numpy as np
 
 from trajopt.expansions import _stage_cost_expansion, _terminal_cost_expansion
 from trajopt.problem import MPCState, Problem
+from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.al import ALConstraints, _evaluate_bound_block, _evaluate_constraint_block
 from trajopt.solvers.ilqr import build_warm_start
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
@@ -550,6 +551,27 @@ def pn_solve(
     return final_traj, final.stats, final.duals, status
 
 
+_pn_solve_jit_slot = JitCacheSlot()
+
+
+def _jit_pn_solve(
+    problem: Problem, trajectory: Trajectory, x0: jax.Array, options: SolverOptions
+) -> tuple[Trajectory, PNStats, jax.Array, jax.Array]:
+    """`pn_solve`, jit-compiled and cached per `(problem identity, options)`, called from `PN.solve()`.
+
+    `problem` is closed over via `functools.partial` rather than passed as a jit argument
+    (`JitCacheSlot`'s docstring has the reason: `PNLayout.build(problem)` reads its constraint
+    bounds with eager `np.asarray`, which breaks under trace). The returned closure is reused
+    across calls with the same `problem` object and `options`, so repeated same-shape calls (e.g.
+    MPC) hit XLA's compilation cache instead of recompiling. `altro_solve`'s own internal call to
+    `pn_solve` is left un-wrapped: it already runs inside `ALTRO.solve()`'s own jitted core
+    (`altro.py`'s `_jit_altro_solve`), so wrapping it again would just nest one jit inside another
+    for no benefit.
+    """
+    jitted = _pn_solve_jit_slot.get_or_build(pn_solve, problem, key=options, options=options)
+    return jitted(trajectory=trajectory, x0=x0)
+
+
 class PNResult(NamedTuple):
     """Result of a native Projected Newton polish solve, satisfying the `SolverResult` protocol.
 
@@ -624,7 +646,7 @@ class PN:
         problem_eff, init_traj = build_warm_start(problem, state)
         x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
 
-        final_traj, stats, duals, status_int = pn_solve(problem_eff, init_traj, x0_arr, options)
+        final_traj, stats, duals, status_int = _jit_pn_solve(problem_eff, init_traj, x0_arr, options)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

@@ -1,3 +1,4 @@
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -10,7 +11,7 @@ import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.al import ALConstraints, ALStats, al_cost, al_solve, evaluate_al_constraints, max_violation
+from trajopt.solvers.al import ALConstraints, ALStats, _jit_al_solve, al_cost, evaluate_al_constraints, max_violation
 from trajopt.solvers.ilqr import SolveKD, build_warm_start
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
@@ -299,6 +300,22 @@ def make_control_bound_solve_kd(lo: jax.Array, hi: jax.Array) -> Callable[[Traje
     return build
 
 
+@functools.lru_cache(maxsize=32)
+def _cached_control_bound_solve_kd_builder(
+    lo_key: tuple[float, ...], hi_key: tuple[float, ...]
+) -> Callable[[Trajectory], SolveKD]:
+    """Memoized `make_control_bound_solve_kd`, keyed on `lo`/`hi`'s concrete values.
+
+    `BoxQP.solve()` passes its `solve_kd_builder` to `jax.jit`'s `_jit_al_solve` as a static
+    argument (Python callables cannot be traced), so `jax.jit`'s compilation cache -- which hashes
+    static arguments by identity for anything without value-based `__eq__`/`__hash__` -- would miss
+    on every call if a fresh closure were built each time, even when the bounds themselves (the
+    common MPC case: fixed control limits, only the state changing) have not changed. Returning
+    the same closure object for the same concrete bounds restores the cache hit.
+    """
+    return make_control_bound_solve_kd(jnp.asarray(lo_key), jnp.asarray(hi_key))
+
+
 def extract_uniform_control_bounds(constraints: BuiltConstraintList) -> tuple[jax.Array, jax.Array]:
     """Extract one `(lo, hi)` control-bound pair for box-QP routing, eager over `constraints`.
 
@@ -422,7 +439,9 @@ class BoxQP:
         constraints = problem_eff.constraints
 
         lo, hi = extract_uniform_control_bounds(constraints)
-        solve_kd_builder = make_control_bound_solve_kd(lo, hi)
+        solve_kd_builder = _cached_control_bound_solve_kd_builder(
+            tuple(np.asarray(lo).tolist()), tuple(np.asarray(hi).tolist())
+        )
 
         neutral_u_lower = jnp.full_like(constraints.u_lower, -jnp.inf)
         neutral_u_upper = jnp.full_like(constraints.u_upper, jnp.inf)
@@ -438,7 +457,7 @@ class BoxQP:
         else:
             init_al = fresh_al
 
-        final_traj, final_al, stats, status_int = al_solve(
+        final_traj, final_al, stats, status_int = _jit_al_solve(
             problem_eff, init_traj, init_al, options, solve_kd_builder=solve_kd_builder, u_bounds=(lo, hi)
         )
 

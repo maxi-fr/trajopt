@@ -12,6 +12,7 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import MPCState, Problem
+from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
@@ -799,6 +800,35 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
     return final.trajectory, final.stats, final.status
 
 
+_GOAL_OVERRIDE_CACHE_MAXSIZE = 32
+_goal_override_cache: dict[tuple[int, tuple[float, ...]], Problem] = {}
+
+
+def _cached_goal_override(problem: Problem, xf_val: jax.Array) -> Problem:
+    """Memoized `eqx.tree_at` goal override, keyed on `(id(problem), xf`'s concrete value)`.
+
+    `build_warm_start` would otherwise call `eqx.tree_at` -- which always allocates a new
+    `Problem` -- on every call whose objective regulates to a goal, even when `xf` hasn't
+    actually changed since the last call. That defeats the jitted cores' `JitCacheSlot`, whose
+    reuse is keyed on `problem`'s identity: a fresh object every `.solve()` call means a fresh
+    compile every call, no better than not jitting, for the common MPC case of replanning
+    toward the same goal across consecutive steps. Returning the same `problem_eff` object for
+    the same `(problem, xf)` pair restores the hit. A genuinely new goal still produces a
+    genuinely new object (and a fresh compile) -- the goal is baked into the jitted core as a
+    compile-time constant by this architecture, a residual limitation documented in the ADR,
+    not something this cache papers over.
+    """
+    key = (id(problem), tuple(np.asarray(xf_val, dtype=np.float64).tolist()))
+    cached = _goal_override_cache.get(key)
+    if cached is not None:
+        return cached
+    problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+    if len(_goal_override_cache) >= _GOAL_OVERRIDE_CACHE_MAXSIZE:
+        _goal_override_cache.clear()
+    _goal_override_cache[key] = problem_eff
+    return problem_eff
+
+
 def build_warm_start(problem: Problem, state: MPCState) -> tuple[Problem, Trajectory]:
     """Build the eager warm-start trajectory and goal-overridden problem from `state`.
 
@@ -833,9 +863,27 @@ def build_warm_start(problem: Problem, state: MPCState) -> tuple[Problem, Trajec
 
     problem_eff = problem
     if xf_val is not None and problem.obj.regulates_to_goal:
-        problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+        problem_eff = _cached_goal_override(problem, xf_val)
 
     return problem_eff, init_traj
+
+
+_ilqr_solve_jit_slot = JitCacheSlot()
+
+
+def _jit_ilqr_solve(
+    problem: Problem, trajectory: Trajectory, options: SolverOptions
+) -> tuple[Trajectory, SolverStats, jax.Array]:
+    """`ilqr_solve`, jit-compiled and cached per `(problem identity, options)`, shared by `ILQR.solve()` and `ALTRO.solve()`'s unconstrained shortcut.
+
+    `problem` is closed over via `functools.partial` rather than passed as a jit argument
+    (`JitCacheSlot`'s docstring has the reason: `problem`'s constraint bounds are read with eager
+    `np.asarray` during layout construction, which breaks under trace). The returned closure is
+    reused across calls with the same `problem` object and `options`, so repeated same-shape calls
+    (e.g. MPC) hit XLA's compilation cache instead of recompiling.
+    """
+    jitted = _ilqr_solve_jit_slot.get_or_build(ilqr_solve, problem, key=options, options=options, solve_kd_builder=None)
+    return jitted(trajectory=trajectory)
 
 
 def _trim_stats(stats: SolverStats, n_iter: int) -> SolverStats:
@@ -920,7 +968,7 @@ class ILQR:
         """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result."""
         problem_eff, init_traj = build_warm_start(problem, state)
 
-        final_traj, stats, status_int = ilqr_solve(problem_eff, init_traj, self.options)
+        final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, self.options)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

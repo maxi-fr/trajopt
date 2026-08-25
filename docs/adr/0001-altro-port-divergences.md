@@ -139,6 +139,30 @@ are already being traced. The cost is wasted computation whenever PN would not h
 (`run_pn` false): PN's projection still runs and its result is simply discarded. Never a
 behavioural difference, only a compute cost.
 
+### The PN gate is a two-level check, and a `MAX_ITERATIONS_OUTER` exit is never upgraded
+
+Julia's `opts.force_pn` and the `status <= SOLVE_SUCCEEDED || force_pn` gate wrap the *whole* PN
+polish block, including an inner `status in {<=SOLVE_SUCCEEDED, MAX_ITERATIONS_OUTER}` check.
+Because `MAX_ITERATIONS_OUTER`'s ordinal is not `<= SOLVE_SUCCEEDED`, the outer gate excludes a
+`MAX_ITERATIONS_OUTER` exit from PN entirely unless `force_pn` is set -- the inner check's own
+`MAX_ITERATIONS_OUTER` branch is dead upstream except when `force_pn` already forces `run_pn`
+regardless of status. `altro_solve` (`src/trajopt/solvers/altro.py`) reproduces both levels
+explicitly (`outer_gate` then `inner_condition`, combined as `run_pn = outer_gate & inner_condition`)
+rather than collapsing them into one expression -- an earlier draft of this port did collapse them,
+which let PN run (and its trajectory get selected) on a `MAX_ITERATIONS_OUTER` exit that Altro
+itself would never polish. Covered by
+`test_altro_pn_does_not_run_on_max_iterations_outer_without_force_pn` in `test/unit/test_altro.py`.
+
+Faithfully reproducing that gate carries a second, deliberately-unfixed consequence: the backup
+check's status upgrade (`al_status_ok & (c_max2 < options.constraint_tolerance)`) requires
+`al_status <= SOLVE_SUCCEEDED`, the same ordinal guard. A `MAX_ITERATIONS_OUTER` exit is therefore
+never upgraded to `SOLVE_SUCCEEDED`, even in the case PN *did* run (via `force_pn`) and drove the
+returned trajectory's violation under tolerance -- the solve reports a non-success status on a
+trajectory that is, by the tolerance check, actually feasible. This is Altro's own behaviour
+(arguably a bug upstream), reproduced here rather than fixed, because parity tests hold this port
+to Altro's own status-reporting -- not silently, `test_altro_backup_check_does_not_upgrade_max_iterations_outer`
+pins it down explicitly so a future fix is a deliberate ADR update, not an accidental regression.
+
 ### No per-constraint AL parameter overrides
 
 Altro's `ConstraintOptions` lets each constraint override `penalty_initial`, `penalty_scaling`,
@@ -185,29 +209,44 @@ exactness on curved constraints.
 `src/trajopt/benchmarks.py`'s `measure_altro_vs_ipopt` times `ALTRO().solve()` against
 `Ipopt().solve()` on `cartpole_swingup_benchmark`'s N=25 bound-and-goal-constrained cartpole (the
 same shape of problem as the ticket 33 cross test), each with one discarded warmup solve first so
-neither measurement is dominated by first-call setup. Single run, one machine (Windows, this
-development environment), not a statistically averaged number -- reported to close the loop
+neither measurement is dominated by first-call setup or (for `ALTRO`) the one-off `jax.jit` compile,
+then `n_repeats=5` further calls are timed and averaged. Two independent runs, one machine (Windows,
+this development environment), not statistically rigorous numbers -- reported to close the loop
 honestly, not as a performance claim to build on:
 
-| path                                                    | time      |
-|----------------------------------------------------------|-----------|
-| Ipopt, second (cached) call                               | ~0.51 s   |
-| `ALTRO().solve()`, second (still eager, uncompiled) call  | ~9.5 s    |
-| `altro_solve` hand-wrapped in `jax.jit`, first (compiling) call | ~9.7 s |
-| `altro_solve` hand-wrapped in `jax.jit`, second (cached) call   | ~2.8 s |
+| path                                          | run 1     | run 2     |
+|------------------------------------------------|-----------|-----------|
+| Ipopt, mean of 5 warm calls                     | 0.559 s   | 0.562 s   |
+| `ALTRO().solve()`, mean of 5 warm calls         | 1.899 s   | 2.043 s   |
+| speedup (`ipopt / altro`)                       | 0.29x     | 0.27x     |
 
-**Ipopt is faster on this problem in every configuration measured**, including the hand-jitted,
-cache-warm native core. The "Thin eager wrapper over a traced core" decision
-(`docs/altro-port/00-overview.md`) means `ALTRO().solve()` does not `jax.jit` `altro_solve` itself
--- every eager call retraces and dispatches each `lax` primitive individually rather than running
-one fused XLA computation, which is why the eager number and the jit-compiling number are close:
-neither benefits from a cached compilation. Only a caller who explicitly wraps the traced core in
-`jax.jit` (closing over `problem` and `options`, per `test_altro.py`'s
-`test_altro_solve_is_jittable_and_vmappable_with_static_options`) and reuses that compiled
-function across repeated calls sees the ~3.4x drop from eager to cached -- and even that cached
-number does not beat Ipopt here. The `jnp.where(run_pn, ...)`-always-runs-PN design (see above)
-is one concrete cost contributor: PN's dense KKT solve runs on every `altro_solve` call whether or
-not its projection is used.
+An earlier measurement of this benchmark (before ticket 34's fix below) reported `ALTRO().solve()`
+at ~9.5 s per warm call, because `.solve()` never called `jax.jit` on `altro_solve` at all -- every
+call retraced and dispatched each `lax` primitive individually, paying full eager-dispatch overhead
+on every solve, not just the first. That was a bug (a high-severity code-review finding, ticket 34),
+not an inherent consequence of the "thin eager wrapper over a traced core" design
+(`docs/altro-port/00-overview.md`): the wrapper is still thin -- it still just converts the boundary
+types -- but it now does call `jax.jit` on the traced core internally (`_jit_altro_solve`,
+`src/trajopt/solvers/altro.py`), caching the compiled closure in a `JitCacheSlot`
+(`src/trajopt/solvers/_jit_cache.py`) keyed on `problem` identity and `options`. A repeat `.solve()`
+call on the same solver instance and problem -- the MPC-loop regime this exists for -- now hits that
+cache instead of recompiling or re-dispatching eagerly, dropping the measured time roughly 4.7-5x
+(from ~9.5 s to ~1.9-2.0 s) versus the pre-fix number, and roughly 1.4x below the old hand-jitted,
+cache-warm number (~2.8 s) reported in the prior version of this section.
+
+**Ipopt remains faster on this problem in the regime measured here** -- a short, N=25,
+box-and-goal-constrained horizon, warm-called repeatedly on the same problem shape and options --
+by roughly 3.4x even with `.solve()`'s jit cache now warm. This is a real, currently-negative data
+point, not reframed positively: fixing the "doesn't jit at all" bug closed most of the gap (~9.5 s
+down to ~2.0 s) but did not close all of it. The `jnp.where(run_pn, ...)`-always-runs-PN design (see
+above) is one concrete remaining cost contributor -- PN's dense KKT solve runs on every
+`altro_solve` call whether or not its projection is used -- and this benchmark's problem is exactly
+the size PN's `O(n^3)`-ish dense KKT factorization is not amortized against a longer horizon.
+
+The design's payoff case -- many solves sharing one compilation with per-call work small relative to
+compile cost, e.g. `jax.vmap` over a batch of initial states, or a receding-horizon loop with many
+more than 5 repeat calls -- is still not what this single-problem, 5-repeat benchmark measures, and
+is still not benchmarked here.
 
 The design's actual payoff case -- many solves sharing one compilation, e.g. `jax.vmap` over a
 batch of initial states, or a receding-horizon loop that jits once and calls the compiled function

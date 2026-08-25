@@ -218,6 +218,52 @@ def test_altro_backup_check_does_not_upgrade_max_iterations_outer(monkeypatch: p
     assert int(result.status) != int(TerminationStatus.SOLVE_SUCCEEDED)
 
 
+def test_altro_pn_does_not_run_on_max_iterations_outer_without_force_pn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The outer gate (`al_status_ok | force_pn`) must exclude a `MAX_ITERATIONS_OUTER` exit from running PN.
+
+    `al_solve` is replaced with a stub that reports `MAX_ITERATIONS_OUTER` on a genuinely
+    infeasible trajectory (control far outside the bound, so `c_max > constraint_tolerance`).
+    Altro's own two-level gate (`docs/altro-jl-reference.md` §6: `if status <= SOLVE_SUCCEEDED or
+    force_pn: ... if (... status in {<=SUCCEEDED, MAX_ITERATIONS_OUTER}) or force_pn: run PN`)
+    never reaches the inner PN-triggering check at all when the outer gate is closed, since
+    `MAX_ITERATIONS_OUTER`'s ordinal is not `<= SOLVE_SUCCEEDED`. With `force_pn` at its default
+    `False`, PN must not run and the returned trajectory must be AL's own, not PN's projection --
+    the case the earlier `test_altro_backup_check_does_not_upgrade_max_iterations_outer` stub
+    (already feasible, so `c_max > constraint_tolerance` was never true) could not exercise.
+    """
+    import trajopt.solvers.altro as altro_module
+
+    prob, x0, dt = _cartpole_problem()
+    N, m = prob.N, prob.model.m
+    t = jnp.arange(N) * dt
+    dt_arr = jnp.full(N - 1, dt)
+    X = jnp.repeat(x0[None, :], N, axis=0)
+    U = jnp.full((N - 1, m), 100.0)  # far outside the +-3.0 control bound
+    infeasible_traj = Trajectory(X=X, U=U, t=t, dt=dt_arr)
+
+    al0 = ALConstraints.build(prob.constraints, penalty_initial=SolverOptions().penalty_initial)
+    options = SolverOptions(iterations_outer=5)
+
+    def fake_al_solve(
+        _problem: Problem, _trajectory: Trajectory, al: ALConstraints, opts: SolverOptions, *_extra: object
+    ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
+        stats = ALStats.create(opts)
+        stats = ALStats(iterations=jnp.int32(1), cost=stats.cost, c_max=stats.c_max, penalty_max=stats.penalty_max)
+        return infeasible_traj, al, stats, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER)
+
+    monkeypatch.setattr(altro_module, "al_solve", fake_al_solve)
+
+    C, _Jx, _Ju = evaluate_al_constraints(al0, prob.constraints, prob.model, infeasible_traj)
+    assert float(max_violation(al0, C)) > options.constraint_tolerance  # sanity: genuinely infeasible
+
+    x0_arr = jnp.asarray(x0)
+    result = altro_solve(prob, infeasible_traj, al0, x0_arr, options)
+
+    assert not bool(result.ran_pn)
+    np.testing.assert_array_equal(np.asarray(result.trajectory.U), np.asarray(infeasible_traj.U))
+    assert int(result.status) == int(TerminationStatus.MAX_ITERATIONS_OUTER)
+
+
 def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.MonkeyPatch) -> None:
     """`run_pn`'s decision reads the cached `al_stats.c_max` entry once `iterations > 1`, not a fresh recompute.
 
@@ -260,6 +306,29 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
     monkeypatch.setattr(altro_module, "al_solve", make_fake_al_solve(2, cached_c_max=1e-9))
     result_cached = altro_solve(prob, infeasible_traj, al0, x0_arr, options)
     assert not bool(result_cached.ran_pn)  # cached (stale, near-zero) value is believed instead
+
+
+def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem() -> None:
+    """Two `.solve()` calls on the same `ALTRO` instance and `problem` reuse the same compiled `jax.jit` closure.
+
+    Verifies fix 2 (ticket 34): the module-level `_altro_solve_jit_slot` cache actually hits on a
+    repeat call (same `problem` identity, same `options` key) instead of rebuilding a fresh
+    `jax.jit` wrapper every `.solve()` call -- the MPC-loop regime the cache exists for.
+    """
+    import trajopt.solvers.altro as altro_module
+
+    prob, x0, dt = _cartpole_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    altro = ALTRO(options=SolverOptions(iterations=50, iterations_outer=5))
+
+    _ = altro.solve(prob, state)
+    jitted_after_first = altro_module._altro_solve_jit_slot._jitted  # noqa: SLF001 -- white-box cache-hit check
+    assert jitted_after_first is not None
+
+    _ = altro.solve(prob, state)
+    jitted_after_second = altro_module._altro_solve_jit_slot._jitted  # noqa: SLF001 -- white-box cache-hit check
+
+    assert jitted_after_second is jitted_after_first
 
 
 def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:

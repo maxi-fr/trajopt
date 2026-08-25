@@ -12,6 +12,7 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import MPCState, Problem
+from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.ilqr import SolveKD, build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
@@ -955,6 +956,33 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
     return final.trajectory, final.al, final.stats, final.status
 
 
+_al_solve_jit_slot = JitCacheSlot()
+
+
+def _jit_al_solve(  # noqa: PLR0913, PLR0917 -- mirrors al_solve's own load-bearing u_bounds sixth argument
+    problem: Problem,
+    trajectory: Trajectory,
+    al0: ALConstraints,
+    options: SolverOptions,
+    solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
+    """`al_solve`, jit-compiled and cached per `(problem identity, options, solve_kd_builder)`, shared by `AL.solve()` and `BoxQP.solve()`.
+
+    `problem` and `solve_kd_builder` are closed over via `functools.partial` rather than passed
+    as jit arguments (`JitCacheSlot`'s docstring has the reason for `problem`; `solve_kd_builder`,
+    a Python callable, cannot be a traced pytree leaf at all). The returned closure is reused
+    across calls with the same `problem` object, `options`, and `solve_kd_builder`, so repeated
+    same-shape calls (e.g. MPC, or `BoxQP`'s memoized builder for unchanged bounds) hit XLA's
+    compilation cache instead of recompiling. `trajectory`/`al0`/`u_bounds` are the genuinely
+    dynamic arguments.
+    """
+    jitted = _al_solve_jit_slot.get_or_build(
+        al_solve, problem, key=(options, solve_kd_builder), options=options, solve_kd_builder=solve_kd_builder
+    )
+    return jitted(trajectory=trajectory, al0=al0, u_bounds=u_bounds)
+
+
 class ALResult(NamedTuple):
     """Result of a native augmented-Lagrangian solve, satisfying the `SolverResult` protocol.
 
@@ -1060,7 +1088,7 @@ class AL:
         else:
             init_al = fresh_al
 
-        final_traj, final_al, stats, status_int = al_solve(problem_eff, init_traj, init_al, options)
+        final_traj, final_al, stats, status_int = _jit_al_solve(problem_eff, init_traj, init_al, options)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

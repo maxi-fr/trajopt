@@ -9,6 +9,7 @@ import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.problem import MPCState, Problem
+from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.al import (
     ALConstraints,
     ALStats,
@@ -17,8 +18,8 @@ from trajopt.solvers.al import (
     max_violation,
 )
 from trajopt.solvers.al import _trim_al_stats as trim_al_stats
+from trajopt.solvers.ilqr import _jit_ilqr_solve, build_warm_start
 from trajopt.solvers.ilqr import _trim_stats as trim_ilqr_stats
-from trajopt.solvers.ilqr import build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.solvers.pn import PNStats, pn_solve
 from trajopt.solvers.pn import _trim_pn_stats as trim_pn_stats
@@ -138,12 +139,14 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
       recomputed from the constraints directly only otherwise -- the two can differ, since the
       cached value predates the last inner iLQR solve of that outer iteration.
 
-    Julia's `opts.force_pn` and the `status <= SOLVE_SUCCEEDED || force_pn` gate that wraps the
-    whole polish block collapse algebraically into two independent conditions once traced through:
-    `run_pn`'s own formula already implies that gate (its first term requires `al_status_ok`, its
-    second *is* `force_pn`), and the backup upgrade's `al_status <= SOLVE_SUCCEEDED` guard implies
-    it too. So neither needs the gate spelled out separately; see the module's test suite for the
-    case-by-case argument.
+    Julia's `opts.force_pn` and the `status <= SOLVE_SUCCEEDED || force_pn` gate wrap the *whole*
+    polish block, including the inner `status ∈ {≤SUCCEEDED, MAX_ITERATIONS_OUTER}` check. Because
+    `MAX_ITERATIONS_OUTER`'s ordinal (4) is not `<= SOLVE_SUCCEEDED` (2), that outer gate excludes
+    a `MAX_ITERATIONS_OUTER` exit unless `force_pn` is set -- making the inner check's own
+    `MAX_ITERATIONS_OUTER` branch dead upstream except when `force_pn` already forces `run_pn`
+    regardless of status. `run_pn` below reproduces both levels explicitly (`outer_gate` then
+    `inner_condition`) rather than only the inner one, so PN does not run on a `MAX_ITERATIONS_OUTER`
+    exit unless `force_pn` is set.
 
     Parameters
     ----------
@@ -183,11 +186,14 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
     recomputed_c_max = max_violation(al_final, C_al)
     c_max = jnp.where(n_iter > 1, al_stats.c_max[cache_idx], recomputed_c_max)
 
-    run_pn = (
+    force_pn = jnp.asarray(options.force_pn)
+    outer_gate = al_status_ok | force_pn
+    inner_condition = (
         jnp.asarray(options.projected_newton)
         & (c_max > options.constraint_tolerance)
         & (al_status_ok | (al_status == jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER)))
-    ) | jnp.asarray(options.force_pn)
+    ) | force_pn
+    run_pn = outer_gate & inner_condition
 
     pn_traj, pn_stats, pn_duals, _pn_status = pn_solve(problem, al_traj, x0, options)
 
@@ -208,6 +214,27 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
         ran_pn=run_pn,
         c_max=c_max2,
     )
+
+
+_altro_solve_jit_slot = JitCacheSlot()
+
+
+def _jit_altro_solve(
+    problem: Problem, trajectory: Trajectory, al0: ALConstraints, x0: jax.Array, options: SolverOptions
+) -> ALTROSolveResult:
+    """`altro_solve`, jit-compiled and cached per `(problem identity, options)`, called from `ALTRO.solve()`'s constrained branch.
+
+    `problem` is closed over via `functools.partial` rather than passed as a jit argument
+    (`JitCacheSlot`'s docstring has the reason). `ALTRO.solve()` never forwards a
+    `solve_kd_builder`/`u_bounds` (ticket 30's box-QP hook is not wired into the ALTRO driver),
+    so those stay at `altro_solve`'s own `None` defaults here too. The returned closure is reused
+    across calls with the same `problem` object and `options`, so repeated same-shape calls (e.g.
+    MPC) hit XLA's compilation cache instead of recompiling.
+    """
+    jitted = _altro_solve_jit_slot.get_or_build(
+        altro_solve, problem, key=options, options=options, solve_kd_builder=None
+    )
+    return jitted(trajectory=trajectory, al0=al0, x0=x0)
 
 
 class ALTROResult(NamedTuple):
@@ -296,7 +323,7 @@ class ALTRO:
         problem_eff, init_traj = build_warm_start(problem, state)
 
         if _is_unconstrained(problem_eff.constraints):
-            final_traj, stats, status_int = ilqr_solve(problem_eff, init_traj, options)
+            final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, options)
             status = TerminationStatus(int(status_int))
             n_iter = int(stats.iterations)
             return ALTROResult(
@@ -333,7 +360,7 @@ class ALTRO:
 
         x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
 
-        result = altro_solve(problem_eff, init_traj, init_al, x0_arr, options)
+        result = _jit_altro_solve(problem_eff, init_traj, init_al, x0_arr, options)
 
         status = TerminationStatus(int(result.status))
         n_iter_al = int(result.al_stats.iterations)
