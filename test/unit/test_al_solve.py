@@ -71,6 +71,30 @@ def test_al_cartpole_converges_under_constraint_tolerance() -> None:
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-4))
 
 
+def test_altro_substitutes_for_al_on_the_same_scenario() -> None:
+    """ALTRO() solves the same cartpole scenario with only the solver object changed, proving Solver substitutability.
+
+    Ticket 33: ALTRO composes AL with an optional PN polish phase behind the same `Solver`
+    protocol AL itself satisfies, so this scenario -- unchanged from
+    `test_al_cartpole_converges_under_constraint_tolerance` above -- must keep working with the
+    solver object swapped for the other and nothing else.
+    """
+    from trajopt.solvers.altro import ALTRO
+
+    prob, x0, dt = _cartpole_problem()
+    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
+    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    options = SolverOptions(iterations=300, iterations_outer=30)
+
+    result = ALTRO(options=options).solve(prob, state)
+
+    assert result.success
+    assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
+    assert result.constraint_violation < options.constraint_tolerance
+    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(xf), atol=1e-4)
+    assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-4))
+
+
 def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyPatch) -> None:
     """SolverOptions never carries a tracer: ilqr_solve's `options` argument stays hashable under jit.
 
