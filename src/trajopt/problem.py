@@ -104,6 +104,15 @@ class Problem(eqx.Module):
         # MPCState warm-starting; every other backend leaves it absent, so the prior al survives.
         al = getattr(res, "al", None)
 
+        # Native solvers (ILQR, AL) already know their precise TerminationStatus and map it
+        # through `to_solver_status`'s table, so `res.solver_status` is authoritative when
+        # present; `normalize_status`'s message-substring heuristic is a fallback for backends
+        # (Ipopt, OSQP, Clarabel) that only expose a free-text status string.
+        solver_status = getattr(res, "solver_status", None)
+        status = (
+            solver_status if solver_status is not None else normalize_status(success=res.success, message=res.message)
+        )
+
         return MPCState(
             x0=state.x0,
             t0=state.t0,
@@ -115,7 +124,7 @@ class Problem(eqx.Module):
             n=state.n,
             m=state.m,
             N=state.N,
-            status=normalize_status(success=res.success, message=res.message),
+            status=status,
             al=al if al is not None else state.al,
         )
 

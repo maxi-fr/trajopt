@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -8,7 +9,8 @@ from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.problem import MPCState, Problem
 from trajopt.solvers.al import AL, ALConstraints, ALResult, _evaluate_al_convergence
-from trajopt.solvers.options import SolverOptions, TerminationStatus
+from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus
+from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
 
 
@@ -62,17 +64,70 @@ def test_al_cartpole_converges_under_constraint_tolerance() -> None:
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-4))
 
 
-def test_al_solve_does_not_mutate_solver_options() -> None:
-    """The frozen SolverOptions passed in is untouched; per-iteration tolerances are a local copy."""
+def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SolverOptions never carries a tracer: ilqr_solve's `options` argument stays hashable under jit.
+
+    Ticket 29 computes the effective (possibly intermediate) cost/gradient tolerance pair as
+    traced scalars threaded through the loop carry, not by `dataclasses.replace`-ing them into a
+    new `SolverOptions` (which would make that object's fields tracers and break its "static,
+    never traced" contract). Patching `ilqr_solve` to assert `hash(options)` succeeds on every
+    call -- which fails immediately if any field is a `jax.Array` tracer, since tracers are not
+    hashable -- exercises that invariant directly, rather than only checking the caller's own
+    `options` object was left untouched (which `dataclasses.replace` guarantees trivially).
+    """
+    import trajopt.solvers.al as al_module
+
     prob, x0, dt = _cartpole_problem()
     state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
-    cost_tol_before, grad_tol_before = options.cost_tolerance, options.gradient_tolerance
 
-    AL(options=options).solve(prob, state)
+    real_ilqr_solve = al_module.ilqr_solve
+    call_count = 0
 
-    assert options.cost_tolerance == cost_tol_before
-    assert options.gradient_tolerance == grad_tol_before
+    def checked_ilqr_solve(
+        problem: Problem,
+        trajectory: Trajectory,
+        options: SolverOptions,
+        *,
+        cost_tolerance: jax.Array | float | None = None,
+        gradient_tolerance: jax.Array | float | None = None,
+    ) -> tuple[Trajectory, SolverStats, jax.Array]:
+        nonlocal call_count
+        call_count += 1
+        hash(options)  # raises TypeError if any field is an unhashable jax tracer
+        return real_ilqr_solve(
+            problem, trajectory, options, cost_tolerance=cost_tolerance, gradient_tolerance=gradient_tolerance
+        )
+
+    monkeypatch.setattr(al_module, "ilqr_solve", checked_ilqr_solve)
+    result = AL(options=options).solve(prob, state)
+
+    assert result.success
+    assert call_count > 0
+
+
+def test_al_max_iterations_outer_maps_to_infeasible_status() -> None:
+    """The real `.solve()` -> `MPCState.status` path reports "infeasible" on MAX_ITERATIONS_OUTER.
+
+    Regression test for a defect found in mid-point review: `AL.solve()` used to hand
+    `TerminationStatus.MAX_ITERATIONS_OUTER.name` as `message` and let `Problem.solve`'s
+    `normalize_status` substring-match it, which incorrectly produced "iteration_limit" (the
+    substring "iter" matches, but ticket 24's table maps MAX_ITERATIONS_OUTER to "infeasible").
+    With `iterations_outer=1`, the cartpole swing-up cannot drive its violation under
+    `constraint_tolerance` in a single outer iteration but its inner iLQR solve still succeeds,
+    so the outer loop exhausts `MAX_ITERATIONS_OUTER` -- the most common non-convergence outcome
+    for a genuinely constrained problem.
+    """
+    prob, x0, dt = _cartpole_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    options = SolverOptions(iterations=300, iterations_outer=1)
+
+    result = AL(options=options).solve(prob, state)
+    assert result.status == int(TerminationStatus.MAX_ITERATIONS_OUTER)
+    assert result.solver_status == "infeasible"
+
+    new_state = prob.solve(MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None), solver=AL(options=options))
+    assert new_state.status == "infeasible"
 
 
 def test_al_populates_mpc_state_al_for_warm_starting() -> None:

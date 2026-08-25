@@ -158,6 +158,8 @@ def _evaluate(
         J=jnp.asarray(J),
         dJ_zero_counter=jnp.int32(dJ_zero_counter),
         iter_num=jnp.int32(iter_num),
+        cost_tolerance=jnp.asarray(options.cost_tolerance),
+        gradient_tolerance=jnp.asarray(options.gradient_tolerance),
         options=options,
     )
 
@@ -231,7 +233,9 @@ def test_ilqr_step_nan_dj_does_not_increment_zero_counter() -> None:
         done=jnp.asarray(False),  # noqa: FBT003 -- traced bool scalar
         status=jnp.int32(TerminationStatus.UNSOLVED),
     )
-    new_carry = _ilqr_step(carry, prob, options)
+    new_carry = _ilqr_step(
+        carry, prob, options, jnp.asarray(options.cost_tolerance), jnp.asarray(options.gradient_tolerance)
+    )
     assert float(new_carry.stats.dJ[0]) == pytest.approx(0.0, abs=1e-12)
     assert int(new_carry.stats.dJ_zero_counter) == 1
 

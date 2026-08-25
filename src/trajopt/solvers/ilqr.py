@@ -11,9 +11,10 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus
+from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
+from trajopt.transcription.result import SolverStatus
 
 _EMPTY = np.zeros(0, dtype=np.float64)
 
@@ -551,7 +552,13 @@ class ILQRCarry(NamedTuple):
     status: jax.Array
 
 
-def _ilqr_step(carry: ILQRCarry, problem: Problem, options: SolverOptions) -> ILQRCarry:
+def _ilqr_step(
+    carry: ILQRCarry,
+    problem: Problem,
+    options: SolverOptions,
+    cost_tolerance: jax.Array,
+    gradient_tolerance: jax.Array,
+) -> ILQRCarry:
     """One iLQR iteration: cost, expansions, backward pass, forward pass, accept, record, check.
 
     Follows reference §4.1's order exactly: `J_prev` on the trajectory carried in, then
@@ -561,6 +568,10 @@ def _ilqr_step(carry: ILQRCarry, problem: Problem, options: SolverOptions) -> IL
     tolerances make that an exact-equality test); `NaN == 0.0` is `False`, so a failed forward
     pass neither increments the counter nor satisfies the cost-convergence criterion (ticket 27:
     reproduced by letting IEEE NaN comparisons propagate, not by special-casing NaN).
+
+    `cost_tolerance`/`gradient_tolerance` are traced scalars (ticket 29's effective intermediate
+    or final AL tolerance pair, or plain `options.cost_tolerance`/`gradient_tolerance` for a bare
+    iLQR solve), passed straight through to `_evaluate_convergence`.
     """
     traj = carry.trajectory
     obj = problem.obj
@@ -591,7 +602,9 @@ def _ilqr_step(carry: ILQRCarry, problem: Problem, options: SolverOptions) -> IL
         ls_failed=fp.ls_failed,
     )
 
-    status = _evaluate_convergence(dJ, grad, fp.ls_failed, fp.J, new_dJ_counter, iter_num, options)
+    status = _evaluate_convergence(
+        dJ, grad, fp.ls_failed, fp.J, new_dJ_counter, iter_num, cost_tolerance, gradient_tolerance, options
+    )
     done = status != jnp.int32(TerminationStatus.UNSOLVED)
 
     return ILQRCarry(
@@ -611,6 +624,8 @@ def _evaluate_convergence(  # noqa: PLR0913, PLR0917 -- one per Altro's evaluate
     J: jax.Array,
     dJ_zero_counter: jax.Array,
     iter_num: jax.Array,
+    cost_tolerance: jax.Array,
+    gradient_tolerance: jax.Array,
     options: SolverOptions,
 ) -> jax.Array:
     """Decide whether an iLQR iteration converged, matching `Altro.evaluate_convergence`.
@@ -622,12 +637,16 @@ def _evaluate_convergence(  # noqa: PLR0913, PLR0917 -- one per Altro's evaluate
     it neither converges nor is mistaken for `MAXIMUM_COST` -- it just fails to match any exit
     (ticket 27: reproduced by letting NaN propagate rather than special-casing it).
 
+    `cost_tolerance` and `gradient_tolerance` are passed as traced scalars rather than read off
+    `options` (ticket 29: AL's per-outer-iteration intermediate/final tolerance pair is computed
+    in its loop carry and threaded through here, so `options` itself is never traced).
+
     Returns
     -------
     jax.Array
         `TerminationStatus` ordinal as an int32 scalar, or `UNSOLVED` if no exit fired.
     """
-    cost_converged = (dJ >= 0.0) & (dJ < options.cost_tolerance) & (grad < options.gradient_tolerance) & (~ls_failed)
+    cost_converged = (dJ >= 0.0) & (dJ < cost_tolerance) & (grad < gradient_tolerance) & (~ls_failed)
     max_iters_hit = iter_num >= options.iterations
     no_progress = dJ_zero_counter > options.dJ_counter_limit
     max_cost_hit = options.max_cost_value < J
@@ -655,6 +674,9 @@ def ilqr_solve(
     problem: Problem,
     trajectory: Trajectory,
     options: SolverOptions,
+    *,
+    cost_tolerance: jax.Array | float | None = None,
+    gradient_tolerance: jax.Array | float | None = None,
 ) -> tuple[Trajectory, SolverStats, jax.Array]:
     """Traced iLQR core, matching `Altro.iLQRSolver`'s `initialize!` + `solve!` loop.
 
@@ -673,6 +695,13 @@ def ilqr_solve(
         Warm-start guess; only `X[0]`, `U`, `t`, `dt` are read.
     options : SolverOptions
         Static solve configuration; must not be traced.
+    cost_tolerance : jax.Array | float | None, optional
+        Overrides `options.cost_tolerance` when given, as a possibly-traced scalar (ticket 29:
+        AL computes its per-outer-iteration effective tolerance in its loop carry and passes it
+        here rather than rebuilding `options` with a traced field). Defaults to None, meaning
+        `options.cost_tolerance`.
+    gradient_tolerance : jax.Array | float | None, optional
+        Same as `cost_tolerance`, for `options.gradient_tolerance`. Defaults to None.
 
     Returns
     -------
@@ -681,6 +710,10 @@ def ilqr_solve(
         untrimmed), and the exit `TerminationStatus` ordinal as an int32 scalar.
     """
     init_traj = problem.model.rollout(trajectory)
+    cost_tol = jnp.asarray(options.cost_tolerance if cost_tolerance is None else cost_tolerance, dtype=jnp.float64)
+    grad_tol = jnp.asarray(
+        options.gradient_tolerance if gradient_tolerance is None else gradient_tolerance, dtype=jnp.float64
+    )
 
     init_carry = ILQRCarry(
         i=jnp.int32(0),
@@ -695,10 +728,49 @@ def ilqr_solve(
         return (~carry.done) & (carry.i < options.iterations)
 
     def body(carry: ILQRCarry) -> ILQRCarry:
-        return _ilqr_step(carry, problem, options)
+        return _ilqr_step(carry, problem, options, cost_tol, grad_tol)
 
     final = jax.lax.while_loop(cond, body, init_carry)
     return final.trajectory, final.stats, final.status
+
+
+def build_warm_start(problem: Problem, state: MPCState) -> tuple[Problem, Trajectory]:
+    """Build the eager warm-start trajectory and goal-overridden problem from `state`.
+
+    Shared by `ILQR.solve` and `AL.solve` (ticket 29 wraps ticket 27's `.solve()` boundary):
+    both parse `state.Z` into `(X, U)`, build the absolute time grid from `state.t0`/`state.dt`,
+    and override `problem`'s objective goal from `state.xf` when the objective regulates to a
+    runtime goal.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem to warm-start; its `obj` may be goal-overridden in the returned copy.
+    state : MPCState
+        Per-step state supplying the flat primal `Z`, `t0`, `dt`, and optional runtime goal `xf`.
+
+    Returns
+    -------
+    tuple[Problem, Trajectory]
+        `(problem_eff, init_traj)`: `problem` with its goal overridden if applicable, and the
+        warm-start trajectory built from `state.Z`.
+    """
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+
+    _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
+    assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
+    dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
+    t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+    X0, U0 = _z_to_trajectory(z0, N, n, m)
+    init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
+
+    problem_eff = problem
+    if xf_val is not None and problem.obj.regulates_to_goal:
+        problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+
+    return problem_eff, init_traj
 
 
 def _trim_stats(stats: SolverStats, n_iter: int) -> SolverStats:
@@ -727,7 +799,10 @@ class ILQRResult(NamedTuple):
     status : int
         `TerminationStatus` ordinal the traced core exited with.
     message : str
-        `TerminationStatus` member name.
+        `TerminationStatus` member name -- the precise Altro exit reason, kept for diagnostics.
+    solver_status : SolverStatus
+        `status` mapped through `to_solver_status`'s table; the authoritative public status
+        `Problem.solve` uses for `MPCState.status`, rather than guessing from `message`.
     cost : float
         Final objective value.
     Z : jax.Array
@@ -748,6 +823,7 @@ class ILQRResult(NamedTuple):
     success: bool
     status: int
     message: str
+    solver_status: SolverStatus
     cost: float
     Z: jax.Array
     info: dict[str, Any]
@@ -777,20 +853,7 @@ class ILQR:
 
     def solve(self, problem: Problem, state: MPCState) -> ILQRResult:
         """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result."""
-        N = int(problem.N)
-        n = int(problem.model.n)
-        m = int(problem.model.m)
-
-        _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
-        assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
-        dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
-        t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
-        X0, U0 = _z_to_trajectory(z0, N, n, m)
-        init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
-
-        problem_eff = problem
-        if xf_val is not None and problem.obj.regulates_to_goal:
-            problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+        problem_eff, init_traj = build_warm_start(problem, state)
 
         final_traj, stats, status_int = ilqr_solve(problem_eff, init_traj, self.options)
 
@@ -802,6 +865,7 @@ class ILQR:
             success=status == TerminationStatus.SOLVE_SUCCEEDED,
             status=int(status_int),
             message=status.name,
+            solver_status=to_solver_status(status),
             cost=float(problem_eff.obj.cost(final_traj)),
             Z=_trajectory_to_z(final_traj.X, final_traj.U),
             info={"stats": _trim_stats(stats, n_iter)},

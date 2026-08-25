@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple, cast
 
 import equinox as eqx
@@ -12,10 +12,11 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.ilqr import ilqr_solve
-from trajopt.solvers.options import SolverOptions, TerminationStatus
+from trajopt.solvers.ilqr import build_warm_start, ilqr_solve
+from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
+from trajopt.transcription.layout import _trajectory_to_z
+from trajopt.transcription.result import SolverStatus
 
 _EMPTY = np.zeros(0, dtype=np.float64)
 
@@ -534,20 +535,23 @@ def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarr
     Altro's `initialize!` inside every `solve!(ilqr)` (reference §4.1) -- carrying the previous
     outer iteration's accepted trajectory in as the next call's warm start reproduces Altro's
     per-outer-iteration reset without any change to `ilqr.py`.
+
+    The effective `(cost_tolerance, gradient_tolerance)` pair is computed here as traced scalars
+    and passed straight to `ilqr_solve`'s override kwargs, not `dataclasses.replace`-d into a new
+    `SolverOptions` (ticket 29: `options` stays frozen and untraced end to end).
     """
     i = carry.i
     is_last = i == jnp.int32(options.iterations_outer - 1)
-    eff_options = replace(
-        options,
-        cost_tolerance=jnp.where(is_last, options.cost_tolerance, options.cost_tolerance_intermediate),
-        gradient_tolerance=jnp.where(is_last, options.gradient_tolerance, options.gradient_tolerance_intermediate),
-    )
+    cost_tol = jnp.where(is_last, options.cost_tolerance, options.cost_tolerance_intermediate)
+    grad_tol = jnp.where(is_last, options.gradient_tolerance, options.gradient_tolerance_intermediate)
 
     wrapped = _ALProblem(problem=problem, al=carry.al)
     # _ALProblem duck-types Problem's (model, obj, dynamics_expansion, cost_expansion) surface --
     # the whole composition seam -- without being one; ilqr_solve only ever calls through that
     # surface, so the cast is a type-checker formality, not a behavioral claim.
-    new_traj, inner_stats, inner_status = ilqr_solve(cast("Problem", wrapped), carry.trajectory, eff_options)
+    new_traj, inner_stats, inner_status = ilqr_solve(
+        cast("Problem", wrapped), carry.trajectory, options, cost_tolerance=cost_tol, gradient_tolerance=grad_tol
+    )
     inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
 
     C, _Jx_err, _Ju = evaluate_al_constraints(carry.al, problem.constraints, problem.model, new_traj)
@@ -651,7 +655,10 @@ class ALResult(NamedTuple):
     status : int
         `TerminationStatus` ordinal the traced core exited with.
     message : str
-        `TerminationStatus` member name.
+        `TerminationStatus` member name -- the precise Altro exit reason, kept for diagnostics.
+    solver_status : SolverStatus
+        `status` mapped through `to_solver_status`'s table; the authoritative public status
+        `Problem.solve` uses for `MPCState.status`, rather than guessing from `message`.
     cost : float
         Final AL-augmented objective value.
     Z : jax.Array
@@ -676,6 +683,7 @@ class ALResult(NamedTuple):
     success: bool
     status: int
     message: str
+    solver_status: SolverStatus
     cost: float
     Z: jax.Array
     info: dict[str, Any]
@@ -709,21 +717,8 @@ class AL:
 
     def solve(self, problem: Problem, state: MPCState) -> ALResult:
         """Run the traced AL outer loop from `state`'s warm-start trajectory/duals and boundary-convert the result."""
-        N = int(problem.N)
-        n = int(problem.model.n)
-        m = int(problem.model.m)
         options = self.options
-
-        _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
-        assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
-        dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
-        t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
-        X0, U0 = _z_to_trajectory(z0, N, n, m)
-        init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
-
-        problem_eff = problem
-        if xf_val is not None and problem.obj.regulates_to_goal:
-            problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+        problem_eff, init_traj = build_warm_start(problem, state)
 
         fresh_al = ALConstraints.build(problem_eff.constraints, penalty_initial=options.penalty_initial)
         if state.al is not None:
@@ -747,6 +742,7 @@ class AL:
             success=status == TerminationStatus.SOLVE_SUCCEEDED,
             status=int(status_int),
             message=status.name,
+            solver_status=to_solver_status(status),
             cost=float(final_cost),
             Z=_trajectory_to_z(final_traj.X, final_traj.U),
             info={"stats": _trim_al_stats(stats, n_iter)},
