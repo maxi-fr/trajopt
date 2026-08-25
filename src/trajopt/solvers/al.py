@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import equinox as eqx
 import jax
@@ -12,11 +12,14 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.ilqr import build_warm_start, ilqr_solve
+from trajopt.solvers.ilqr import SolveKD, build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _trajectory_to_z
 from trajopt.transcription.result import SolverStatus
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _EMPTY = np.zeros(0, dtype=np.float64)
 
@@ -524,7 +527,13 @@ def _evaluate_al_convergence(
     return status, done
 
 
-def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarry:
+def _al_step(
+    carry: ALCarry,
+    problem: Problem,
+    options: SolverOptions,
+    solve_kd_builder: "Callable[[Trajectory], SolveKD] | None",
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+) -> ALCarry:
     """One augmented-Lagrangian outer iteration, matching `al_solve.jl`'s per-iteration body.
 
     Follows reference §5.5's order exactly: effective (possibly intermediate) tolerances, solve
@@ -539,6 +548,15 @@ def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarr
     The effective `(cost_tolerance, gradient_tolerance)` pair is computed here as traced scalars
     and passed straight to `ilqr_solve`'s override kwargs, not `dataclasses.replace`-d into a new
     `SolverOptions` (ticket 29: `options` stays frozen and untraced end to end).
+
+    `solve_kd_builder`, forwarded to `ilqr_solve` unchanged, is ticket 30's box-QP hook: routing
+    `ControlBound` rows to a control-limited backward pass while every other constraint -- state
+    bounds included -- still goes through this AL outer loop is exactly "pass a non-default
+    `solve_kd_builder` into the same `al_solve`", no separate outer loop.
+
+    `u_bounds`, forwarded to `ilqr_solve` unchanged, clips every rolled-out control (ticket 30):
+    the box-QP feedforward is bound-feasible by construction, but the closed-loop `K @ dx`
+    feedback term is not, so this is a deliberate practical safeguard on top of it.
     """
     i = carry.i
     is_last = i == jnp.int32(options.iterations_outer - 1)
@@ -550,7 +568,13 @@ def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarr
     # the whole composition seam -- without being one; ilqr_solve only ever calls through that
     # surface, so the cast is a type-checker formality, not a behavioral claim.
     new_traj, inner_stats, inner_status = ilqr_solve(
-        cast("Problem", wrapped), carry.trajectory, options, cost_tolerance=cost_tol, gradient_tolerance=grad_tol
+        cast("Problem", wrapped),
+        carry.trajectory,
+        options,
+        cost_tolerance=cost_tol,
+        gradient_tolerance=grad_tol,
+        solve_kd_builder=solve_kd_builder,
+        u_bounds=u_bounds,
     )
     inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
 
@@ -589,11 +613,13 @@ def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarr
     )
 
 
-def al_solve(
+def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, load-bearing argument
     problem: Problem,
     trajectory: Trajectory,
     al0: ALConstraints,
     options: SolverOptions,
+    solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
     """Traced augmented-Lagrangian outer loop, matching `Altro.ALSolver`'s `solve!` (`al_solve.jl`).
 
@@ -616,6 +642,12 @@ def al_solve(
         Initial duals and penalties, already reset or warm-started by the caller.
     options : SolverOptions
         Static solve configuration; must not be traced.
+    solve_kd_builder : Callable[[Trajectory], SolveKD] | None, optional
+        Forwarded to every inner `ilqr_solve` call (ticket 30's box-QP hook). Defaults to None,
+        meaning the plain unconstrained Cholesky backward-pass solve.
+    u_bounds : tuple[jax.Array, jax.Array] | None, optional
+        Forwarded to every inner `ilqr_solve` call to clip the closed-loop rollout (ticket 30).
+        Defaults to None, meaning no clip.
 
     Returns
     -------
@@ -637,7 +669,7 @@ def al_solve(
         return (~carry.done) & (carry.i < options.iterations_outer)
 
     def body(carry: ALCarry) -> ALCarry:
-        return _al_step(carry, problem, options)
+        return _al_step(carry, problem, options, solve_kd_builder, u_bounds)
 
     final = jax.lax.while_loop(cond, body, init_carry)
     return final.trajectory, final.al, final.stats, final.status

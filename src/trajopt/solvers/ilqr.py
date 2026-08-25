@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
@@ -107,12 +108,36 @@ class _SweepResult(eqx.Module):
     failed: jax.Array
 
 
+SolveKD = Callable[[jax.Array, jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array]]
+"""One knot's `(Quu_reg, Qux, Qu) -> (K_k, d_k, step_failed)` solve, selected by `backward_pass`.
+
+`k` (the knot index, an int32 scalar) is passed first so an implementation can gather any
+per-knot data of its own (e.g. box-QP's per-knot nominal control); the default unconstrained
+solve ignores it.
+"""
+
+
+def _solve_kd_unconstrained(
+    _k: jax.Array, Quu_reg: jax.Array, Qux: jax.Array, Qu: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Default `SolveKD`: plain Cholesky solve of the regularized, unconstrained KKT system."""
+    L = jnp.linalg.cholesky(Quu_reg)
+    step_failed = jnp.any(jnp.isnan(L))
+
+    ne = Qux.shape[1]
+    rhs = jnp.concatenate([Qux, Qu[:, None]], axis=1)
+    Kd = -jax.scipy.linalg.cho_solve((L, True), rhs)
+    K_k = Kd[:, :ne]
+    d_k = Kd[:, ne]
+    return K_k, d_k, step_failed
+
+
 def _knot_step(
     carry: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     k: jax.Array,
     expansion: Expansion,
     rho: jax.Array,
-    ne: int,
+    solve_kd: SolveKD,
 ) -> tuple[
     tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     tuple[jax.Array, jax.Array, jax.Array, jax.Array],
@@ -137,13 +162,7 @@ def _knot_step(
     m = Quu.shape[0]
     Quu_reg = Quu + rho * jnp.eye(m, dtype=Quu.dtype)
 
-    L = jnp.linalg.cholesky(Quu_reg)
-    step_failed = jnp.any(jnp.isnan(L))
-
-    rhs = jnp.concatenate([Qux, Qu[:, None]], axis=1)
-    Kd = -jax.scipy.linalg.cho_solve((L, True), rhs)
-    K_k = Kd[:, :ne]
-    d_k = Kd[:, ne]
+    K_k, d_k, step_failed = solve_kd(k, Quu_reg, Qux, Qu)
 
     S_x_new = Qx + K_k.T @ (Quu @ d_k) + K_k.T @ Qu + Qux.T @ d_k
     S_xx_new = Qxx + K_k.T @ (Quu @ K_k) + K_k.T @ Qux + Qux.T @ K_k
@@ -158,15 +177,19 @@ def _knot_step(
     return new_carry, outputs
 
 
-def _sweep(expansion: Expansion, rho: jax.Array) -> _SweepResult:
+def _sweep(expansion: Expansion, rho: jax.Array, solve_kd: SolveKD | None = None) -> _SweepResult:
     """Run one full reversed Riccati recursion over all knots at a fixed `rho`.
 
     Always runs every knot to completion, carrying a `failed` flag rather than exiting early
     (ticket 25: `jnp.linalg.cholesky` returns NaN instead of raising, so an indefinite `Quu` at
     one knot poisons the rest of the sweep with NaNs but never aborts it).
+
+    `solve_kd` selects how each knot's `(K_k, d_k)` is computed from `(Quu_reg, Qux, Qu)`
+    (ticket 30): defaults to the plain unconstrained Cholesky solve, or a control-limited box-QP
+    solve when `backward_pass` is given control bounds.
     """
-    ne = expansion.ne
     N = expansion.N
+    kd_solve = _solve_kd_unconstrained if solve_kd is None else solve_kd
 
     S_x_terminal = expansion.q[-1]
     S_xx_terminal = expansion.Q[-1]
@@ -180,7 +203,7 @@ def _sweep(expansion: Expansion, rho: jax.Array) -> _SweepResult:
     ks = jnp.arange(N - 2, -1, -1)
 
     final_carry, (K_rev, d_rev, Sx_rev, Sxx_rev) = jax.lax.scan(
-        lambda c, k: _knot_step(c, k, expansion, rho, ne),
+        lambda c, k: _knot_step(c, k, expansion, rho, kd_solve),
         init_carry,
         ks,
     )
@@ -199,6 +222,7 @@ def backward_pass(
     expansion: Expansion,
     regularization: DynamicRegularization,
     options: SolverOptions,
+    solve_kd: SolveKD | None = None,
 ) -> BackwardPassResult:
     """Compute the affine iLQR policy, cost-to-go, and expected decrease for one backward pass.
 
@@ -209,8 +233,13 @@ def backward_pass(
     `decreaseregularization!`. `K` and `d` are solved against the regularized `Quu_reg = Quu +
     rho*I` (finding G); the cost-to-go update uses the unregularized `Quu`/`Qux`, matching
     `Altro.backwardpass!`.
+
+    `solve_kd`, if given, replaces the default unconstrained Cholesky `(K, d)` solve at every
+    knot (ticket 30: `boxqp.py`'s control-limited box-QP variant); either way the same rho-retry
+    loop and `bp_reg_max` bound wrap it, since a box-QP on an indefinite `Quu` is no better posed
+    than a Cholesky on one.
     """
-    sweep0 = _sweep(expansion, regularization.rho)
+    sweep0 = _sweep(expansion, regularization.rho, solve_kd)
 
     def cond(carry: tuple[_SweepResult, jax.Array, jax.Array]) -> jax.Array:
         sweep, rho, _drho = carry
@@ -219,7 +248,7 @@ def backward_pass(
     def body(carry: tuple[_SweepResult, jax.Array, jax.Array]) -> tuple[_SweepResult, jax.Array, jax.Array]:
         _sweep_prev, rho, drho = carry
         new_reg = increase_regularization(DynamicRegularization(rho=rho, drho=drho), options)
-        new_sweep = _sweep(expansion, new_reg.rho)
+        new_sweep = _sweep(expansion, new_reg.rho, solve_kd)
         return new_sweep, new_reg.rho, new_reg.drho
 
     final_sweep, final_rho, final_drho = jax.lax.while_loop(
@@ -272,6 +301,7 @@ def rollout_closed_loop(  # noqa: PLR0913, PLR0917 -- model, nominal, gains, alp
     d: jax.Array,
     alpha: jax.Array | float,
     options: SolverOptions,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> RolloutResult:
     """Closed-loop rollout `u_k = ubar_k + K_k @ dx_k + alpha*d_k`, matching `Altro.rollout!`.
 
@@ -297,6 +327,13 @@ def rollout_closed_loop(  # noqa: PLR0913, PLR0917 -- model, nominal, gains, alp
         Line-search step length scaling the feedforward term.
     options : SolverOptions
         Supplies `max_state_value` and `max_control_value`.
+    u_bounds : tuple[jax.Array, jax.Array] | None, optional
+        `(lo, hi)`, each of shape (m,). Defaults to None, meaning no clip -- Altro's `rollout!`
+        has no such concept. Ticket 30's box-QP feedforward `d` is only guaranteed feasible for
+        the *planned* trajectory (`dx_k = 0`); the free rows' feedback `K_k @ dx_k` is not itself
+        bound-constrained, so once real (nonlinear) dynamics deviate from the linearization the
+        closed-loop `u_k` can drift past the bound. Clamping here is what makes "every rolled-out
+        control inside its bounds" (not just the planned one) literally true.
 
     Returns
     -------
@@ -316,6 +353,8 @@ def rollout_closed_loop(  # noqa: PLR0913, PLR0917 -- model, nominal, gains, alp
 
         dx_k = discrete_model.state_diff(xbar_k, x_nom_k)
         u_k = u_nom_k + K_k @ dx_k + alpha * d_k
+        if u_bounds is not None:
+            u_k = jnp.clip(u_k, u_bounds[0], u_bounds[1])
         x_next = discrete_model.discrete_dynamics(xbar_k, u_k, t_k, dt_k)
 
         max_x = jnp.max(jnp.abs(x_next))
@@ -402,6 +441,7 @@ def _line_search_step(  # noqa: PLR0913, PLR0917 -- one iteration needs the full
     dV: jax.Array,
     J_prev: jax.Array,
     options: SolverOptions,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> _LineSearchCarry:
     """One iteration of `Altro.forwardpass!`'s line search loop, all four exits included.
 
@@ -410,10 +450,11 @@ def _line_search_step(  # noqa: PLR0913, PLR0917 -- one iteration needs the full
     otherwise cost, the expected decrease, and the Armijo-style ratio `z` are always
     recomputed, the no-step and iteration-exhaustion checks are independent (both can fire on
     the same iteration and each bumps regularization, per reference §7.3 item 3), and only
-    acceptance or exhaustion (not a guard failure) ends the search.
+    acceptance or exhaustion (not a guard failure) ends the search. `u_bounds`, when given, is
+    forwarded to `rollout_closed_loop` (ticket 30's closed-loop clip).
     """
     reg = DynamicRegularization(rho=carry.rho, drho=carry.drho)
-    rollout = rollout_closed_loop(model, nominal, K, d, carry.alpha, options)
+    rollout = rollout_closed_loop(model, nominal, K, d, carry.alpha, options, u_bounds)
     good = ~rollout.failed
 
     J_roll = obj.cost(Trajectory(X=rollout.X, U=rollout.U, t=nominal.t, dt=nominal.dt))
@@ -475,6 +516,7 @@ def forward_pass(  # noqa: PLR0913, PLR0917 -- model, objective, nominal, policy
     J_prev: jax.Array,
     regularization: DynamicRegularization,
     options: SolverOptions,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> ForwardPassResult:
     """Line search over `alpha` for the affine policy `(K, d)`, matching `Altro.forwardpass!`.
 
@@ -485,14 +527,16 @@ def forward_pass(  # noqa: PLR0913, PLR0917 -- model, objective, nominal, policy
     lower and an upper bound. If the final cost still exceeds `J_prev` -- including the
     guard-exhaustion quirk where every rollout fails and `J` never leaves `Inf` (finding J) --
     the returned cost is NaN and `status` is `COST_INCREASE`; ticket 27's convergence check must
-    treat that NaN as non-convergence, not as success.
+    treat that NaN as non-convergence, not as success. `u_bounds`, when given, clips every
+    rolled-out control (ticket 30: the box-QP feedforward is bound-feasible by construction, but
+    the closed-loop `K @ dx` feedback term is not).
     """
 
     def cond(carry: _LineSearchCarry) -> jax.Array:
         return (~carry.done) & (carry.i < options.iterations_linesearch)
 
     def body(carry: _LineSearchCarry) -> _LineSearchCarry:
-        return _line_search_step(carry, model, obj, nominal, K, d, dV, J_prev, options)
+        return _line_search_step(carry, model, obj, nominal, K, d, dV, J_prev, options, u_bounds)
 
     init = _LineSearchCarry(
         i=jnp.int32(0),
@@ -552,12 +596,14 @@ class ILQRCarry(NamedTuple):
     status: jax.Array
 
 
-def _ilqr_step(
+def _ilqr_step(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder hook is a 6th, load-bearing argument
     carry: ILQRCarry,
     problem: Problem,
     options: SolverOptions,
     cost_tolerance: jax.Array,
     gradient_tolerance: jax.Array,
+    solve_kd_builder: "Callable[[Trajectory], SolveKD] | None",
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> ILQRCarry:
     """One iLQR iteration: cost, expansions, backward pass, forward pass, accept, record, check.
 
@@ -572,14 +618,21 @@ def _ilqr_step(
     `cost_tolerance`/`gradient_tolerance` are traced scalars (ticket 29's effective intermediate
     or final AL tolerance pair, or plain `options.cost_tolerance`/`gradient_tolerance` for a bare
     iLQR solve), passed straight through to `_evaluate_convergence`.
+
+    `solve_kd_builder`, if given, is called on the carried-in trajectory to build this
+    iteration's `SolveKD` (ticket 30: `boxqp.py`'s box-QP variant needs the current nominal
+    controls to offset its bounds, so it is rebuilt every iteration rather than passed as a
+    fixed `SolveKD`). `u_bounds`, if given, is forwarded to `forward_pass` to clip the
+    closed-loop rollout (ticket 30).
     """
     traj = carry.trajectory
     obj = problem.obj
 
     J_prev = obj.cost(traj)
     expansion = problem.dynamics_expansion(traj) + problem.cost_expansion(traj)
-    bp = backward_pass(expansion, carry.regularization, options)
-    fp = forward_pass(problem.model, obj, traj, bp.K, bp.d, bp.dV, J_prev, bp.regularization, options)
+    solve_kd = None if solve_kd_builder is None else solve_kd_builder(traj)
+    bp = backward_pass(expansion, carry.regularization, options, solve_kd)
+    fp = forward_pass(problem.model, obj, traj, bp.K, bp.d, bp.dV, J_prev, bp.regularization, options, u_bounds)
 
     new_traj = fp.trajectory
     dJ = J_prev - fp.J
@@ -670,13 +723,15 @@ def _evaluate_convergence(  # noqa: PLR0913, PLR0917 -- one per Altro's evaluate
     )
 
 
-def ilqr_solve(
+def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, load-bearing keyword-only argument
     problem: Problem,
     trajectory: Trajectory,
     options: SolverOptions,
     *,
     cost_tolerance: jax.Array | float | None = None,
     gradient_tolerance: jax.Array | float | None = None,
+    solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
+    u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
 ) -> tuple[Trajectory, SolverStats, jax.Array]:
     """Traced iLQR core, matching `Altro.iLQRSolver`'s `initialize!` + `solve!` loop.
 
@@ -702,6 +757,16 @@ def ilqr_solve(
         `options.cost_tolerance`.
     gradient_tolerance : jax.Array | float | None, optional
         Same as `cost_tolerance`, for `options.gradient_tolerance`. Defaults to None.
+    solve_kd_builder : Callable[[Trajectory], SolveKD] | None, optional
+        Builds each iteration's backward-pass `(K, d)` solve from the trajectory carried into
+        that iteration (ticket 30: `boxqp.py`'s control-limited box-QP variant, which needs the
+        current nominal controls to offset its bounds). Defaults to None, meaning the plain
+        unconstrained Cholesky solve.
+    u_bounds : tuple[jax.Array, jax.Array] | None, optional
+        `(lo, hi)` clipped onto every rolled-out control in the forward pass (ticket 30: the
+        box-QP feedforward is bound-feasible by construction, but the closed-loop `K @ dx`
+        feedback term is not, so this is a deliberate practical safeguard beyond the box-DDP
+        paper's strict local guarantee). Defaults to None, meaning no clip.
 
     Returns
     -------
@@ -728,7 +793,7 @@ def ilqr_solve(
         return (~carry.done) & (carry.i < options.iterations)
 
     def body(carry: ILQRCarry) -> ILQRCarry:
-        return _ilqr_step(carry, problem, options, cost_tol, grad_tol)
+        return _ilqr_step(carry, problem, options, cost_tol, grad_tol, solve_kd_builder, u_bounds)
 
     final = jax.lax.while_loop(cond, body, init_carry)
     return final.trajectory, final.stats, final.status

@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,6 +14,11 @@ from trajopt.solvers.al import AL, ALConstraints, ALResult, _evaluate_al_converg
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from trajopt.solvers.ilqr import SolveKD
 
 
 def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
@@ -91,12 +98,20 @@ def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyP
         *,
         cost_tolerance: jax.Array | float | None = None,
         gradient_tolerance: jax.Array | float | None = None,
+        solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
+        u_bounds: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[Trajectory, SolverStats, jax.Array]:
         nonlocal call_count
         call_count += 1
         hash(options)  # raises TypeError if any field is an unhashable jax tracer
         return real_ilqr_solve(
-            problem, trajectory, options, cost_tolerance=cost_tolerance, gradient_tolerance=gradient_tolerance
+            problem,
+            trajectory,
+            options,
+            cost_tolerance=cost_tolerance,
+            gradient_tolerance=gradient_tolerance,
+            solve_kd_builder=solve_kd_builder,
+            u_bounds=u_bounds,
         )
 
     monkeypatch.setattr(al_module, "ilqr_solve", checked_ilqr_solve)

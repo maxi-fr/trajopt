@@ -234,7 +234,7 @@ def test_ilqr_step_nan_dj_does_not_increment_zero_counter() -> None:
         status=jnp.int32(TerminationStatus.UNSOLVED),
     )
     new_carry = _ilqr_step(
-        carry, prob, options, jnp.asarray(options.cost_tolerance), jnp.asarray(options.gradient_tolerance)
+        carry, prob, options, jnp.asarray(options.cost_tolerance), jnp.asarray(options.gradient_tolerance), None
     )
     assert float(new_carry.stats.dJ[0]) == pytest.approx(0.0, abs=1e-12)
     assert int(new_carry.stats.dJ_zero_counter) == 1
