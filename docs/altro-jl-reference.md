@@ -1,5 +1,12 @@
 # Altro.jl internals — reference for the one-to-one port
 
+> **This document has known errors.** `docs/altro-port/00-overview.md`'s "Verified corrections"
+> section (findings A-N) catalogues fourteen places where this reference disagrees with
+> `altro_jl/src/` at the pinned commit below -- each finding was checked against the source, and
+> where the two disagree, the finding wins. Read the corrections first; sections affected are not
+> separately flagged inline. `docs/adr/0001-altro-port-divergences.md` records where the Python
+> port then deliberately diverges from Altro on top of those corrections.
+
 Primary source: `Altro.jl` at commit `4864df2bb8ab8f629f451304cbaaa8e0017932d9`
 (`main`, `Project.toml` version `0.5.0`), vendored at `altro_jl/` (committed to this repo).
 This document is the algorithm and default-parameter oracle for the native

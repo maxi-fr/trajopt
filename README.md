@@ -148,6 +148,49 @@ U = opt_state.controls
 print(f"Optimal final state: {np.asarray(X[-1])}")
 ```
 
+### Native iLQR / ALTRO solvers
+
+Alongside the Ipopt/OSQP/Clarabel transcription adapters, `trajopt.solvers` ports iLQR, an
+augmented-Lagrangian (AL) outer loop, a control-limited DDP backward pass, Projected Newton (PN)
+polish, and the combined ALTRO driver from
+[`Altro.jl`](https://github.com/RoboticExplorationLab/Altro.jl) as native JAX solvers. Every
+solver loop is a `lax.while_loop`/`lax.scan`, so a whole solve is one jittable, vmappable function
+-- the intended reason to reach for one of these over the Ipopt adapter is speed on a
+repeatedly-solved path (e.g. receding-horizon MPC via `jax.jit`/`jax.vmap` over the traced core),
+not feature parity: the native solvers are not reverse-mode differentiable, and constraints go
+through shooting (`ILQR`/`AL`/`ALTRO`) or PN's own multiple-shooting layout, not the general NLP
+transcription `transcription/` builds for Ipopt. `ALTRO().solve()` is a *thin eager wrapper* that
+does not itself `jax.jit` the traced core, so a bare one-off call pays full untraced dispatch
+overhead; see `docs/adr/0001-altro-port-divergences.md`'s benchmark section for measured numbers
+against Ipopt, both as called through `.solve()` and hand-jitted.
+
+- **`ILQR`** -- unconstrained (or box-only, via the control-limited variant below) iterative LQR.
+  Cheapest of the three; reach for it when the problem has no general constraints, or when a
+  caller is doing its own AL-style penalty wrapping.
+- **`AL`** -- augmented-Lagrangian outer loop wrapping `ILQR`'s inner solve, for problems with
+  general (in)equality and conic constraints. `MPCState.al` carries the per-knot duals and
+  penalties so they warm-start across MPC steps, which is most of the reason AL suits MPC over a
+  cold-started NLP solve.
+- **`ALTRO`** -- `AL` followed by a Projected Newton polish phase (`PN`) that drives the
+  constraint violation the rest of the way to tolerance where AL alone plateaus. Takes an
+  unconstrained-problem shortcut straight to `ILQR` when `problem` has no constraints at all.
+- **Control-limited DDP** -- a Tassa box-QP backward pass (`trajopt.solvers.boxqp`), not part of
+  Altro.jl, verified independently against Clarabel. Enforces control bounds exactly in the
+  backward pass rather than through an AL penalty; pass its `solve_kd_builder` into `AL`/`ALTRO`
+  to route `ControlBound` rows through it while other constraints still go through the AL loop.
+
+Swapping backends is a one-word change, since every solver satisfies the same `Solver` protocol:
+
+```python3
+from trajopt.solvers.altro import ALTRO
+
+opt_state = prob.solve(state, solver=ALTRO())  # was: prob.solve(state), the Ipopt default
+```
+
+See `docs/altro-jl-reference.md` (corrected by `docs/altro-port/00-overview.md`'s findings) for
+the algorithm this port targets, and `docs/adr/0001-altro-port-divergences.md` for where the
+Python port deliberately diverges from it.
+
 ---
 
 ## Testing & Quality Checks
@@ -182,12 +225,11 @@ uv run pre-commit run --all-files
 
 ## Roadmap
 
-The core v1 architecture establishes the expansion engine, dynamics integration, conic constraint catalog, and external solver transcriptions (Ipopt, OSQP, Clarabel). Future milestones include:
+The core v1 architecture establishes the expansion engine, dynamics integration, conic constraint catalog, external solver transcriptions (Ipopt, OSQP, Clarabel), and native `ILQR`/`AL`/`ALTRO` solvers (see [Native iLQR / ALTRO solvers](#native-ilqr--altro-solvers) above). Future milestones include:
 
-- **Native iLQR & DDP:** Iterative Linear Quadratic Regulator and Differential Dynamic Programming algorithms consuming the shared expansion engine.
-- **Native ALTRO:** Augmented Lagrangian Trajectory Optimizer for fast constrained trajectory optimization.
 - **Sequential Quadratic Programming (SQP):** Direct SQP solver with line-search filter and active-set strategy.
 - **Closed-Loop Simulation Harness:** Environment wrappers for receding-horizon MPC simulation and hardware-in-the-loop testing.
+- **Reverse-mode differentiable native solves:** a `custom_vjp` on the native solvers' fixed point, layered on top of the traced `lax.while_loop` cores without changing them.
 
 ---
 

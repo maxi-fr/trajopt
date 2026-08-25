@@ -2,7 +2,9 @@ import pytest
 
 from trajopt.benchmarks import (
     ClosedLoopStats,
+    NativeVsIpoptTiming,
     cartpole_swingup_benchmark,
+    measure_altro_vs_ipopt,
     measure_closed_loop_mpc,
 )
 
@@ -35,3 +37,18 @@ def test_closed_loop_mpc_measurement_and_jitter() -> None:
     assert stats.sustained_frequency_hz > 0.0
     assert stats.warmstart_speedup > 1.0  # Warm-start speedup is quantified and > 1
     assert stats.total_duration_s > 0.0
+
+
+def test_altro_vs_ipopt_timing_reports_both_solve_durations() -> None:
+    """Verify the native-vs-Ipopt comparison times both solvers on the same problem."""
+    pytest.importorskip("cyipopt")
+
+    prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
+
+    timing: NativeVsIpoptTiming = measure_altro_vs_ipopt(
+        prob, state, ipopt_options={"max_iter": 200, "tol": 1e-6, "print_level": 0}
+    )
+
+    assert timing.ipopt_time_s > 0.0
+    assert timing.altro_time_s > 0.0
+    assert timing.speedup > 0.0

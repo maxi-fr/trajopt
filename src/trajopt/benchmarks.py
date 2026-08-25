@@ -18,6 +18,8 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import MPCState, Problem
+from trajopt.solvers.altro import ALTRO
+from trajopt.solvers.options import SolverOptions
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
@@ -583,6 +585,56 @@ def measure_closed_loop_mpc(
         sustained_frequency_hz=freq,
         warmstart_speedup=speedup,
         total_duration_s=t_total_loop,
+    )
+
+
+class NativeVsIpoptTiming(NamedTuple):
+    """Wall-clock comparison of a native ALTRO solve against the Ipopt adapter on the same problem.
+
+    Parameters
+    ----------
+    ipopt_time_s : float
+        Ipopt solve duration in seconds, discarded warmup solve excluded.
+    altro_time_s : float
+        Native ALTRO solve duration in seconds, discarded (JIT-compiling) warmup solve excluded.
+    speedup : float
+        `ipopt_time_s / altro_time_s`; greater than one means ALTRO solved faster.
+    """
+
+    ipopt_time_s: float
+    altro_time_s: float
+    speedup: float
+
+
+def measure_altro_vs_ipopt(
+    problem: Problem,
+    state: MPCState,
+    *,
+    ipopt_options: Mapping[str, Any] | None = None,
+    altro_options: SolverOptions | None = None,
+) -> NativeVsIpoptTiming:
+    """Time a native `ALTRO` solve against the `Ipopt` adapter on the same problem and initial state.
+
+    Each solver runs once and is discarded first, so the measured solve is not dominated by
+    Ipopt's C++ extension warmup or ALTRO's `lax.while_loop` JIT compilation, matching
+    `measure_solver_runtime`'s pattern.
+    """
+    ipopt = Ipopt(options=dict(ipopt_options) if ipopt_options else {})
+    _ = ipopt.solve(problem, state)
+    t_start = time.perf_counter()
+    _ = ipopt.solve(problem, state)
+    t_ipopt = time.perf_counter() - t_start
+
+    altro = ALTRO(options=altro_options or SolverOptions())
+    _ = altro.solve(problem, state)
+    t_start = time.perf_counter()
+    _ = altro.solve(problem, state)
+    t_altro = time.perf_counter() - t_start
+
+    return NativeVsIpoptTiming(
+        ipopt_time_s=t_ipopt,
+        altro_time_s=t_altro,
+        speedup=t_ipopt / t_altro if t_altro > 0 else float("inf"),
     )
 
 
