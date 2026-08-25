@@ -100,6 +100,10 @@ class Problem(eqx.Module):
         lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if single_shooting or len(res.lam) > 0 else state.lam
         mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if single_shooting or len(res.mu) > 0 else state.mu
 
+        # AL solvers (ticket 29) populate `res.al` with their padded per-knot duals/penalties for
+        # MPCState warm-starting; every other backend leaves it absent, so the prior al survives.
+        al = getattr(res, "al", None)
+
         return MPCState(
             x0=state.x0,
             t0=state.t0,
@@ -112,7 +116,7 @@ class Problem(eqx.Module):
             m=state.m,
             N=state.N,
             status=normalize_status(success=res.success, message=res.message),
-            al=state.al,
+            al=al if al is not None else state.al,
         )
 
     def cost(self, state: "MPCState") -> jax.Array:

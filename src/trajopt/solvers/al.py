@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field, replace
+from typing import Any, NamedTuple, cast
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -5,10 +8,16 @@ import numpy as np
 
 from trajopt.cones import ZeroCone
 from trajopt.constraints.constraint_list import BuiltConstraintList
+from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.solvers.options import SolverOptions
+from trajopt.problem import MPCState, Problem
+from trajopt.solvers.ilqr import ilqr_solve
+from trajopt.solvers.options import SolverOptions, TerminationStatus
 from trajopt.trajectory import Trajectory
+from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
+
+_EMPTY = np.zeros(0, dtype=np.float64)
 
 
 class ALConstraints(eqx.Module):
@@ -348,3 +357,400 @@ def max_penalty(al: ALConstraints) -> jax.Array:
     mu_masked = jnp.where(al.row_mask, al.mu, -jnp.inf)
     has_rows = jnp.any(al.row_mask)
     return jnp.where(has_rows, jnp.max(mu_masked), 0.0)
+
+
+class _ALObjective(eqx.Module):
+    """Adapts (base objective, constraints, model, duals) into iLQR's `.cost(traj)` duck type.
+
+    `ilqr_solve`'s line search calls `obj.cost` and nothing else (ticket 27), so adding the AL
+    penalty cost here is the entire "different cost function" half of the composition seam
+    (reference §5.1, ALObjective): the inner solver never learns a constraint exists.
+    """
+
+    obj: Objective
+    constraints: BuiltConstraintList
+    model: AbstractModel
+    al: ALConstraints
+
+    def cost(self, traj: Trajectory) -> jax.Array:
+        """Add the augmented-Lagrangian penalty cost `al_cost` onto the base unconstrained cost."""
+        base = self.obj.cost(traj)
+        C, _Jx, _Ju = evaluate_al_constraints(self.al, self.constraints, self.model, traj)
+        return base + al_cost(self.al, C)
+
+
+class _ALProblem(eqx.Module):
+    """Adapts `(Problem, duals)` into `ilqr_solve`'s duck-typed input -- the whole composition seam.
+
+    `dynamics_expansion` passes through `problem` unchanged; `obj` and `cost_expansion` add the
+    AL penalty cost and its Gauss-Newton gradient/Hessian (ticket 28) on top of the base
+    objective. This is the only new code `ilqr_solve` sees: nothing in `ilqr.py` changes
+    (reference §5.1, ticket 29's central constraint).
+    """
+
+    problem: Problem
+    al: ALConstraints
+
+    @property
+    def model(self) -> AbstractModel:
+        """Delegate to the wrapped problem's model; unconstrained dynamics are untouched."""
+        return self.problem.model
+
+    @property
+    def obj(self) -> _ALObjective:
+        """Build the AL-augmented cost-function adapter fresh from the current duals."""
+        return _ALObjective(self.problem.obj, self.problem.constraints, self.problem.model, self.al)
+
+    def dynamics_expansion(self, traj: Trajectory) -> Expansion:
+        """Pass through the wrapped problem's unconstrained dynamics expansion."""
+        return self.problem.dynamics_expansion(traj)
+
+    def cost_expansion(self, traj: Trajectory) -> Expansion:
+        """Add the AL penalty's gradient/Hessian onto the base cost expansion, via `add_al_expansion`."""
+        base = self.problem.cost_expansion(traj)
+        C, Jx_err, Ju = evaluate_al_constraints(self.al, self.problem.constraints, self.problem.model, traj)
+        return add_al_expansion(base, self.al, C, Jx_err, Ju)
+
+
+class ALStats(eqx.Module):
+    """Fixed-size pytree of per-outer-iteration AL solve statistics, traceable end to end.
+
+    Mirrors `SolverStats` (ticket 24): preallocated at `options.iterations_outer`, written with
+    `.at[i].set(...)` under trace, trimmed only at the eager boundary. Reference §8.2 row 15
+    requires the whole `(cost, c_max, penalty_max)` history, not just the final values.
+
+    Parameters
+    ----------
+    iterations : jax.Array
+        Number of completed outer iterations so far, as an int32 scalar.
+    cost : jax.Array
+        AL-augmented cost history of shape `(options.iterations_outer,)`.
+    c_max : jax.Array
+        Max constraint violation history of shape `(options.iterations_outer,)`.
+    penalty_max : jax.Array
+        Max AL penalty history of shape `(options.iterations_outer,)`.
+    """
+
+    iterations: jax.Array
+    cost: jax.Array
+    c_max: jax.Array
+    penalty_max: jax.Array
+
+    @classmethod
+    def create(cls, options: SolverOptions) -> "ALStats":
+        """Allocate zeroed history buffers of length `options.iterations_outer`."""
+        history = jnp.zeros(options.iterations_outer, dtype=jnp.float64)
+        return cls(iterations=jnp.asarray(0, dtype=jnp.int32), cost=history, c_max=history, penalty_max=history)
+
+
+def _trim_al_stats(stats: ALStats, n_iter: int) -> ALStats:
+    """Slice a finished AL solve's fixed-size stats buffers down to the completed iteration count."""
+    return ALStats(
+        iterations=stats.iterations,
+        cost=stats.cost[:n_iter],
+        c_max=stats.c_max[:n_iter],
+        penalty_max=stats.penalty_max[:n_iter],
+    )
+
+
+class ALCarry(NamedTuple):
+    """Traced `lax.while_loop` state for one AL solve; see `al_solve` for field meaning."""
+
+    i: jax.Array
+    trajectory: Trajectory
+    al: ALConstraints
+    stats: ALStats
+    done: jax.Array
+    status: jax.Array
+
+
+def _evaluate_al_convergence(
+    c_max: jax.Array,
+    mu_max: jax.Array,
+    inner_iterations: jax.Array,
+    iter_num: jax.Array,
+    options: SolverOptions,
+) -> tuple[jax.Array, jax.Array]:
+    """Decide the outer-loop status and whether to stop, matching `al_solve.jl`'s `evaluate_convergence`.
+
+    Reproduces the four independent `if`s from reference §5.5 as a **last-match-wins** sequence
+    of overwrites (finding A), not an ordered first-match list: a later check silently overwrites
+    an earlier one's `status`, so converging on the same outer iteration that also exhausts
+    `iterations_outer` reports `MAX_ITERATIONS_OUTER`, not `SOLVE_SUCCEEDED`.
+
+    `kickout_max_penalty` (finding B) is Altro's own broken branch, ported as clearly intended:
+    `mu_max >= options.penalty_max` ends the loop ("converged") without writing `status` at all,
+    so `status` can still be `UNSOLVED` when kickout is the only thing that fired. That is a
+    deliberate divergence from a clean "converged implies SOLVE_SUCCEEDED" API -- Altro's own
+    branch throws (`solver.stats.penalty_max[i]` references an undefined `i`) and so cannot be
+    parity-tested against Julia; ticket 33's ALTRO polish phase is what turns this early exit
+    into `SOLVE_SUCCEEDED` once projected Newton drives the violation under tolerance.
+
+    Parameters
+    ----------
+    c_max : jax.Array
+        Max constraint violation for this outer iteration.
+    mu_max : jax.Array
+        Max AL penalty for this outer iteration.
+    inner_iterations : jax.Array
+        Completed iLQR iteration count from this outer iteration's inner solve.
+    iter_num : jax.Array
+        Completed outer iteration count (1-indexed) including this iteration.
+    options : SolverOptions
+        Supplies `constraint_tolerance`, `kickout_max_penalty`, `penalty_max`, `iterations`,
+        `iterations_outer`.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        `(status, done)`: the `TerminationStatus` ordinal (possibly still `UNSOLVED`) as an int32
+        scalar, and whether the outer loop should stop this iteration, as a bool scalar.
+    """
+    status = jnp.int32(TerminationStatus.UNSOLVED)
+
+    converged_violation = c_max < options.constraint_tolerance
+    status = jnp.where(converged_violation, jnp.int32(TerminationStatus.SOLVE_SUCCEEDED), status)
+
+    kickout = jnp.asarray(options.kickout_max_penalty) & (mu_max >= options.penalty_max)
+
+    max_iters_hit = inner_iterations >= options.iterations
+    status = jnp.where(max_iters_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS), status)
+
+    max_outer_hit = iter_num >= options.iterations_outer
+    status = jnp.where(max_outer_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER), status)
+
+    done = converged_violation | kickout | max_iters_hit | max_outer_hit
+    return status, done
+
+
+def _al_step(carry: ALCarry, problem: Problem, options: SolverOptions) -> ALCarry:
+    """One augmented-Lagrangian outer iteration, matching `al_solve.jl`'s per-iteration body.
+
+    Follows reference §5.5's order exactly: effective (possibly intermediate) tolerances, solve
+    the inner iLQR on the AL-augmented objective (`_ALProblem`), break on an ordinal inner-status
+    failure (finding C) before anything else runs, then cost/violation/penalty maxima, record,
+    check outer convergence (`_evaluate_al_convergence`), and only when neither break fired: dual
+    update, penalty update. `ilqr_solve`'s own unconditional open-loop re-rollout each call *is*
+    Altro's `initialize!` inside every `solve!(ilqr)` (reference §4.1) -- carrying the previous
+    outer iteration's accepted trajectory in as the next call's warm start reproduces Altro's
+    per-outer-iteration reset without any change to `ilqr.py`.
+    """
+    i = carry.i
+    is_last = i == jnp.int32(options.iterations_outer - 1)
+    eff_options = replace(
+        options,
+        cost_tolerance=jnp.where(is_last, options.cost_tolerance, options.cost_tolerance_intermediate),
+        gradient_tolerance=jnp.where(is_last, options.gradient_tolerance, options.gradient_tolerance_intermediate),
+    )
+
+    wrapped = _ALProblem(problem=problem, al=carry.al)
+    # _ALProblem duck-types Problem's (model, obj, dynamics_expansion, cost_expansion) surface --
+    # the whole composition seam -- without being one; ilqr_solve only ever calls through that
+    # surface, so the cast is a type-checker formality, not a behavioral claim.
+    new_traj, inner_stats, inner_status = ilqr_solve(cast("Problem", wrapped), carry.trajectory, eff_options)
+    inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
+
+    C, _Jx_err, _Ju = evaluate_al_constraints(carry.al, problem.constraints, problem.model, new_traj)
+    J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al).cost(new_traj)
+    c_max = max_violation(carry.al, C)
+    mu_max = max_penalty(carry.al)
+
+    iter_num = i + 1
+    idx = i
+    stats = carry.stats
+    recorded_stats = ALStats(
+        iterations=iter_num,
+        cost=stats.cost.at[idx].set(J),
+        c_max=stats.c_max.at[idx].set(c_max),
+        penalty_max=stats.penalty_max.at[idx].set(mu_max),
+    )
+    new_stats = jax.tree.map(lambda new, old: jnp.where(inner_failed, old, new), recorded_stats, stats)
+
+    conv_status, conv_done = _evaluate_al_convergence(c_max, mu_max, inner_stats.iterations, iter_num, options)
+
+    skip_dual_update = inner_failed | conv_done
+    al_updated = penalty_update(dual_update(carry.al, C, options), options)
+    new_al = jax.tree.map(lambda new, old: jnp.where(skip_dual_update, old, new), al_updated, carry.al)
+
+    final_status = jnp.where(inner_failed, inner_status, conv_status)
+    final_done = inner_failed | conv_done
+
+    return ALCarry(
+        i=iter_num,
+        trajectory=new_traj,
+        al=new_al,
+        stats=new_stats,
+        done=final_done,
+        status=final_status,
+    )
+
+
+def al_solve(
+    problem: Problem,
+    trajectory: Trajectory,
+    al0: ALConstraints,
+    options: SolverOptions,
+) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
+    """Traced augmented-Lagrangian outer loop, matching `Altro.ALSolver`'s `solve!` (`al_solve.jl`).
+
+    A pure `(problem, trajectory, al0, options) -> (trajectory, al, stats, status)` function
+    built from one `lax.while_loop` around `ilqr_solve` (ticket 27), jittable and vmappable end
+    to end with `options` static. `al0` is caller-supplied rather than built here: allocating its
+    padded row layout (`ALConstraints.build`) is eager Python/NumPy over `problem.constraints`
+    (ticket 28), not traceable, and is also where `reset_duals`/`reset_penalties`-gated
+    warm-starting from a prior `MPCState.al` belongs (reference §5.5's note that the outer loop
+    body itself never resets duals/penalties -- only a whole solve's start does).
+
+    Parameters
+    ----------
+    problem : Problem
+        Supplies the model, unconstrained objective, constraints, and the `cost_expansion` /
+        `dynamics_expansion` methods `_ALProblem` wraps.
+    trajectory : Trajectory
+        Warm-start guess passed straight through to the first `ilqr_solve` call.
+    al0 : ALConstraints
+        Initial duals and penalties, already reset or warm-started by the caller.
+    options : SolverOptions
+        Static solve configuration; must not be traced.
+
+    Returns
+    -------
+    tuple[Trajectory, ALConstraints, ALStats, jax.Array]
+        The accepted trajectory, final duals/penalties, the outer stats history (buffers sized
+        `options.iterations_outer`, untrimmed), and the exit `TerminationStatus` ordinal as an
+        int32 scalar.
+    """
+    init_carry = ALCarry(
+        i=jnp.int32(0),
+        trajectory=trajectory,
+        al=al0,
+        stats=ALStats.create(options),
+        done=jnp.asarray(False),  # noqa: FBT003 -- traced bool scalar, not a boolean-trap argument
+        status=jnp.int32(TerminationStatus.UNSOLVED),
+    )
+
+    def cond(carry: ALCarry) -> jax.Array:
+        return (~carry.done) & (carry.i < options.iterations_outer)
+
+    def body(carry: ALCarry) -> ALCarry:
+        return _al_step(carry, problem, options)
+
+    final = jax.lax.while_loop(cond, body, init_carry)
+    return final.trajectory, final.al, final.stats, final.status
+
+
+class ALResult(NamedTuple):
+    """Result of a native augmented-Lagrangian solve, satisfying the `SolverResult` protocol.
+
+    Parameters
+    ----------
+    trajectory : Trajectory
+        Optimal state and control trajectory.
+    success : bool
+        Whether the core exited with `TerminationStatus.SOLVE_SUCCEEDED`.
+    status : int
+        `TerminationStatus` ordinal the traced core exited with.
+    message : str
+        `TerminationStatus` member name.
+    cost : float
+        Final AL-augmented objective value.
+    Z : jax.Array
+        Optimal flat primal vector.
+    info : dict[str, Any]
+        Holds the trimmed outer `ALStats` history under `"stats"`.
+    iterations : int, optional
+        Number of completed outer iterations. Defaults to 0.
+    constraint_violation : float, optional
+        Final `max_violation` over the returned duals/trajectory. Defaults to 0.0.
+    lam : np.ndarray, optional
+        Always empty: AL duals live in `al`, in its own padded per-knot-per-row layout, not the
+        canonical transcription row order this field promises. Defaults to empty.
+    mu : np.ndarray, optional
+        Always empty, for the same reason as `lam`. Defaults to empty.
+    al : ALConstraints | None, optional
+        Final padded duals and penalties, threaded into `MPCState.al` for warm-starting the next
+        solve. Defaults to None.
+    """
+
+    trajectory: Trajectory
+    success: bool
+    status: int
+    message: str
+    cost: float
+    Z: jax.Array
+    info: dict[str, Any]
+    iterations: int = 0
+    constraint_violation: float = 0.0
+    lam: np.ndarray = _EMPTY
+    mu: np.ndarray = _EMPTY
+    al: ALConstraints | None = None
+
+
+@dataclass(frozen=True)
+class AL:
+    """Native augmented-Lagrangian solver backend, satisfying the `Solver` protocol.
+
+    A thin eager wrapper over the traced `al_solve` core (ticket 29): `.solve()` builds the
+    warm-start trajectory from `state`, builds or warm-starts the initial padded duals/penalties
+    from `state.al` (subject to `options.reset_duals` / `reset_penalties`), calls the jitted
+    core, then converts the traced status int and stats buffers into `success` / `message` /
+    `info` at the boundary -- work that cannot happen inside a trace. Bound constraints
+    (`ControlBound`, state bounds) are ordinary inequality constraints here, handled by the outer
+    loop like any other; ticket 30 adds the alternative that treats them specially in the
+    backward pass.
+
+    Parameters
+    ----------
+    options : SolverOptions, optional
+        Static solve configuration. Defaults to `SolverOptions()`.
+    """
+
+    options: SolverOptions = field(default_factory=SolverOptions)
+
+    def solve(self, problem: Problem, state: MPCState) -> ALResult:
+        """Run the traced AL outer loop from `state`'s warm-start trajectory/duals and boundary-convert the result."""
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+        options = self.options
+
+        _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
+        assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
+        dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
+        t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
+        X0, U0 = _z_to_trajectory(z0, N, n, m)
+        init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
+
+        problem_eff = problem
+        if xf_val is not None and problem.obj.regulates_to_goal:
+            problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
+
+        fresh_al = ALConstraints.build(problem_eff.constraints, penalty_initial=options.penalty_initial)
+        if state.al is not None:
+            lam = fresh_al.lam if options.reset_duals else state.al.lam
+            mu = fresh_al.mu if options.reset_penalties else state.al.mu
+            init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))
+        else:
+            init_al = fresh_al
+
+        final_traj, final_al, stats, status_int = al_solve(problem_eff, init_traj, init_al, options)
+
+        status = TerminationStatus(int(status_int))
+        n_iter = int(stats.iterations)
+        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem_eff.constraints, problem_eff.model, final_traj)
+        final_cost = _ALObjective(problem_eff.obj, problem_eff.constraints, problem_eff.model, final_al).cost(
+            final_traj
+        )
+
+        return ALResult(
+            trajectory=final_traj,
+            success=status == TerminationStatus.SOLVE_SUCCEEDED,
+            status=int(status_int),
+            message=status.name,
+            cost=float(final_cost),
+            Z=_trajectory_to_z(final_traj.X, final_traj.U),
+            info={"stats": _trim_al_stats(stats, n_iter)},
+            iterations=n_iter,
+            constraint_violation=float(max_violation(final_al, C)),
+            al=final_al,
+        )
