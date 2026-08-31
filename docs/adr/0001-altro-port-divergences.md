@@ -206,11 +206,13 @@ exactness on curved constraints.
 
 ## Benchmark: native ALTRO vs Ipopt
 
-`src/trajopt/benchmarks.py`'s `measure_altro_vs_ipopt` times `ALTRO().solve()` against
+`src/trajopt/benchmarks.py`'s `measure_altro_vs_ipopt` timed `ALTRO().solve()` against
 `Ipopt().solve()` on `cartpole_swingup_benchmark`'s N=25 bound-and-goal-constrained cartpole (the
 same shape of problem as the ticket 33 cross test), each with one discarded warmup solve first so
 neither measurement is dominated by first-call setup or (for `ALTRO`) the one-off `jax.jit` compile,
-then `n_repeats=5` further calls are timed and averaged. Two independent runs, one machine (Windows,
+then `n_repeats=5` further calls are timed and averaged. That function has since been replaced by
+`compare_solvers`, which tabulates any set of solvers on any problem and reports medians rather
+than means; the numbers below are the record of the original two runs, one machine (Windows,
 this development environment), not statistically rigorous numbers -- reported to close the loop
 honestly, not as a performance claim to build on:
 

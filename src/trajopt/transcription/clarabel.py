@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -48,10 +49,10 @@ class ClarabelResult(NamedTuple):
         Optimal flat primal vector of shape ``(N * n + (N - 1) * m,)``.
     info : dict[str, Any]
         Raw Clarabel return info dictionary.
+    constraint_violation : float
+        Maximum constraint violation across all constraints.
     iterations : int, optional
         Number of solver iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Maximum constraint violation across all constraints. Defaults to 0.0.
     lam : np.ndarray, optional
         Constraint duals in canonical row order, of shape ``(P,)``. Defaults to empty.
     mu : np.ndarray, optional
@@ -65,8 +66,8 @@ class ClarabelResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
 
@@ -302,7 +303,19 @@ class Clarabel:
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def solve(self, problem: Problem, state: MPCState) -> ClarabelResult:
-        """Solve the transcribed optimal control problem using Clarabel."""
+        """Solve the transcribed optimal control problem using Clarabel, warning that it is one linearization.
+
+        The warning is unconditional rather than gated on the problem being nonlinear: every
+        caller handing this Backend a `Problem` gets one convex solve about the Operating
+        Point, and whether that answers their problem is theirs to judge.
+        """
+        warnings.warn(
+            "Clarabel solves a single convex subproblem built about the Operating Point: the "
+            "dynamics are linearized and the cost taken to second order once, so the result "
+            "optimizes an approximation of a nonlinear problem, not the problem itself.",
+            stacklevel=2,
+        )
+
         try:
             import clarabel  # noqa: PLC0415 -- clarabel is an optional solver dependency
         except ImportError as e:

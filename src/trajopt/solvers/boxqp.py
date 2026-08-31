@@ -383,10 +383,10 @@ class BoxQPSolveResult(NamedTuple):
         Optimal flat primal vector.
     info : dict[str, Any]
         Holds the trimmed outer `ALStats` history under `"stats"`.
+    constraint_violation : float
+        Final `max_violation` over the non-control-bound AL rows.
     iterations : int, optional
         Number of completed outer iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Final `max_violation` over the non-control-bound AL rows. Defaults to 0.0.
     lam : np.ndarray, optional
         Always empty, for the same reason as `ALResult.lam`. Defaults to empty.
     mu : np.ndarray, optional
@@ -404,8 +404,8 @@ class BoxQPSolveResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
     al: ALConstraints | None = None

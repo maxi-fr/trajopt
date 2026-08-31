@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -15,7 +16,12 @@ from trajopt.problem import MPCState, Problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, parse_solver_initial_state
+from trajopt.transcription.layout import (
+    _trajectory_to_z,
+    _z_to_trajectory,
+    compute_constraint_violation,
+    parse_solver_initial_state,
+)
 from trajopt.transcription.result import SolverStatus
 
 _EMPTY = np.zeros(0, dtype=np.float64)
@@ -922,10 +928,13 @@ class ILQRResult(NamedTuple):
         Optimal flat primal vector.
     info : dict[str, Any]
         Holds the trimmed `SolverStats` history under `"stats"`.
+    constraint_violation : float
+        Maximum violation of the problem's Defects and constraints at the returned
+        trajectory, measured by the transcription rather than by iLQR, which enforces
+        neither: the Defects hold by construction of the Rollout, and any constraint the
+        problem carries was ignored.
     iterations : int, optional
         Number of completed iLQR iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Always 0.0: an unconstrained iLQR has no constraints. Defaults to 0.0.
     lam : np.ndarray, optional
         Always empty: an unconstrained iLQR has no duals. Defaults to empty.
     mu : np.ndarray, optional
@@ -940,8 +949,8 @@ class ILQRResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
 
@@ -965,13 +974,26 @@ class ILQR:
     options: SolverOptions = field(default_factory=SolverOptions)
 
     def solve(self, problem: Problem, state: MPCState) -> ILQRResult:
-        """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result."""
+        """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result.
+
+        Warns when `problem` carries constraints: iLQR ignores them and solves the unconstrained
+        problem, so the returned trajectory answers a different question than the one asked. The
+        reported `constraint_violation` then measures how different.
+        """
+        if not problem.constraints.is_unconstrained():
+            warnings.warn(
+                "ILQR ignores constraints and box bounds: solving the unconstrained problem, so the "
+                "returned trajectory need not satisfy them. Use ALTRO or AL to enforce them.",
+                stacklevel=2,
+            )
+
         problem_eff, init_traj = build_warm_start(problem, state)
 
         final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, self.options)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
+        Z = _trajectory_to_z(final_traj.X, final_traj.U)
 
         return ILQRResult(
             trajectory=final_traj,
@@ -980,7 +1002,15 @@ class ILQR:
             message=status.name,
             solver_status=to_solver_status(status),
             cost=float(problem_eff.obj.cost(final_traj)),
-            Z=_trajectory_to_z(final_traj.X, final_traj.U),
+            Z=Z,
             info={"stats": _trim_stats(stats, n_iter)},
+            constraint_violation=compute_constraint_violation(
+                problem_eff,
+                Z,
+                state.x0,
+                t0=state.t0,
+                dt=final_traj.dt,
+                xf=state.xf,
+            ),
             iterations=n_iter,
         )

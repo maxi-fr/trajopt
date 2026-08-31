@@ -1,5 +1,6 @@
+import statistics
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 import jax
@@ -18,52 +19,27 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.altro import ALTRO
-from trajopt.solvers.options import SolverOptions
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import Ipopt, IpoptResult
+from trajopt.transcription.clarabel import Clarabel
+from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
+    compute_constraint_violation,
     constraint_bounds,
     primal_bounds,
 )
+from trajopt.transcription.osqp import OSQP
+from trajopt.transcription.result import Solver, SolverResult
 from trajopt.transcription.transcription import (
+    eval_f,
     eval_grad_f,
     eval_h,
     eval_jac_g,
 )
 
-
-class TimingBreakdown(NamedTuple):
-    """Detailed timing breakdown for a trajectory optimization solve.
-
-    Parameters
-    ----------
-    transcription_setup_time_s : float
-        Time to construct sparsity patterns, bound arrays, and problem callbacks in seconds.
-    derivative_eval_time_s : float
-        Average total derivative evaluation time (gradient + Jacobian + Hessian) per iteration in seconds.
-    grad_f_time_s : float
-        Average objective gradient evaluation time per call in seconds.
-    jac_g_time_s : float
-        Average constraint Jacobian evaluation time per call in seconds.
-    hess_l_time_s : float
-        Average Lagrangian Hessian evaluation time per call in seconds.
-    solver_runtime_s : float
-        Solver core solve time in seconds.
-    total_solve_time_s : float
-        End-to-end solve time in seconds.
-    iterations : int
-        Number of solver iterations completed.
-    """
-
-    transcription_setup_time_s: float
-    derivative_eval_time_s: float
-    grad_f_time_s: float
-    jac_g_time_s: float
-    hess_l_time_s: float
-    solver_runtime_s: float
-    total_solve_time_s: float
-    iterations: int
+# Backends that solve one convex subproblem about the Operating Point rather than the nonlinear
+# problem itself. Their rows are flagged, since a faster time bought by answering an easier
+# question is not a faster solve.
+_LINEARIZING = (OSQP, Clarabel)
 
 
 class ClosedLoopStats(NamedTuple):
@@ -110,30 +86,6 @@ class ClosedLoopStats(NamedTuple):
     sustained_frequency_hz: float
     warmstart_speedup: float
     total_duration_s: float
-
-
-class BenchmarkSuiteResult(NamedTuple):
-    """Result of running a benchmark problem through the timing harness.
-
-    Parameters
-    ----------
-    name : str
-        Benchmark problem name.
-    problem : Problem
-        Problem instance.
-    solve_result : IpoptResult
-        Optimization result from the initial solve.
-    timing : TimingBreakdown
-        Timing breakdown for single solve and derivative evaluation.
-    closed_loop : ClosedLoopStats
-        Receding horizon closed-loop MPC timing and jitter statistics.
-    """
-
-    name: str
-    problem: Problem
-    solve_result: IpoptResult
-    timing: TimingBreakdown
-    closed_loop: ClosedLoopStats
 
 
 def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory parameters
@@ -452,31 +404,56 @@ def measure_derivative_evaluations(
     }
 
 
+class SolveTiming(NamedTuple):
+    """Wall-clock timings of one solver on one problem over repeated warm calls.
+
+    Parameters
+    ----------
+    first_call_time_s : float
+        Duration of the first, discarded call in seconds. It includes `jax.jit` compilation for a
+        Native Solver and extension warmup for a Backend, so it is not a cold-start-from-default-
+        guess measurement -- `ClosedLoopStats.warmstart_speedup` is the one that means that.
+    median_time_s : float
+        Median duration of the timed calls in seconds.
+    min_time_s : float
+        Shortest timed call in seconds, the cleanest signal for a compute-bound solve.
+    """
+
+    first_call_time_s: float
+    median_time_s: float
+    min_time_s: float
+
+
 def measure_solver_runtime(
     problem: Problem,
     state: MPCState,
+    solver: Solver,
     *,
-    options: Mapping[str, Any] | None = None,
-) -> tuple[IpoptResult, float]:
-    """Solve the problem with Ipopt and measure the wall-clock solve duration in seconds.
+    n_repeats: int = 5,
+) -> tuple[SolverResult, SolveTiming]:
+    """Time `n_repeats` warm `solver.solve` calls after one discarded call, returning the last result.
 
-    A discarded solve runs first so that the measured one is not dominated by JIT compilation of
-    the callbacks, matching how the setup and derivative measurements are taken.
+    The discarded call is reported as `SolveTiming.first_call_time_s` rather than thrown away:
+    it is free, and for a Native Solver it is the compile the jit cache exists to amortize.
     """
-    ipopt = Ipopt(options=options or {})
-    _ = ipopt.solve(problem, state)
-
     t_start = time.perf_counter()
-    res = ipopt.solve(problem, state)
-    t_duration = time.perf_counter() - t_start
-    return res, t_duration
+    res = solver.solve(problem, state)
+    t_first = time.perf_counter() - t_start
+
+    durations: list[float] = []
+    for _ in range(n_repeats):
+        t_start = time.perf_counter()
+        res = solver.solve(problem, state)
+        durations.append(time.perf_counter() - t_start)
+
+    return res, SolveTiming(
+        first_call_time_s=t_first,
+        median_time_s=statistics.median(durations),
+        min_time_s=min(durations),
+    )
 
 
-def _measure_warmstart_pair(
-    problem: Problem,
-    state: MPCState,
-    opts: Mapping[str, Any],
-) -> tuple[float, float]:
+def _measure_warmstart_pair(problem: Problem, state: MPCState, solver: Solver) -> tuple[float, float]:
     """Time one MPC step solved warm-started and cold, returning (t_warm, t_cold) in seconds.
 
     Both solves face the same problem at the same step and differ only in the initial guess, so
@@ -490,14 +467,13 @@ def _measure_warmstart_pair(
         xf=state.xf,
         dt=state.dt,
     )
-    ipopt = Ipopt(options=opts)
 
     t_start = time.perf_counter()
-    _ = ipopt.solve(problem, state)
+    _ = solver.solve(problem, state)
     t_warm = time.perf_counter() - t_start
 
     t_start = time.perf_counter()
-    _ = ipopt.solve(problem, cold_state)
+    _ = solver.solve(problem, cold_state)
     t_cold = time.perf_counter() - t_start
 
     return t_warm, t_cold
@@ -506,9 +482,9 @@ def _measure_warmstart_pair(
 def measure_closed_loop_mpc(
     problem: Problem,
     initial_state: MPCState,
+    solver: Solver,
     *,
     num_steps: int = 20,
-    solver_options: Mapping[str, Any] | None = None,
 ) -> ClosedLoopStats:
     """Measure closed-loop MPC sustained frequency, latency jitter, and warm-start speedup.
 
@@ -516,14 +492,9 @@ def measure_closed_loop_mpc(
     rather than JIT compilation: the first step of an uncompiled loop runs two orders of
     magnitude slower than the rest and would otherwise set the mean, the jitter and the p95.
     """
-    opts = {"max_iter": 100, "tol": 1e-4, "print_level": 0}
-    if solver_options:
-        opts.update(solver_options)
-    ipopt = Ipopt(options=opts)
-
     # 1. Seed the loop, discarding a compilation solve first
-    _ = ipopt.solve(problem, initial_state)
-    cold_res = ipopt.solve(problem, initial_state)
+    _ = solver.solve(problem, initial_state)
+    cold_res = solver.solve(problem, initial_state)
 
     # 2. Receding horizon warm-started loop
     dt_val = float(initial_state.dt[0]) if initial_state.dt.ndim > 0 else float(initial_state.dt)
@@ -548,7 +519,7 @@ def measure_closed_loop_mpc(
     for _ in range(num_steps):
         curr_state = curr_state.shift(dt_val)
         t_step_start = time.perf_counter()
-        solved_state = problem.solve(curr_state, solver=ipopt)
+        solved_state = problem.solve(curr_state, solver=solver)
         t_step_dur = time.perf_counter() - t_step_start
         durations.append(t_step_dur)
 
@@ -560,7 +531,7 @@ def measure_closed_loop_mpc(
     t_total_loop = time.perf_counter() - t_loop_start
     durations_arr = np.asarray(durations, dtype=np.float64)
 
-    t_warm_step, t_cold_step = _measure_warmstart_pair(problem, curr_state, opts)
+    t_warm_step, t_cold_step = _measure_warmstart_pair(problem, curr_state, solver)
 
     mean_lat = float(np.mean(durations_arr))
     std_lat = float(np.std(durations_arr))
@@ -588,132 +559,237 @@ def measure_closed_loop_mpc(
     )
 
 
-class NativeVsIpoptTiming(NamedTuple):
-    """Wall-clock comparison of a native ALTRO solve against the Ipopt adapter on the same problem.
+def _model_name(problem: Problem) -> str:
+    """Name the problem's model for a table header, unwrapping the integrator around it.
+
+    `problem.model` is usually a `DiscretizedDynamics` holding the model the caller recognises,
+    and a header reading "DiscretizedDynamics" names every problem equally badly.
+    """
+    model = problem.model
+    inner = getattr(model, "continuous_dynamics", None)
+    return type(inner if inner is not None else model).__name__
+
+
+def _labelled(solvers: Sequence[Solver] | Mapping[str, Solver]) -> list[tuple[str, Solver]]:
+    """Pair each solver with its row label: a mapping's key, or the class name for a sequence."""
+    if isinstance(solvers, Mapping):
+        return list(solvers.items())
+    return [(type(s).__name__, s) for s in solvers]
+
+
+def _score(problem: Problem, state: MPCState, Z: jax.Array) -> tuple[float, float]:
+    """Recompute (cost, maximum constraint violation) of a solved `Z` under the transcription.
+
+    Every row is scored here rather than read off the solver's own result, because the solvers do
+    not agree on what either number means: ALTRO reports its augmented Lagrangian `c_max`, PN its
+    active-set residual, the Backends the transcription's violation including Defects, and iLQR
+    evaluates a retargeted objective. One definition applied to each returned Primal Vector is
+    what makes a column comparable down its length.
+    """
+    N = int(problem.N)
+    Z_arr = jnp.asarray(Z, dtype=jnp.float64)
+    dt_arr = jnp.broadcast_to(jnp.asarray(state.dt, dtype=jnp.float64), (N - 1,))
+
+    cost = float(eval_f(problem, Z_arr, state.t0, dt_arr, state.xf))
+    viol = compute_constraint_violation(problem, Z_arr, state.x0, t0=state.t0, dt=dt_arr, xf=state.xf)
+    return cost, viol
+
+
+class SolverRow(NamedTuple):
+    """One solver's outcome and timing in a `SolverComparison`.
 
     Parameters
     ----------
-    ipopt_time_s : float
-        Ipopt solve duration in seconds, mean over `n_repeats` warm calls (the one-off Ipopt
-        process/extension warmup excluded).
-    altro_time_s : float
-        Native ALTRO solve duration in seconds, mean over `n_repeats` warm calls -- i.e. the
-        `ALTRO().solve()` path the library ships, which calls `altro.py`'s module-level cached
-        `jax.jit` core, so the one-off compile (the first, discarded call) is excluded and every
-        measured call reuses that same compilation, the repeated-call MPC regime the cache exists
-        for.
-    speedup : float
-        `ipopt_time_s / altro_time_s`; greater than one means ALTRO solved faster.
+    solver : str
+        Row label: the solver's class name, or the caller's key when solvers were passed as a
+        mapping.
+    success : bool
+        The solver's own convergence flag.
+    iterations : int
+        Iterations the solver reported.
+    cost : float
+        Objective value recomputed by the harness at the returned Primal Vector, not the solver's
+        self-reported cost.
+    constraint_violation : float
+        Maximum violation recomputed by the harness at the returned Primal Vector, not the
+        solver's self-reported violation. A solver that ignores constraints shows it here.
+    timing : SolveTiming
+        First-call, median, and minimum warm solve durations.
+    linearizing : bool
+        Whether this solver solved a single convex subproblem about the Operating Point rather
+        than the nonlinear problem, which makes its time incomparable to the other rows'.
+    result : SolverResult
+        The last returned result, kept so a caller can read the solver's own numbers.
     """
 
-    ipopt_time_s: float
-    altro_time_s: float
-    speedup: float
+    solver: str
+    success: bool
+    iterations: int
+    cost: float
+    constraint_violation: float
+    timing: SolveTiming
+    linearizing: bool
+    result: SolverResult
 
 
-def measure_altro_vs_ipopt(
+class SolverComparison(NamedTuple):
+    """The table `compare_solvers` returns: one `SolverRow` per solver, in the order given.
+
+    No winner is declared. Which of speed, feasibility and cost matters is the caller's problem,
+    and a solver that is fastest because it ignored a constraint is not the answer to it.
+
+    Parameters
+    ----------
+    model : str
+        Class name of the problem's dynamics model, for the table header.
+    n_repeats : int
+        Number of timed warm calls behind each row's median and minimum.
+    rows : tuple[SolverRow, ...]
+        One row per solver, in the order the solvers were given.
+    """
+
+    model: str
+    n_repeats: int
+    rows: tuple[SolverRow, ...]
+
+    def format_table(self) -> str:
+        """Render the comparison as a plain-text table, returning it rather than printing it."""
+        header = (
+            f"{'solver':<12} {'ok':>5} {'iters':>6} {'cost':>14} {'violation':>12} "
+            f"{'first (ms)':>12} {'median (ms)':>12} {'min (ms)':>10}"
+        )
+        lines = [f"{self.model}, {self.n_repeats} warm calls", header, "-" * len(header)]
+        for r in self.rows:
+            label = r.solver + (" *" if r.linearizing else "")
+            lines.append(
+                f"{label:<12} {r.success!s:>5} {r.iterations:>6} {r.cost:>14.6g} "
+                f"{r.constraint_violation:>12.3e} {r.timing.first_call_time_s * 1e3:>12.1f} "
+                f"{r.timing.median_time_s * 1e3:>12.2f} {r.timing.min_time_s * 1e3:>10.2f}"
+            )
+        if any(r.linearizing for r in self.rows):
+            lines.append("* one convex solve about the Operating Point, not the nonlinear problem")
+        return "\n".join(lines)
+
+
+def compare_solvers(
     problem: Problem,
     state: MPCState,
+    solvers: Sequence[Solver] | Mapping[str, Solver],
     *,
-    ipopt_options: Mapping[str, Any] | None = None,
-    altro_options: SolverOptions | None = None,
     n_repeats: int = 5,
-) -> NativeVsIpoptTiming:
-    """Time a native `ALTRO` solve against the `Ipopt` adapter on the same problem and initial state.
+) -> SolverComparison:
+    """Solve one problem with each solver and tabulate their cost, feasibility, and warm solve time.
 
-    Each solver runs once and is discarded first (Ipopt's C++ extension warmup, ALTRO's
-    `jax.jit` compile), then `n_repeats` further calls are timed and averaged, so the reported
-    number is the warm/repeat-call regime `ALTRO`'s jitted core is designed for (repeated
-    `.solve()` calls on the same solver instance and problem shape, e.g. MPC), not a single
-    sample that could land on a compilation.
+    The solvers arrive already configured and their options are never rewritten: mapping one
+    tolerance onto `SolverOptions.constraint_tolerance`, Ipopt's `tol` and OSQP's `eps_abs` would
+    be wrong in a different way for each. Solvers compared at different tolerances compare
+    tolerances, which is the caller's to get right.
+
+    Errors propagate: a solver that raises on this problem stops the comparison rather than
+    becoming a failed row.
 
     Parameters
     ----------
+    solvers : Sequence[Solver] | Mapping[str, Solver]
+        Configured solver instances. Pass a mapping to label rows yourself, which is what
+        distinguishes two differently configured instances of the same solver.
     n_repeats : int, optional
-        Number of warm calls averaged per solver, after the one discarded warmup call. Defaults
-        to 5.
+        Timed warm calls per solver, after one discarded call. Defaults to 5.
     """
-    ipopt = Ipopt(options=dict(ipopt_options) if ipopt_options else {})
-    _ = ipopt.solve(problem, state)
-    t_start = time.perf_counter()
-    for _ in range(n_repeats):
-        _ = ipopt.solve(problem, state)
-    t_ipopt = (time.perf_counter() - t_start) / n_repeats
+    rows = []
+    for label, solver in _labelled(solvers):
+        res, timing = measure_solver_runtime(problem, state, solver, n_repeats=n_repeats)
+        cost, viol = _score(problem, state, res.Z)
+        rows.append(
+            SolverRow(
+                solver=label,
+                success=res.success,
+                iterations=res.iterations,
+                cost=cost,
+                constraint_violation=viol,
+                timing=timing,
+                linearizing=isinstance(solver, _LINEARIZING),
+                result=res,
+            )
+        )
 
-    altro = ALTRO(options=altro_options or SolverOptions())
-    _ = altro.solve(problem, state)
-    t_start = time.perf_counter()
-    for _ in range(n_repeats):
-        _ = altro.solve(problem, state)
-    t_altro = (time.perf_counter() - t_start) / n_repeats
-
-    return NativeVsIpoptTiming(
-        ipopt_time_s=t_ipopt,
-        altro_time_s=t_altro,
-        speedup=t_ipopt / t_altro if t_altro > 0 else float("inf"),
-    )
+    return SolverComparison(model=_model_name(problem), n_repeats=n_repeats, rows=tuple(rows))
 
 
-def run_benchmark(
-    problem_factory: Callable[[], tuple[Problem, MPCState, dict[str, Any]]],
+class ClosedLoopRow(NamedTuple):
+    """One solver's closed-loop MPC statistics in a `ClosedLoopComparison`.
+
+    Parameters
+    ----------
+    solver : str
+        Row label, as in `SolverRow.solver`.
+    linearizing : bool
+        As in `SolverRow.linearizing`.
+    stats : ClosedLoopStats
+        Latency, jitter, and warm-start statistics over the receding horizon run.
+    """
+
+    solver: str
+    linearizing: bool
+    stats: ClosedLoopStats
+
+
+class ClosedLoopComparison(NamedTuple):
+    """The table `compare_solvers_closed_loop` returns: one `ClosedLoopRow` per solver.
+
+    Parameters
+    ----------
+    model : str
+        Class name of the problem's dynamics model, for the table header.
+    num_steps : int
+        Receding horizon steps each solver ran.
+    rows : tuple[ClosedLoopRow, ...]
+        One row per solver, in the order the solvers were given.
+    """
+
+    model: str
+    num_steps: int
+    rows: tuple[ClosedLoopRow, ...]
+
+    def format_table(self) -> str:
+        """Render the closed-loop comparison as a plain-text table, returning it rather than printing it."""
+        header = (
+            f"{'solver':<12} {'mean (ms)':>10} {'median (ms)':>12} {'p95 (ms)':>10} "
+            f"{'p99 (ms)':>10} {'Hz':>8} {'warmstart':>10}"
+        )
+        lines = [f"{self.model}, {self.num_steps} closed-loop steps", header, "-" * len(header)]
+        for r in self.rows:
+            st = r.stats
+            label = r.solver + (" *" if r.linearizing else "")
+            lines.append(
+                f"{label:<12} {st.mean_latency_s * 1e3:>10.2f} {st.median_latency_s * 1e3:>12.2f} "
+                f"{st.p95_latency_s * 1e3:>10.2f} {st.p99_latency_s * 1e3:>10.2f} "
+                f"{st.sustained_frequency_hz:>8.1f} {st.warmstart_speedup:>9.2f}x"
+            )
+        if any(r.linearizing for r in self.rows):
+            lines.append("* one convex solve about the Operating Point, not the nonlinear problem")
+        return "\n".join(lines)
+
+
+def compare_solvers_closed_loop(
+    problem: Problem,
+    state: MPCState,
+    solvers: Sequence[Solver] | Mapping[str, Solver],
     *,
-    num_closed_loop_steps: int = 15,
-    solver_options: Mapping[str, Any] | None = None,
-) -> BenchmarkSuiteResult:
-    """Run a full benchmark problem through transcription setup, derivative profiling, solve, and MPC loop."""
-    problem, state, info = problem_factory()
-    opts = {"max_iter": 500, "tol": 1e-6, "print_level": 0}
-    if solver_options:
-        opts.update(solver_options)
+    num_steps: int = 15,
+) -> ClosedLoopComparison:
+    """Run a receding horizon MPC loop per solver and tabulate latency, jitter, and warm-start gain.
 
-    # 1. Setup timing
-    t_setup = measure_transcription_setup(problem, state.x0)
-
-    # 2. Derivative timing
-    deriv_timing = measure_derivative_evaluations(problem, state, num_evals=20)
-
-    # 3. Solver runtime
-    solve_res, t_solve = measure_solver_runtime(problem, state, options=opts)
-
-    timing = TimingBreakdown(
-        transcription_setup_time_s=t_setup,
-        derivative_eval_time_s=deriv_timing["total_derivative"],
-        grad_f_time_s=deriv_timing["grad_f"],
-        jac_g_time_s=deriv_timing["jac_g"],
-        hess_l_time_s=deriv_timing["hess_l"],
-        solver_runtime_s=t_solve,
-        total_solve_time_s=t_setup + t_solve,
-        iterations=solve_res.iterations,
-    )
-
-    # 4. Closed-loop MPC measurement
-    closed_loop_stats = measure_closed_loop_mpc(
-        problem,
-        state,
-        num_steps=num_closed_loop_steps,
-        solver_options={"max_iter": 100, "tol": 1e-4, "print_level": 0},
-    )
-
-    return BenchmarkSuiteResult(
-        name=str(info.get("name", "benchmark")),
-        problem=problem,
-        solve_result=solve_res,
-        timing=timing,
-        closed_loop=closed_loop_stats,
-    )
-
-
-def run_all_benchmarks(
-    *,
-    num_closed_loop_steps: int = 15,
-) -> dict[str, BenchmarkSuiteResult]:
-    """Execute all three benchmark problems (Cartpole, Quadrotor, Dubins) and return timing breakdown results."""
-    benchmarks = {
-        "cartpole": cartpole_swingup_benchmark,
-        "quadrotor": quadrotor_obstacle_benchmark,
-        "dubins": dubins_corridor_benchmark,
-    }
-    return {
-        name: run_benchmark(factory, num_closed_loop_steps=num_closed_loop_steps)
-        for name, factory in benchmarks.items()
-    }
+    Separate from `compare_solvers` rather than a mode of it: the two share no columns, since
+    latency percentiles over a moving problem and repeated solves of one fixed problem answer
+    different questions. This one costs `num_steps` solves per solver.
+    """
+    rows = [
+        ClosedLoopRow(
+            solver=label,
+            linearizing=isinstance(solver, _LINEARIZING),
+            stats=measure_closed_loop_mpc(problem, state, solver, num_steps=num_steps),
+        )
+        for label, solver in _labelled(solvers)
+    ]
+    return ClosedLoopComparison(model=_model_name(problem), num_steps=num_steps, rows=tuple(rows))

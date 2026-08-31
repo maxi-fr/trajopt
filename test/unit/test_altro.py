@@ -16,7 +16,6 @@ from trajopt.solvers.altro import (
     ALTRO,
     ALTROResult,
     _al_phase_tolerance,
-    _is_unconstrained,
     altro_solve,
 )
 from trajopt.solvers.options import SolverOptions, TerminationStatus
@@ -100,13 +99,13 @@ def test_altro_unconstrained_takes_ilqr_shortcut_without_al_or_pn_state(monkeypa
 def test_is_unconstrained_true_for_bare_problem() -> None:
     """A Problem built with no constraints and no box bounds is structurally unconstrained."""
     prob, _x0, _dt = _lq_problem()
-    assert _is_unconstrained(prob.constraints)
+    assert prob.constraints.is_unconstrained()
 
 
 def test_is_unconstrained_false_with_control_bound() -> None:
     """A Problem with a ControlBound is not structurally unconstrained."""
     prob, _x0, _dt = _cartpole_problem()
-    assert not _is_unconstrained(prob.constraints)
+    assert not prob.constraints.is_unconstrained()
 
 
 def test_al_phase_tolerance_loosened_to_projected_newton_tolerance() -> None:

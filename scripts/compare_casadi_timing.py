@@ -30,6 +30,7 @@ from trajopt.benchmarks import (  # noqa: E402 -- must follow the sys.path setup
     quadrotor_obstacle_benchmark,
 )
 from trajopt.problem import MPCState, Problem  # noqa: E402 -- must follow the sys.path setup above
+from trajopt.transcription.ipopt import Ipopt  # noqa: E402 -- must follow the sys.path setup above
 
 BenchmarkFactory = Callable[..., tuple[Problem, MPCState, dict[str, Any]]]
 
@@ -103,7 +104,7 @@ def compare_one(spec: ProblemSpec) -> None:
     dt = float(info["dt"])
 
     trajopt_setup_s = measure_transcription_setup(prob, x0, dt=dt)
-    trajopt_solve_res, trajopt_solve_s = measure_solver_runtime(prob, state, options=spec.solver_opts)
+    trajopt_solve_res, trajopt_timing = measure_solver_runtime(prob, state, Ipopt(options=spec.solver_opts))
 
     casadi_setup_s = _measure_casadi_setup(prob, x0, dt)
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
@@ -116,14 +117,14 @@ def compare_one(spec: ProblemSpec) -> None:
     print(f"\n{spec.name}")
     print(f"  {'':<10} {'setup (ms)':>12} {'solve (ms)':>12} {'iters':>8} {'success':>8}")
     print(
-        f"  {'trajopt':<10} {trajopt_setup_s * 1e3:>12.3f} {trajopt_solve_s * 1e3:>12.3f} "
+        f"  {'trajopt':<10} {trajopt_setup_s * 1e3:>12.3f} {trajopt_timing.median_time_s * 1e3:>12.3f} "
         f"{trajopt_solve_res.iterations:>8} {trajopt_solve_res.success!s:>8}"
     )
     print(
         f"  {'casadi':<10} {casadi_setup_s * 1e3:>12.3f} {casadi_solve_s * 1e3:>12.3f} "
         f"{casadi_iters!s:>8} {casadi_success!s:>8}"
     )
-    print(f"  solve speedup (casadi / trajopt): {casadi_solve_s / trajopt_solve_s:.2f}x")
+    print(f"  solve speedup (casadi / trajopt): {casadi_solve_s / trajopt_timing.median_time_s:.2f}x")
 
 
 def main() -> None:

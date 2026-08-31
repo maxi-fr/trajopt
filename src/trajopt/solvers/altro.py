@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.problem import MPCState, Problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.al import (
@@ -33,22 +32,6 @@ if TYPE_CHECKING:
     from trajopt.solvers.ilqr import SolveKD
 
 _EMPTY = np.zeros(0, dtype=np.float64)
-
-
-def _is_unconstrained(constraints: BuiltConstraintList) -> bool:
-    """Whether `constraints` has no real rows at all, Altro's `isempty(conSet)` shortcut check.
-
-    Structural (numpy/Python), never traced: sums the per-knot constraint-row counts and checks
-    every box bound for at least one finite entry.
-    """
-    has_rows = sum(constraints.p) > 0
-    has_bounds = bool(
-        np.any(np.isfinite(np.asarray(constraints.x_lower)))
-        or np.any(np.isfinite(np.asarray(constraints.x_upper)))
-        or np.any(np.isfinite(np.asarray(constraints.u_lower)))
-        or np.any(np.isfinite(np.asarray(constraints.u_upper)))
-    )
-    return not (has_rows or has_bounds)
 
 
 def _al_phase_tolerance(options: SolverOptions) -> tuple[float, bool]:
@@ -261,10 +244,10 @@ class ALTROResult(NamedTuple):
     info : dict[str, Any]
         Holds `"al_stats"` (trimmed `ALStats`), `"pn_stats"` (trimmed `PNStats`, or None when the
         polish phase's result was not selected), and `"ran_pn"` (bool).
+    constraint_violation : float
+        Final `max_violation` over the returned trajectory (post-PN when PN ran).
     iterations : int, optional
         Number of completed AL outer iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Final `max_violation` over the returned trajectory (post-PN when PN ran). Defaults to 0.0.
     lam : np.ndarray, optional
         Always empty, for the same reason as `ALResult.lam`. Defaults to empty.
     mu : np.ndarray, optional
@@ -283,8 +266,8 @@ class ALTROResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
     al: ALConstraints | None = None
@@ -322,7 +305,7 @@ class ALTRO:
         options = self.options
         problem_eff, init_traj = build_warm_start(problem, state)
 
-        if _is_unconstrained(problem_eff.constraints):
+        if problem_eff.constraints.is_unconstrained():
             final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, options)
             status = TerminationStatus(int(status_int))
             n_iter = int(stats.iterations)
@@ -335,6 +318,7 @@ class ALTRO:
                 cost=float(problem_eff.obj.cost(final_traj)),
                 Z=_trajectory_to_z(final_traj.X, final_traj.U),
                 info={"stats": trim_ilqr_stats(stats, n_iter), "ran_pn": False},
+                constraint_violation=0.0,  # no rows and no bounds: nothing here can be violated
                 iterations=n_iter,
                 al=None,
             )

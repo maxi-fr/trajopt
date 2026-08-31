@@ -200,6 +200,21 @@ class BuiltConstraintList(eqx.Module):
             ConstraintGroup(evaluator=self.knot_evaluators[ks[0]], knots=tuple(ks)) for ks in by_structure.values()
         )
 
+    def is_unconstrained(self) -> bool:
+        """Whether there are no constraint rows and no finite box bounds at all.
+
+        Structural (numpy/Python), never traced: sums the per-knot constraint-row counts and
+        checks every box bound for at least one finite entry.
+        """
+        has_rows = sum(self.p) > 0
+        has_bounds = bool(
+            np.any(np.isfinite(np.asarray(self.x_lower)))
+            or np.any(np.isfinite(np.asarray(self.x_upper)))
+            or np.any(np.isfinite(np.asarray(self.u_lower)))
+            or np.any(np.isfinite(np.asarray(self.u_upper)))
+        )
+        return not (has_rows or has_bounds)
+
     def _knot_bounds(self, k: int) -> list[Constraint]:
         """Rebuild knot k's box limits as constraints, for consumers without native bounds."""
         cons: list[Constraint] = []

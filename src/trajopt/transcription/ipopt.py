@@ -51,10 +51,10 @@ class IpoptResult(NamedTuple):
         Optimal flat primal vector.
     info : dict[str, Any]
         Raw Ipopt return info dictionary.
+    constraint_violation : float
+        Maximum constraint violation across all constraints.
     iterations : int, optional
         Number of solver iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Maximum constraint violation across all constraints. Defaults to 0.0.
     lam : np.ndarray, optional
         Constraint duals in canonical row order, of shape ``(P,)``. Defaults to empty.
     mu : np.ndarray, optional
@@ -69,8 +69,8 @@ class IpoptResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
 

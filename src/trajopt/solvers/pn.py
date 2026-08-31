@@ -594,10 +594,10 @@ class PNResult(NamedTuple):
         `z_pn`, which is internal).
     info : dict[str, Any]
         Holds the trimmed outer `PNStats` history under `"stats"`.
+    constraint_violation : float
+        Final `max_violation` over PN's own residual/active-set.
     iterations : int, optional
         Number of completed outer projection solves. Defaults to 0.
-    constraint_violation : float, optional
-        Final `max_violation` over PN's own residual/active-set. Defaults to 0.0.
     lam : np.ndarray, optional
         Always empty: PN's duals live in `duals`, in its own row layout, not the canonical
         transcription row order this field promises. Defaults to empty.
@@ -616,8 +616,8 @@ class PNResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
     duals: jax.Array | None = None

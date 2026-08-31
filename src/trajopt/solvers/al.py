@@ -1005,10 +1005,10 @@ class ALResult(NamedTuple):
         Optimal flat primal vector.
     info : dict[str, Any]
         Holds the trimmed outer `ALStats` history under `"stats"`.
+    constraint_violation : float
+        Final `max_violation` over the returned duals/trajectory.
     iterations : int, optional
         Number of completed outer iterations. Defaults to 0.
-    constraint_violation : float, optional
-        Final `max_violation` over the returned duals/trajectory. Defaults to 0.0.
     lam : np.ndarray, optional
         Always empty: AL duals live in `al`, in its own padded per-knot-per-row layout, not the
         canonical transcription row order this field promises. Defaults to empty.
@@ -1027,8 +1027,8 @@ class ALResult(NamedTuple):
     cost: float
     Z: jax.Array
     info: dict[str, Any]
+    constraint_violation: float
     iterations: int = 0
-    constraint_violation: float = 0.0
     lam: np.ndarray = _EMPTY
     mu: np.ndarray = _EMPTY
     al: ALConstraints | None = None
