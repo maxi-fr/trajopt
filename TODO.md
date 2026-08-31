@@ -23,3 +23,5 @@
 * OSQP deprecation warning
 
 * ALTRO profiling and optimization
+
+* SingleShooting: support StateBound as constraint rows (xL <= X(u) <= xU) instead of rejecting it, since box bounds are hoisted into primal bounds before single shooting ever sees them

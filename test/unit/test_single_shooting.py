@@ -63,22 +63,40 @@ def test_single_shooting_rejects_state_bound() -> None:
         SingleShooting(Ipopt()).solve(prob, state)
 
 
-def test_single_shooting_rejects_stage_constraint() -> None:
-    """Non-goal stage constraints are refused until they are supported."""
+def test_single_shooting_accepts_general_stage_constraint() -> None:
+    """Non-goal stage constraints are solved, not refused: states are a differentiable function of u."""
     model = Pendulum()
     n, m, N = model.n, model.m, 10
     xf = jnp.array([np.pi, 0.0])
     obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), xf=xf, N=N)
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(
-        LinearConstraint(n=n, m=m, A=jnp.array([[1.0, 0.0, 0.0]]), b=jnp.array([0.0])),
+        LinearConstraint(n=n, m=m, A=jnp.array([[1.0, 0.0, 0.0]]), b=jnp.array([10.0])),
         range(N - 1),
     )
     prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
     state = MPCState.initial(prob, x0=jnp.zeros(n), xf=xf, dt=0.05)
 
-    with pytest.raises(ValueError, match="LinearConstraint"):
-        SingleShooting(Ipopt()).solve(prob, state)
+    result = SingleShooting(Ipopt()).solve(prob, state)
+
+    assert result.success
+
+
+def test_single_shooting_rejects_control_constraint_at_terminal_knot() -> None:
+    """A control-using constraint at the terminal knot is refused by ConstraintList itself.
+
+    Single shooting no longer validates this: `ConstraintList.add_constraint` already
+    refuses it at problem-construction time, for every transcription.
+    """
+    model = Pendulum()
+    n, m, N = model.n, model.m, 10
+    constraints = ConstraintList(n=n, m=m, N=N)
+
+    with pytest.raises(ValueError, match="terminal knot"):
+        constraints.add_constraint(
+            LinearConstraint(n=n, m=m, A=jnp.array([[1.0]]), b=jnp.array([0.0]), inds=[n]),
+            N - 1,
+        )
 
 
 @pytest.mark.slow

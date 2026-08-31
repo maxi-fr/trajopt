@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.constraints.linear import GoalConstraint
 from trajopt.dynamics.rollout import rollout_states
 from trajopt.problem import MPCState, Problem
 from trajopt.trajectory import Trajectory
@@ -168,7 +167,7 @@ def single_shooting_dimensions(problem: Problem) -> tuple[int, int]:
 
 
 def _validate_supported_constraints(problem: Problem) -> None:
-    """Refuse constraints single shooting cannot express as a function of controls alone."""
+    """Refuse primal state bounds: single shooting has no state decision variable to bound."""
     x_lower, x_upper, _, _ = problem.constraints.primal_bounds()
     if np.any(np.isfinite(x_lower)) or np.any(np.isfinite(x_upper)):
         msg = (
@@ -177,15 +176,6 @@ def _validate_supported_constraints(problem: Problem) -> None:
             "multiple-shooting transcription."
         )
         raise ValueError(msg)
-
-    for evaluator in problem.constraints.knot_evaluators:
-        for con in evaluator.constraints:
-            if not isinstance(con, GoalConstraint):
-                msg = (
-                    f"Single shooting v1 supports only ControlBound and GoalConstraint, found "
-                    f"{type(con).__name__}. Remove it or use the multiple-shooting transcription."
-                )
-                raise ValueError(msg)  # noqa: TRY004 -- unsupported-but-valid constraint, not an invalid type
 
 
 def _constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
