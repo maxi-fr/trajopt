@@ -1935,6 +1935,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "marimo" },
+    { name = "matplotlib" },
     { name = "pytest" },
     { name = "pytest-xdist" },
     { name = "ruff" },
@@ -1968,6 +1969,7 @@ requires-dist = [
     { name = "jaxlib", specifier = ">=0.4.25" },
     { name = "juliacall", marker = "extra == 'test'", specifier = ">=0.9.19" },
     { name = "marimo", marker = "extra == 'dev'", specifier = ">=0.23.8" },
+    { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "osqp", marker = "extra == 'solvers'", specifier = ">=0.6.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },

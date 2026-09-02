@@ -8,8 +8,6 @@
 
 * Remove unnecessary configurability. Many if else blocks
 
-* add examples marimo notebooks
-
 * make configurable
 
 * MPCState: .X, .U, .t instead of states, controls, etc.
