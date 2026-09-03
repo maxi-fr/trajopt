@@ -25,7 +25,9 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
 from trajopt.models.quadrotor import Quadrotor
-from trajopt.problem import MPCState, Problem, retarget_to_goal
+from trajopt.mpc import MPC
+from trajopt.problem import Problem, retarget_to_goal
+from trajopt.program import Program
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt
 
@@ -58,7 +60,7 @@ def test_cartpole_with_state_limits_casadi_parity() -> None:
     cl.add_constraint(StateBound(n=n, m=m, x_min=x_min, x_max=x_max), range(N))
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     casadi_prob = build_cartpole_casadi(
         N=N,
@@ -77,8 +79,7 @@ def test_cartpole_with_state_limits_casadi_parity() -> None:
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
+    trajopt_res = MPC(prob, Ipopt(options=solver_opts), x0=x0).solve()
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
@@ -121,7 +122,7 @@ def test_dubins_car_with_corridor_and_obstacles_casadi_parity() -> None:
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[0.0, -1.5], u_max=[2.0, 1.5]), range(N - 1))
     cl.add_constraint(CircleConstraint(n=n, m=m, xc=obs_xc, yc=obs_yc, radius=obs_r), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     casadi_prob = build_dubins_casadi(
         N=N,
@@ -147,8 +148,7 @@ def test_dubins_car_with_corridor_and_obstacles_casadi_parity() -> None:
     init_traj = Trajectory(X=X_init, U=U_init, t=t_init, dt=dt_arr)
 
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=init_traj)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
+    trajopt_res = MPC(prob, Ipopt(options=solver_opts), x0=x0, initial_trajectory=init_traj).solve()
     casadi_res = casadi_prob.solve(options=solver_opts, initial_X=np.asarray(X_init), initial_U=np.asarray(U_init))
 
     assert_parity(
@@ -181,14 +181,13 @@ def test_dual_multipliers_parity_under_identical_solver_settings() -> None:
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
 
     # Solve both with tight tolerance
     solver_opts = {"max_iter": 500, "tol": 1e-9, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
+    trajopt_res = MPC(prob, Ipopt(options=solver_opts), x0=x0).solve()
     casadi_res = casadi_prob.solve(options=solver_opts)
 
     assert_parity(
@@ -218,7 +217,7 @@ def test_setup_assertion_detects_mismatch() -> None:
     Qf = jnp.eye(3)
     obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
     cl = ConstraintList(n=n, m=m, N=N)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     # Mismatched horizon
     casadi_prob_diff_N = build_dubins_casadi(N=25, dt=dt, x0=x0, xf=xf)
@@ -256,7 +255,7 @@ def test_automated_builder_matches_standalone_builders() -> None:
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     cas_standalone = build_cartpole_casadi(
         N=N,
@@ -300,14 +299,13 @@ def test_pendulum_casadi_parity() -> None:
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
     opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    state = MPCState.initial(prob, x0=x0, dt=dt)
-    trajopt_res = Ipopt(options=opts).solve(prob, state)
+    trajopt_res = MPC(prob, Ipopt(options=opts), x0=x0).solve()
     casadi_res = casadi_prob.solve(opts)
 
     assert_parity(
@@ -326,26 +324,25 @@ def test_quadrotor_obstacle_benchmark_casadi_parity() -> None:
     pytest.importorskip("casadi")
     pytest.importorskip("cyipopt")
 
-    prob, state, info = quadrotor_obstacle_benchmark(
+    prob, bc, ws, info = quadrotor_obstacle_benchmark(
         N=25,
         dt=0.05,
         obstacles=((1.5, 1.5, 1.5, 0.5),),
         u_max=10.0,
     )
-    x0 = state.x0
+    x0 = bc.x0
     dt = float(info["dt"])
 
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
-    X_init = state.states
-    U_init = state.controls
+    X_init, U_init = ws.unpack(prob)
 
     # The quaternion block of the terminal Hessian is exactly singular, so Ipopt leans on inertia
     # correction and cannot drive this problem past roughly 1e-8; the duals are compared at the
     # accuracy it does reach rather than at one it does not.
     solver_opts = {"max_iter": 500, "tol": 1e-8, "print_level": 0}
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
+    trajopt_res = Program(prob, Ipopt(options=solver_opts)).solve(bc, ws)
     casadi_res = casadi_prob.solve(
         options=solver_opts,
         initial_X=np.asarray(X_init),
@@ -372,25 +369,24 @@ def test_dubins_corridor_benchmark_casadi_parity() -> None:
     pytest.importorskip("casadi")
     pytest.importorskip("cyipopt")
 
-    prob, state, info = dubins_corridor_benchmark(
+    prob, bc, ws, info = dubins_corridor_benchmark(
         N=25,
         dt=0.1,
         y_corridor_bound=0.5,
     )
-    x0 = state.x0
+    x0 = bc.x0
     dt = float(info["dt"])
 
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
     assert_setups_match(prob, casadi_prob, x0=x0, dt=dt)
 
-    X_init = state.states
-    U_init = state.controls
+    X_init, U_init = ws.unpack(prob)
 
     # Duals converge later than primals, and at 1e-8 the costates still differ in the fourth
     # significant figure while the trajectories agree to 1e-10. Tightening the solve is what
     # makes a dual comparison measure the formulations rather than the stopping rule.
     solver_opts = {"max_iter": 500, "tol": 1e-10, "print_level": 0}
-    trajopt_res = Ipopt(options=solver_opts).solve(prob, state)
+    trajopt_res = Program(prob, Ipopt(options=solver_opts)).solve(bc, ws)
     casadi_res = casadi_prob.solve(
         options=solver_opts,
         initial_X=np.asarray(X_init),

@@ -9,7 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from trajopt.dynamics.rollout import rollout_states
-from trajopt.problem import MPCState, Problem, retarget_problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
@@ -353,20 +354,21 @@ class SingleShooting:
         """Assemble the callback wrapper connecting the single-shooting problem to cyipopt."""
         return _SingleShootingCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
-    def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
-        """Solve the single-shooting transcription of `problem` from `state` using Ipopt."""
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
+        """Solve the single-shooting transcription of `program`'s problem from `bc` and `ws` using Ipopt."""
         import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
 
+        problem = program.problem
         _validate_supported_constraints(problem)
 
         N = int(problem.N)
         m = int(problem.model.m)
 
-        x0_arr, t0_arr, dt_arr, xf_val, _ = parse_solver_initial_state(state)
-        problem = retarget_problem(problem, state.bc)
+        x0_arr, t0_arr, dt_arr, xf_val, _ = parse_solver_initial_state(problem, bc, ws)
+        problem = retarget_problem(problem, bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
 
-        u0 = np.asarray(state.controls, dtype=np.float64).reshape(-1)
+        u0 = np.asarray(ws.unpack(problem)[1], dtype=np.float64).reshape(-1)
         z_lower, z_upper = _primal_bounds(problem)
         g_lower, g_upper = _constraint_bounds(problem)
 

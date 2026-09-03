@@ -255,7 +255,7 @@ def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective
 
     The target is no longer baked in at construction: the linear and constant terms start at zero,
     which regulates to the origin, and the goal arrives as traced data through
-    `BoundaryConditions` (pass `xf` or `reference` to `MPCState.initial`).
+    `BoundaryConditions` (pass `xf` or `reference` when constructing an `MPC`).
 
     Weights are held diagonally only if all three are diagonal vectors; otherwise all three are
     embedded as dense matrices.

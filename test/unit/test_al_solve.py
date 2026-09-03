@@ -9,7 +9,8 @@ from trajopt.constraints import ConstraintList, ControlBound, GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.solvers.al import AL, ALConstraints, ALResult, _evaluate_al_convergence
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus
 from trajopt.trajectory import Trajectory
@@ -39,7 +40,7 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=XF.tolist()), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt, integrator=RK4())
     return prob, x0, dt
 
 
@@ -50,9 +51,8 @@ def test_al_satisfies_solver_protocol() -> None:
 
 def test_al_result_satisfies_solver_result_protocol() -> None:
     """ALResult structurally satisfies the SolverResult protocol."""
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
-    result = AL(options=SolverOptions(iterations=2, iterations_outer=1)).solve(prob, state)
+    prob, x0, _dt = _cartpole_problem()
+    result = MPC(prob, AL(options=SolverOptions(iterations=2, iterations_outer=1)), x0=x0, xf=XF).solve()
     assert isinstance(result, ALResult)
     assert isinstance(result, SolverResult)
 
@@ -60,11 +60,10 @@ def test_al_result_satisfies_solver_result_protocol() -> None:
 @pytest.mark.slow
 def test_al_cartpole_converges_under_constraint_tolerance() -> None:
     """A bounded, goal-constrained cartpole swing-up drives max_violation under tolerance."""
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30)
 
-    result = AL(options=options).solve(prob, state)
+    result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
 
     assert result.success
     assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
@@ -86,8 +85,7 @@ def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyP
     """
     import trajopt.solvers.al as al_module
 
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     real_ilqr_solve = al_module.ilqr_solve
@@ -117,7 +115,7 @@ def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyP
         )
 
     monkeypatch.setattr(al_module, "ilqr_solve", checked_ilqr_solve)
-    result = AL(options=options).solve(prob, state)
+    result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
 
     assert result.success
     assert call_count > 0
@@ -135,42 +133,40 @@ def test_al_max_iterations_outer_maps_to_infeasible_status() -> None:
     so the outer loop exhausts `MAX_ITERATIONS_OUTER` -- the most common non-convergence outcome
     for a genuinely constrained problem.
     """
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=1)
 
-    result = AL(options=options).solve(prob, state)
+    result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
+    assert isinstance(result, ALResult)
     assert result.status == int(TerminationStatus.MAX_ITERATIONS_OUTER)
     assert result.solver_status == "infeasible"
 
 
-def test_al_populates_mpc_state_al_for_warm_starting() -> None:
-    """prob.solve(state, solver=AL()) returns an MPCState whose `al` field carries the final duals."""
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+def test_al_populates_warm_start_al_for_warm_starting() -> None:
+    """A driver step with AL leaves the warm start's `al` field carrying the solve's final duals."""
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30)
 
-    new_state = prob.solve(state, solver=AL(options=options))
+    mpc = MPC(prob, AL(options=options), x0=x0, xf=XF)
+    mpc.solve()
 
-    assert new_state.al is not None
-    assert isinstance(new_state.al, ALConstraints)
-    assert bool(jnp.any(new_state.al.lam != 0.0))
+    assert mpc.warm_start.al is not None
+    assert isinstance(mpc.warm_start.al, ALConstraints)
+    assert bool(jnp.any(mpc.warm_start.al.lam != 0.0))
 
 
 @pytest.mark.slow
 def test_al_warm_start_converges_in_fewer_outer_iterations_than_cold() -> None:
     """Reusing a prior solve's duals/penalties (reset_duals=False) converges in strictly fewer outer iterations."""
-    prob, x0, dt = _cartpole_problem()
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30, reset_duals=False, reset_penalties=False)
 
-    cold_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
-    cold_result = AL(options=options).solve(prob, cold_state)
+    cold_result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
     assert cold_result.success
 
-    warm_state = prob.solve(
-        MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None), solver=AL(options=options)
-    )
-    warm_result = AL(options=options).solve(prob, warm_state)
+    warm = MPC(prob, AL(options=options), x0=x0, xf=XF)
+    warm.solve()
+    warm_result = warm.solve()
 
     assert warm_result.success
     assert warm_result.iterations < cold_result.iterations
@@ -288,12 +284,12 @@ def test_al_solve_breaks_on_ordinal_inner_status_without_updating_duals() -> Non
     2). The outer loop must propagate that status directly and must not have recorded any stats
     or run a dual/penalty update for the (failed) first outer iteration.
     """
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+    prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=1, iterations_outer=30)
 
-    result = AL(options=options).solve(prob, state)
+    result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
 
+    assert isinstance(result, ALResult)
     assert not result.success
     assert result.status == int(TerminationStatus.MAX_ITERATIONS)
     assert result.iterations == 0
@@ -329,11 +325,10 @@ def test_evaluate_al_convergence_max_iters_uses_this_iterations_inner_count() ->
 @pytest.mark.parametrize("u_bnd", [3.0])
 def test_al_stats_history_length_matches_iterations(u_bnd: float) -> None:
     """The trimmed ALStats history in .info["stats"] has exactly `iterations` entries, no trailing zeros."""
-    prob, x0, dt = _cartpole_problem(u_bnd=u_bnd)
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
+    prob, x0, _dt = _cartpole_problem(u_bnd=u_bnd)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
-    result = AL(options=options).solve(prob, state)
+    result = MPC(prob, AL(options=options), x0=x0, xf=XF).solve()
     stats = result.info["stats"]
 
     assert stats.cost.shape[0] == result.iterations

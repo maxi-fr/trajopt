@@ -21,7 +21,7 @@ from trajopt.models.pendulum import Pendulum
 from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.ipopt import IpoptResult
+from trajopt.transcription.result import SolverResult
 
 
 class CasadiResult(NamedTuple):
@@ -1094,7 +1094,7 @@ def canonical_dual_blocks(problem: Problem) -> list[tuple[str, int, int]]:
 
 def assert_dual_block_parity(
     problem: Problem,
-    trajopt_res: IpoptResult,
+    trajopt_res: SolverResult,
     casadi_res: CasadiResult,
     *,
     tol_dual: float = 1e-4,
@@ -1112,7 +1112,7 @@ def assert_dual_block_parity(
     ----------
     problem : Problem
         The trajopt problem both formulations transcribe, read for the row layout.
-    trajopt_res : IpoptResult
+    trajopt_res : SolverResult
         Result whose `lam` holds the canonical constraint duals.
     casadi_res : CasadiResult
         Result whose `mult_g` holds the same rows first, then CasADi's bound rows.
@@ -1144,7 +1144,7 @@ def assert_dual_block_parity(
 
 
 def assert_parity(
-    trajopt_res: IpoptResult,
+    trajopt_res: SolverResult,
     casadi_res: CasadiResult,
     *,
     tol_state: float = 1e-5,

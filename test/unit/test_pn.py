@@ -6,7 +6,8 @@ from trajopt.constraints import ConstraintList, ControlBound, GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.solvers.al import AL, ALResult
 from trajopt.solvers.options import SolverOptions
 from trajopt.solvers.pn import (
@@ -44,7 +45,7 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=XF.tolist()), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt, integrator=RK4())
     return prob, x0, dt
 
 
@@ -52,8 +53,8 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
 def al_warm_start_data() -> tuple[Problem, jnp.ndarray, float, Trajectory, ALResult]:
     """Precompute AL warm start for cartpole once per test module."""
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
-    al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
+    al_result = MPC(prob, AL(options=SolverOptions(iterations=300, iterations_outer=30)), x0=x0, xf=XF).solve()
+    assert isinstance(al_result, ALResult)
     assert al_result.success
     return prob, x0, dt, al_result.trajectory, al_result
 
@@ -280,10 +281,10 @@ def test_pn_result_satisfies_solver_result_protocol(
     al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
 ) -> None:
     """PNResult structurally satisfies the SolverResult protocol."""
-    prob, x0, dt, warm_traj, _al_res = al_warm_start_data
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=warm_traj)
-
-    result = PN(options=SolverOptions(n_steps=1)).solve(prob, state)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
+    result = MPC(
+        prob, PN(options=SolverOptions(n_steps=1)), x0=x0, xf=XF, initial_trajectory=warm_traj
+    ).solve()
 
     assert isinstance(result, PNResult)
     assert isinstance(result, SolverResult)
@@ -295,10 +296,9 @@ def test_pn_cartpole_polishes_al_output_and_cost_barely_moves(
     al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
 ) -> None:
     """End to end: PN polishes an AL-converged cartpole trajectory to a tighter violation, cost nearly unchanged."""
-    prob, x0, dt, warm_traj, al_result = al_warm_start_data
+    prob, x0, _dt, warm_traj, al_result = al_warm_start_data
 
-    pn_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=warm_traj)
-    pn_result = PN(options=SolverOptions()).solve(prob, pn_state)
+    pn_result = MPC(prob, PN(options=SolverOptions()), x0=x0, xf=XF, initial_trajectory=warm_traj).solve()
 
     assert pn_result.constraint_violation <= al_result.constraint_violation
     assert pn_result.cost == pytest.approx(al_result.cost, rel=1e-3)

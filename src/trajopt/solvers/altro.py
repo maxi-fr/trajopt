@@ -7,8 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.program import Program, program_for
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.al import (
     ALConstraints,
     ALStats,
@@ -63,7 +63,7 @@ class ALTROSolveResult(NamedTuple):
         Exit `TerminationStatus` ordinal as an int32 scalar, possibly upgraded to
         `SOLVE_SUCCEEDED` by the backup check.
     al : ALConstraints
-        AL's final duals and penalties, unmodified by PN, for `MPCState.al` warm-starting.
+        AL's final duals and penalties, unmodified by PN, for `WarmStart.al`.
     al_stats : ALStats
         AL phase's outer stats history, buffers sized `options.iterations_outer`, untrimmed.
     pn_stats : PNStats
@@ -259,7 +259,7 @@ class ALTROResult(NamedTuple):
     mu : np.ndarray, optional
         Always empty, for the same reason as `ALResult.mu`. Defaults to empty.
     al : ALConstraints | None, optional
-        Final AL duals and penalties (unmodified by PN), threaded into `MPCState.al` for
+        Final AL duals and penalties (unmodified by PN), threaded into `WarmStart.al` for
         warm-starting the next solve. None for an unconstrained problem's iLQR-shortcut solve.
         Defaults to None.
     """
@@ -299,20 +299,21 @@ class ALTRO:
 
     options: SolverOptions = field(default_factory=SolverOptions)
 
-    def solve(self, problem: Problem, state: MPCState) -> ALTROResult:
-        """Run the traced ALTRO driver from `state`'s warm-start trajectory/duals and boundary-convert the result.
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> ALTROResult:
+        """Run the traced ALTRO driver from `ws`'s warm-start trajectory/duals and boundary-convert the result.
 
         Raises
         ------
         ValueError
-            `state.al` carries duals built under the opposite `use_conic_cost` convention and
+            `ws.al` carries duals built under the opposite `use_conic_cost` convention and
             `options.reset_duals` is False -- identical guard to `AL.solve` (finding E).
         """
+        problem = program.problem
         options = self.options
-        init_traj, bc = build_warm_start(problem, state)
+        init_traj = build_warm_start(problem, bc, ws)
 
         if problem.constraints.is_unconstrained():
-            final_traj, stats, status_int = _jit_ilqr_solve(program_for(self, problem), init_traj, options, bc)
+            final_traj, stats, status_int = _jit_ilqr_solve(program, init_traj, options, bc)
             status = TerminationStatus(int(status_int))
             n_iter = int(stats.iterations)
             return ALTROResult(
@@ -332,25 +333,25 @@ class ALTRO:
         fresh_al = ALConstraints.build(
             problem.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
         )
-        if state.al is not None:
-            if not options.reset_duals and bool(state.al.is_conic) != options.use_conic_cost:
+        if ws.al is not None:
+            if not options.reset_duals and bool(ws.al.is_conic) != options.use_conic_cost:
                 msg = (
-                    f"state.al was built with use_conic_cost={bool(state.al.is_conic)}, but "
+                    f"ws.al was built with use_conic_cost={bool(ws.al.is_conic)}, but "
                     f"options.use_conic_cost={options.use_conic_cost}. The two conventions store "
                     "lambda with opposite signs (finding E), so warm-starting across the switch "
                     "would silently reinterpret it. Set options.reset_duals=True to discard the "
                     "old duals, or keep use_conic_cost consistent with the state that produced them."
                 )
                 raise ValueError(msg)
-            lam = fresh_al.lam if options.reset_duals else state.al.lam
-            mu = fresh_al.mu if options.reset_penalties else state.al.mu
+            lam = fresh_al.lam if options.reset_duals else ws.al.lam
+            mu = fresh_al.mu if options.reset_penalties else ws.al.mu
             init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))
         else:
             init_al = fresh_al
 
-        x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
+        x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(problem, bc, ws)
 
-        result = _jit_altro_solve(program_for(self, problem), init_traj, init_al, x0_arr, options, bc)
+        result = _jit_altro_solve(program, init_traj, init_al, x0_arr, options, bc)
 
         status = TerminationStatus(int(result.status))
         n_iter_al = int(result.al_stats.iterations)

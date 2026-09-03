@@ -11,7 +11,8 @@ import scipy.sparse as sp
 from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem, retarget_problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
@@ -302,13 +303,14 @@ class Clarabel:
     operating_point: Trajectory | jax.Array | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
 
-    def solve(self, problem: Problem, state: MPCState) -> ClarabelResult:
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> ClarabelResult:
         """Solve the transcribed optimal control problem using Clarabel, warning that it is one linearization.
 
         The warning is unconditional rather than gated on the problem being nonlinear: every
         caller handing this Backend a `Problem` gets one convex solve about the Operating
         Point, and whether that answers their problem is theirs to judge.
         """
+        problem = program.problem
         warnings.warn(
             "Clarabel solves a single convex subproblem built about the Operating Point: the "
             "dynamics are linearized and the cost taken to second order once, so the result "
@@ -334,8 +336,8 @@ class Clarabel:
         m = int(problem.model.m)
         nz = N * n + (N - 1) * m
 
-        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
-        problem = retarget_problem(problem, state.bc)
+        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(problem, bc, ws)
+        problem = retarget_problem(problem, bc)
 
         t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
         t_term = t0_arr + jnp.sum(dt_arr)

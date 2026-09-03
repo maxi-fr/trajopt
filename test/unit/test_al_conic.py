@@ -1,4 +1,3 @@
-import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -10,10 +9,13 @@ from trajopt.constraints import ConstraintList, GoalConstraint, NormConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
+from trajopt.program import Program
 from trajopt.solvers.al import (
     AL,
     ALConstraints,
+    ALResult,
     conic_al_cost,
     conic_al_grad_hess,
     conic_dual_update,
@@ -184,30 +186,28 @@ def _small_goal_only_problem() -> tuple[Problem, jax.Array, float, jax.Array]:
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt, integrator=RK4())
     return prob, x0, dt, xf
 
 
 def test_use_conic_cost_switch_on_warm_started_duals_raises_unless_reset() -> None:
-    """Switching options.use_conic_cost with a prior state.al raises (finding E), unless reset_duals discards it."""
-    prob, x0, dt, xf = _small_goal_only_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
-
-    non_conic_result = AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=False)).solve(
-        prob, state
-    )
-    warm_state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=non_conic_result.trajectory)
-    state_with_duals = dataclasses.replace(warm_state, al=non_conic_result.al)
+    """Switching options.use_conic_cost with a prior warm-start al raises (finding E), unless reset_duals discards it."""
+    prob, x0, _dt, xf = _small_goal_only_problem()
+    non_conic = MPC(prob, AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=False)), x0=x0, xf=xf)
+    non_conic.solve()
+    warm_ws = non_conic.warm_start
+    bc = non_conic.bc
 
     with pytest.raises(ValueError, match="use_conic_cost"):
-        AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=False)).solve(
-            prob, state_with_duals
-        )
+        Program(
+            prob, AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=False))
+        ).solve(bc, warm_ws)
 
     # reset_duals=True discards the mismatched duals instead of raising.
-    result = AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=True)).solve(
-        prob, state_with_duals
-    )
+    result = Program(
+        prob, AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=True))
+    ).solve(bc, warm_ws)
+    assert isinstance(result, ALResult)
     assert result.al is not None
     assert bool(result.al.is_conic)
 
@@ -221,15 +221,14 @@ def test_equality_constraint_conic_and_nonconic_converge_to_same_kkt_point() -> 
     equality/ZeroCone rows here); both solves stopping at the same stationary point therefore
     requires `lam_conic ~ -lam_nonconic`, not merely that both happen to be small.
     """
-    prob, x0, dt, xf = _small_goal_only_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    prob, x0, _dt, xf = _small_goal_only_problem()
 
-    result_nonconic = AL(options=SolverOptions(use_conic_cost=False, iterations=150, iterations_outer=25)).solve(
-        prob, state
-    )
-    result_conic = AL(options=SolverOptions(use_conic_cost=True, iterations=150, iterations_outer=25)).solve(
-        prob, state
-    )
+    result_nonconic = MPC(
+        prob, AL(options=SolverOptions(use_conic_cost=False, iterations=150, iterations_outer=25)), x0=x0, xf=xf
+    ).solve()
+    result_conic = MPC(
+        prob, AL(options=SolverOptions(use_conic_cost=True, iterations=150, iterations_outer=25)), x0=x0, xf=xf
+    ).solve()
 
     assert result_nonconic.success
     assert result_conic.success
@@ -240,6 +239,8 @@ def test_equality_constraint_conic_and_nonconic_converge_to_same_kkt_point() -> 
     np.testing.assert_allclose(np.asarray(result_nonconic.trajectory.X[-1]), np.asarray(xf), atol=1e-2)
 
     n = prob.model.n
+    assert isinstance(result_nonconic, ALResult)
+    assert isinstance(result_conic, ALResult)
     assert result_nonconic.al is not None
     assert result_conic.al is not None
     lam_nonconic = np.asarray(result_nonconic.al.lam[-1, :n])

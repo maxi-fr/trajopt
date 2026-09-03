@@ -15,7 +15,8 @@ except ImportError as err:
 
 from trajopt.dynamics.base import AbstractModel
 from trajopt.dynamics.integrators import Integrator
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import BoundaryConditions, Problem
 from trajopt.transcription.result import Solver
 
 
@@ -30,8 +31,8 @@ def _build_model(spec: dict[str, Any] | AbstractModel) -> AbstractModel:
     return cls(**cfg)
 
 
-def _build_problem(spec: dict[str, Any] | Problem) -> tuple[Problem, MPCState | None]:
-    """Instantiate a Problem and optional MPCState from an instance or {class_path, ...} dict."""
+def _build_problem(spec: dict[str, Any] | Problem) -> tuple[Problem, BoundaryConditions | None]:
+    """Instantiate a Problem and its optional BoundaryConditions from an instance or {class_path, ...} dict."""
     if isinstance(spec, Problem):
         return spec, None
     cfg = spec.copy()
@@ -40,8 +41,8 @@ def _build_problem(spec: dict[str, Any] | Problem) -> tuple[Problem, MPCState | 
     target = getattr(importlib.import_module(module_name), func_name)
     res = target(**cfg) if cfg else target()
     if isinstance(res, tuple):
-        state = res[1] if len(res) > 1 and isinstance(res[1], MPCState) else None
-        return res[0], state
+        bc = next((item for item in res[1:] if isinstance(item, BoundaryConditions)), None)
+        return res[0], bc
     return res, None
 
 
@@ -79,8 +80,9 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         Controller execution time step.
     problem : Problem
         Optimal control problem definition.
-    initial_state : MPCState | None, optional
-        Initial MPC state holding trajectories and multipliers. If None, initialized at the origin.
+    boundary : BoundaryConditions | None, optional
+        Boundary conditions the driver starts from, supplying x0, t0 and the reference window.
+        Defaults to None, meaning the origin with no run-time target.
     solver : Solver | None, optional
         Solver backend object (e.g. ``Ipopt()``, ``OSQP(operating_point=...)``). Defaults to
         None, meaning ``Ipopt()``.
@@ -90,16 +92,24 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         self,
         dt: float,
         problem: Problem,
-        initial_state: MPCState | None = None,
+        boundary: BoundaryConditions | None = None,
         solver: Solver | None = None,
     ) -> None:
         super().__init__(dt)
-        self.problem = problem
-        if initial_state is not None:
-            self.state = initial_state
-        else:
-            self.state = MPCState.initial(problem, x0=jnp.zeros(problem.model.n), dt=dt)
-        self.solver = solver
+        x0 = jnp.zeros(problem.model.n) if boundary is None else boundary.x0
+        self.mpc = MPC(problem, solver, x0=x0)
+        if boundary is not None:
+            self.mpc.bc = boundary
+
+    @property
+    def problem(self) -> Problem:
+        """Optimal control problem the driver runs."""
+        return self.mpc.problem
+
+    @property
+    def solver(self) -> Solver:
+        """Solver backend the driver's Program is compiled for."""
+        return self.mpc.solver
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> Self:
@@ -109,18 +119,18 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         ----------
         config : dict[str, Any]
             Dictionary containing ``dt``, ``problem`` (Problem instance or {class_path, ...} dict),
-            and optional ``solver``, ``initial_state``.
+            and optional ``solver``, ``boundary``.
 
         Returns
         -------
         Self
             Instantiated MPC controller.
         """
-        problem, initial_state = _build_problem(config["problem"])
+        problem, boundary = _build_problem(config["problem"])
         return cls(
             dt=float(config["dt"]),
             problem=problem,
-            initial_state=initial_state or config.get("initial_state"),
+            boundary=boundary if boundary is not None else config.get("boundary"),
             solver=config.get("solver"),
         )
 
@@ -150,25 +160,24 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
         """
         t_start = time.perf_counter()
 
-        state = self.state.with_measurement(jnp.asarray(x_hat), t=t)
+        self.mpc.measure(jnp.asarray(x_hat), t=t)
 
-        if state.xf is not None:
-            state = state.with_goal(jnp.asarray(ref))
+        if self.mpc.xf is not None:
+            self.mpc.set_goal(jnp.asarray(ref))
 
         fallback_used = False
         solve_success = True
         try:
-            solved_state = self.problem.solve(state, solver=self.solver)
-            optimal_cost = float(self.problem.cost(solved_state))
+            self.mpc.solve()
+            optimal_cost = float(self.mpc.cost())
         except Exception:  # noqa: BLE001 -- fallback on any solver failure
             solve_success = False
             fallback_used = True
             optimal_cost = float("nan")
-            solved_state = state
 
-        u_cmd = np.asarray(solved_state.controls[0], dtype=np.float64)
+        u_cmd = np.asarray(self.mpc.controls[0], dtype=np.float64)
 
-        self.state = solved_state.shift(self.dt)
+        self.mpc.shift(self.dt)
         solve_time = time.perf_counter() - t_start
 
         return u_cmd, TrajOptMPCLog(

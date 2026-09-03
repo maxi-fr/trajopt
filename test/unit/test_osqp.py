@@ -13,7 +13,8 @@ from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.base import ContinuousDynamics, DiscretizedDynamics
 from trajopt.dynamics.integrators import Euler
 from trajopt.models.cartpole import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.transcription.osqp import OSQP, OSQPResult
 
 
@@ -42,11 +43,10 @@ def test_osqp_basic_solve() -> None:
     term_cost = QuadraticCost(Q=Qf, R=jnp.zeros((m, m)), r=jnp.zeros(m), c=0.0)
     obj = Objective(stage_cost=cost, terminal_cost=term_cost, N=N)
 
-    problem = Problem(model=model, obj=obj, constraints=ConstraintList(n, m, N), N=N)
+    problem = Problem(model=model, obj=obj, constraints=ConstraintList(n, m, N), N=N, dt=dt)
     x0 = jnp.array([2.0, 0.0])
-    state = MPCState.initial(problem, x0=x0, dt=dt)
 
-    res = OSQP().solve(problem, state)
+    res = MPC(problem, OSQP(), x0=x0).solve()
 
     assert isinstance(res, OSQPResult)
     assert res.success is True
@@ -84,11 +84,10 @@ def test_osqp_with_bounds_and_linear_constraints() -> None:
         range(5, N - 1),
     )
 
-    problem = Problem(model=model, obj=obj, constraints=clist, N=N)
+    problem = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt)
     x0 = jnp.array([2.0, 0.0])
-    state = MPCState.initial(problem, x0=x0, dt=dt)
 
-    res = OSQP(options={"eps_abs": 1e-6, "eps_rel": 1e-6}).solve(problem, state)
+    res = MPC(problem, OSQP(options={"eps_abs": 1e-6, "eps_rel": 1e-6}), x0=x0).solve()
 
     assert res.success is True
     assert res.constraint_violation < 1e-4
@@ -112,7 +111,6 @@ def test_osqp_rejects_second_order_cone() -> None:
 
     problem = Problem(model=model, obj=obj, constraints=clist, N=N)
     x0 = jnp.zeros(n)
-    state = MPCState.initial(problem, x0=x0)
 
     with pytest.raises(TypeError, match="OSQP does not support SecondOrderCone constraints"):
-        OSQP().solve(problem, state)
+        MPC(problem, OSQP(), x0=x0).solve()

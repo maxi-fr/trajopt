@@ -9,7 +9,8 @@ from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.base import ContinuousDynamics
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.solvers.ilqr import (
     ILQR,
     DynamicRegularization,
@@ -58,7 +59,7 @@ def _lq_problem(seed: int = 0) -> tuple[Problem, jax.Array]:
     Qf = 5.0 * np.eye(n)
     obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
     x0 = jnp.asarray(rng.normal(size=n))
     return prob, x0
 
@@ -72,20 +73,20 @@ def test_ilqr_satisfies_solver_protocol() -> None:
 def test_ilqr_result_satisfies_solver_result_protocol() -> None:
     """ILQRResult structurally satisfies the SolverResult protocol."""
     prob, x0 = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
-    result = ILQR().solve(prob, state)
+    result = MPC(prob, ILQR(), x0=x0).solve()
     assert isinstance(result, ILQRResult)
     assert isinstance(result, SolverResult)
 
 
-def test_ilqr_solve_returns_mpc_state() -> None:
-    """problem.solve(state, solver=ILQR()) returns an MPCState carrying the converged solve's Z."""
+def test_ilqr_solve_updates_the_drivers_warm_start() -> None:
+    """A driver step with ILQR folds the converged solve's Z into the warm start it hands on."""
     prob, x0 = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
-    assert ILQR().solve(prob, state).solver_status == "converged"
-    new_state = prob.solve(state, solver=ILQR())
-    assert isinstance(new_state, MPCState)
-    assert not jnp.allclose(new_state.Z, state.Z)
+    mpc = MPC(prob, ILQR(), x0=x0)
+    Z_before = mpc.Z
+    result = mpc.solve()
+    assert isinstance(result, ILQRResult)
+    assert result.solver_status == "converged"
+    assert not jnp.allclose(mpc.Z, Z_before)
 
 
 def test_ilqr_lq_converges_in_two_iterations_matches_backward_pass_policy() -> None:
@@ -101,9 +102,7 @@ def test_ilqr_lq_converges_in_two_iterations_matches_backward_pass_policy() -> N
     """
     prob, x0 = _lq_problem(seed=1)
     N, m = prob.N, prob.model.m
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
-
-    result = ILQR().solve(prob, state)
+    result = MPC(prob, ILQR(), x0=x0).solve()
     assert result.success
     assert result.iterations == 2
 
@@ -243,8 +242,7 @@ def test_ilqr_step_nan_dj_does_not_increment_zero_counter() -> None:
 def test_ilqr_stats_trimmed_no_trailing_zeros() -> None:
     """The stats returned in .info["stats"] are trimmed to the completed iteration count."""
     prob, x0 = _lq_problem(seed=4)
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
-    result = ILQR().solve(prob, state)
+    result = MPC(prob, ILQR(), x0=x0).solve()
     stats = result.info["stats"]
     assert stats.cost.shape[0] == result.iterations
     assert stats.dJ.shape[0] == result.iterations
@@ -291,12 +289,10 @@ def test_ilqr_pendulum_swingup_converges() -> None:
     Qf = jnp.diag(jnp.array([100.0, 10.0]))
     xf = jnp.array([jnp.pi, 0.0])
     obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=0.05, xf=xf)
-
-    result = ILQR(options=SolverOptions(iterations=300)).solve(prob, state)
+    result = MPC(prob, ILQR(options=SolverOptions(iterations=300)), x0=x0, xf=xf).solve()
     assert result.success
     assert result.iterations > 1
     assert float(jnp.max(jnp.abs(result.trajectory.X[-1] - xf))) < 0.1

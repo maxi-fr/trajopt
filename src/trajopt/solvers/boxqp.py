@@ -10,8 +10,8 @@ import jax.scipy.linalg
 import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltConstraintList
-from trajopt.problem import MPCState, Problem
-from trajopt.program import program_for
+from trajopt.problem import BoundaryConditions
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.al import ALConstraints, ALStats, _jit_al_solve, al_cost, evaluate_al_constraints, max_violation
 from trajopt.solvers.ilqr import SolveKD, build_warm_start
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
@@ -393,7 +393,7 @@ class BoxQPSolveResult(NamedTuple):
     mu : np.ndarray, optional
         Always empty, for the same reason as `ALResult.mu`. Defaults to empty.
     al : ALConstraints | None, optional
-        Final padded duals/penalties (control-bound rows always masked out), for MPCState
+        Final padded duals/penalties (control-bound rows always masked out), for WarmStart
         warm-starting. Defaults to None.
     """
 
@@ -433,10 +433,11 @@ class BoxQP:
 
     options: SolverOptions = field(default_factory=SolverOptions)
 
-    def solve(self, problem: Problem, state: MPCState) -> BoxQPSolveResult:
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> BoxQPSolveResult:
         """Run the traced AL outer loop with a box-QP inner backward pass, boundary-converting the result."""
+        problem = program.problem
         options = self.options
-        init_traj, bc = build_warm_start(problem, state)
+        init_traj = build_warm_start(problem, bc, ws)
         constraints = problem.constraints
 
         lo, hi = extract_uniform_control_bounds(constraints)
@@ -451,15 +452,15 @@ class BoxQP:
         )
 
         fresh_al = ALConstraints.build(constraints_for_al, penalty_initial=options.penalty_initial)
-        if state.al is not None:
-            lam = fresh_al.lam if options.reset_duals else state.al.lam
-            mu = fresh_al.mu if options.reset_penalties else state.al.mu
+        if ws.al is not None:
+            lam = fresh_al.lam if options.reset_duals else ws.al.lam
+            mu = fresh_al.mu if options.reset_penalties else ws.al.mu
             init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))
         else:
             init_al = fresh_al
 
         final_traj, final_al, stats, status_int = _jit_al_solve(
-            program_for(self, problem),
+            program,
             init_traj,
             init_al,
             options,

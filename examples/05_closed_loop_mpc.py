@@ -18,7 +18,8 @@ def _():
     from trajopt.costs.objective import LQRObjective
     from trajopt.dynamics.integrators import RK4
     from trajopt.models.cartpole import Cartpole
-    from trajopt.problem import MPCState, Problem
+    from trajopt.mpc import MPC
+    from trajopt.problem import Problem
     from trajopt.solvers.altro import ALTRO
     from trajopt.transcription.ipopt import Ipopt
 
@@ -29,7 +30,7 @@ def _():
         ControlBound,
         Ipopt,
         LQRObjective,
-        MPCState,
+        MPC,
         Problem,
         RK4,
         StateBound,
@@ -50,7 +51,7 @@ def _(mo):
 
     We explore the fundamentals of receding-horizon optimal control:
     1. **Receding Horizon Control**: Formulating and solving a constrained finite-horizon optimal control problem at every sampling instant $t_k$.
-    2. **State Feedback & Multiplier Warm-Starting**: Injecting real-time state feedback via `MPCState.with_measurement()` and warm-starting the primal-dual trajectory with `MPCState.shift()`.
+    2. **State Feedback & Multiplier Warm-Starting**: Injecting real-time state feedback via `MPC.measure()` and warm-starting the primal-dual trajectory with `MPC.shift()`.
     3. **Disturbance Rejection & Hard Constraint Enforcement**: Rejecting an unmodeled angular velocity impulse kick at $t = 1.0\,\text{s}$ while strictly respecting control saturation ($|u| \le 20.0\,\text{N}$) and cart track boundaries ($|p| \le 0.8\,\text{m}$).
     4. **Solver Comparison & Local Minima**: Benchmarking native JAX **ALTRO** against **Ipopt**, and seeing what a shooting method's initial guess costs you: from the default guess (states repeated from $x_0$, controls all zero) ALTRO lands in a *different local minimum* than Ipopt, so the closed loop is seeded from Ipopt's plan to put it on the balancing branch.
 
@@ -110,7 +111,6 @@ def _(
     ConstraintList,
     ControlBound,
     LQRObjective,
-    MPCState,
     Problem,
     RK4,
     StateBound,
@@ -166,18 +166,15 @@ def _(
         obj=obj,
         constraints=clist,
         N=N,
+        dt=dt,
         integrator=integrator,
     )
-
-    # Initialize MPC state container
-    state_init = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
     return (
         dmodel,
         dt,
         model,
         n_steps,
         prob,
-        state_init,
         u_max,
         x0,
         x_track_max,
@@ -194,45 +191,46 @@ def _(mo):
     1. **`ALTRO`**: JAX-native Augmented Lagrangian Trajectory Optimizer using iLQR Riccati backward-forward passes and Projected Newton polish.
     2. **`Ipopt`**: General-purpose sparse interior-point NLP solver across the transcribed direct collocation system.
 
-    Both get the same default guess from `MPCState.initial`: every state a copy of $x_0$, every control zero. That guess matters far more to ALTRO than to Ipopt. ALTRO is a *shooting* method, and `ilqr_solve` opens with an **open-loop rollout** from $X_0[0]$ under $U_0$, so the guessed states past the first knot are discarded and only the guessed *controls* choose which branch it descends. With $U_0 = 0$ the pole falls during that opening rollout, and the augmented-Lagrangian iterations then polish a swing-through solution rather than a balancing one.
+    Both get the same default guess from a fresh `MPC`: every state a copy of $x_0$, every control zero. That guess matters far more to ALTRO than to Ipopt. ALTRO is a *shooting* method, and `ilqr_solve` opens with an **open-loop rollout** from $X_0[0]$ under $U_0$, so the guessed states past the first knot are discarded and only the guessed *controls* choose which branch it descends. With $U_0 = 0$ the pole falls during that opening rollout, and the augmented-Lagrangian iterations then polish a swing-through solution rather than a balancing one.
 
-    Both report `converged`; they have converged to **different local minima**, and the objective column below is what separates them. The third column runs the same ALTRO solve on Ipopt's trajectory as its guess (`MPCState.initial(..., initial_z=...)`): it stays on that branch and reproduces Ipopt's cost to ten digits. That is the evidence that the gap is the initial guess, not the solver.
+    Both report `converged`; they have converged to **different local minima**, and the objective column below is what separates them. The third column runs the same ALTRO solve on Ipopt's trajectory as its guess (`MPC(..., initial_z=...)`): it stays on that branch and reproduces Ipopt's cost to ten digits. That is the evidence that the gap is the initial guess, not the solver.
     """)
     return
 
 
 @app.cell
-def _(ALTRO, Ipopt, MPCState, dt, prob, state_init, time, x0, xf):
+def _(ALTRO, Ipopt, MPC, prob, time, x0, xf):
     altro_solver = ALTRO()
-    ipopt_solver = Ipopt()
 
     # Warm up JIT compilation for ALTRO
-    _ = prob.solve(state_init, solver=altro_solver)
+    altro_init = MPC(prob, altro_solver, x0=x0, xf=xf)
+    _ = altro_init.solve()
 
     # Benchmark ALTRO initial solve from the default (zero-control) guess
+    altro_init = MPC(prob, altro_solver, x0=x0, xf=xf)
     t0_altro = time.perf_counter()
-    res_altro_init = prob.solve(state_init, solver=altro_solver)
+    res_altro_init = altro_init.solve()
     altro_init_ms = (time.perf_counter() - t0_altro) * 1000.0
 
     # Benchmark Ipopt initial solve from the same default guess
+    ipopt_init = MPC(prob, Ipopt(), x0=x0, xf=xf)
     t0_ipopt = time.perf_counter()
-    res_ipopt_init = prob.solve(state_init, solver=ipopt_solver)
+    res_ipopt_init = ipopt_init.solve()
     ipopt_init_ms = (time.perf_counter() - t0_ipopt) * 1000.0
 
-    # The same ALTRO solve seeded with Ipopt's trajectory. This seeded state is what the
-    # closed loop below starts from; every later step warm-starts off the previous plan.
-    state_seeded = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_z=res_ipopt_init.Z)
+    # The same ALTRO solve seeded with Ipopt's trajectory. This seeded driver is what the
+    # closed loop below runs; every later step warm-starts off the previous plan.
+    mpc = MPC(prob, altro_solver, x0=x0, xf=xf, initial_z=res_ipopt_init.Z)
     t0_seeded = time.perf_counter()
-    res_altro_seeded = prob.solve(state_seeded, solver=altro_solver)
+    res_altro_seeded = mpc.solve()
     altro_seeded_ms = (time.perf_counter() - t0_seeded) * 1000.0
 
-    cost_altro_init = float(prob.obj.cost(res_altro_init.to_trajectory()))
-    cost_ipopt_init = float(prob.obj.cost(res_ipopt_init.to_trajectory()))
-    cost_altro_seeded = float(prob.obj.cost(res_altro_seeded.to_trajectory()))
+    cost_altro_init = float(prob.obj.cost(res_altro_init.trajectory))
+    cost_ipopt_init = float(prob.obj.cost(res_ipopt_init.trajectory))
+    cost_altro_seeded = float(prob.obj.cost(res_altro_seeded.trajectory))
     return (
         altro_init_ms,
         altro_seeded_ms,
-        altro_solver,
         cost_altro_init,
         cost_altro_seeded,
         cost_ipopt_init,
@@ -240,7 +238,7 @@ def _(ALTRO, Ipopt, MPCState, dt, prob, state_init, time, x0, xf):
         res_altro_init,
         res_altro_seeded,
         res_ipopt_init,
-        state_seeded,
+        mpc,
     )
 
 
@@ -266,8 +264,8 @@ def _(
     | **Solver Status** | `{res_altro_init.status}` | `{res_ipopt_init.status}` | `{res_altro_seeded.status}` |
     | **Solve Latency** | `{altro_init_ms:.2f} ms` | `{ipopt_init_ms:.2f} ms` | **`{altro_seeded_ms:.2f} ms`** |
     | **Objective $J^*$** | `{cost_altro_init:.4f}` | **`{cost_ipopt_init:.4f}`** | **`{cost_altro_seeded:.4f}`** |
-    | **Terminal $\theta_{{N-1}}$** (goal $\pi \approx {np.pi:.4f}$) | `{float(res_altro_init.states[-1, 1]):.4f}` | `{float(res_ipopt_init.states[-1, 1]):.4f}` | `{float(res_altro_seeded.states[-1, 1]):.4f}` |
-    | **Initial Control $u_0^*$** | `{float(res_altro_init.controls[0, 0]):.4f} N` | `{float(res_ipopt_init.controls[0, 0]):.4f} N` | `{float(res_altro_seeded.controls[0, 0]):.4f} N` |
+    | **Terminal $\theta_{{N-1}}$** (goal $\pi \approx {np.pi:.4f}$) | `{float(res_altro_init.trajectory.X[-1, 1]):.4f}` | `{float(res_ipopt_init.trajectory.X[-1, 1]):.4f}` | `{float(res_altro_seeded.trajectory.X[-1, 1]):.4f}` |
+    | **Initial Control $u_0^*$** | `{float(res_altro_init.trajectory.U[0, 0]):.4f} N` | `{float(res_ipopt_init.trajectory.U[0, 0]):.4f} N` | `{float(res_altro_seeded.trajectory.U[0, 0]):.4f} N` |
 
     Columns two and three agree; column one is a different, more expensive local solution reached
     from a guess that told the shooting rollout nothing.
@@ -281,22 +279,21 @@ def _(mo):
     ## 4. Closed-Loop Simulation with Unmodeled Disturbance Injection
 
     We now execute the full closed-loop MPC feedback loop for **40 steps ($T_{\text{total}} = 2.0\,\text{s}$)**, starting from the Ipopt-seeded state so step 0 begins on the balancing branch. Computing an initial plan offline with a globally-minded NLP solver and then running a fast local solver online is the usual MPC deployment pattern:
-    - At each step $k$, the controller measures the state $x(t_k)$ via `state.with_measurement(x_curr, t_curr)`.
-    - `prob.solve(state, solver=ALTRO())` optimizes the next control trajectory.
+    - At each step $k$, the controller measures the state $x(t_k)$ via `mpc.measure(x_curr, t_curr)`.
+    - `mpc.solve()` optimizes the next control trajectory.
     - The first control input $u_0^*$ is applied to simulate the true plant dynamics:
       $$x(t_{k+1}) = f_d(x(t_k), u_0^*, t_k, \Delta t)$$
-    - `state.shift(dt)` rolls the trajectory and Augmented Lagrangian dual multipliers forward by $\Delta t$, warm-starting the next solve.
+    - `mpc.shift(dt)` rolls the trajectory and Augmented Lagrangian dual multipliers forward by $\Delta t$, warm-starting the next solve.
     - **Disturbance Kick**: At $t = 1.0\,\text{s}$ (step 20), an unmodeled angular velocity impulse of **$+1.5\,\text{rad/s}$** is injected into the pole. The MPC loop must immediately detect the state deviation and steer the cartpole back to upright equilibrium without violating track limits.
     """)
     return
 
 
 @app.cell
-def _(altro_solver, dmodel, dt, n_steps, np, prob, state_seeded, time, x0):
+def _(dmodel, dt, mpc, n_steps, np, time, x0):
     # Closed-loop state and telemetry logs
     x_curr = x0
     t_curr = 0.0
-    state = state_seeded
 
     x_history = [np.asarray(x_curr)]
     u_history = []
@@ -313,17 +310,17 @@ def _(altro_solver, dmodel, dt, n_steps, np, prob, state_seeded, time, x0):
             x_curr = x_curr.at[3].add(1.5)
 
         # 1. State Feedback: update initial condition & timestamp
-        state = state.with_measurement(x_curr, t_curr)
+        mpc.measure(x_curr, t_curr)
 
         # 2. Optimize Trajectory with ALTRO
         t_solve_start = time.perf_counter()
-        state = prob.solve(state, solver=altro_solver)
+        mpc.solve()
         dt_solve = (time.perf_counter() - t_solve_start) * 1000.0
         solve_times_ms.append(dt_solve)
 
         # Save snapshot prediction horizon
         if step in snapshot_steps:
-            pred_traj = state.to_trajectory()
+            pred_traj = mpc.trajectory()
             horizon_plans[step] = {
                 "t": np.asarray(pred_traj.t),
                 "X": np.asarray(pred_traj.X),
@@ -331,15 +328,15 @@ def _(altro_solver, dmodel, dt, n_steps, np, prob, state_seeded, time, x0):
             }
 
         # 3. Apply first control command to the simulated plant
-        u_cmd = state.controls[0]
+        u_cmd = mpc.controls[0]
         u_history.append(float(np.asarray(u_cmd)[0]))
 
         # 4. Integrate plant dynamics forward by dt
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
         x_history.append(np.asarray(x_curr))
 
-        # 5. Shift state forward for warm-starting the next iteration
-        state = state.shift(dt)
+        # 5. Shift the driver forward for warm-starting the next iteration
+        mpc.shift(dt)
         t_curr += dt
         t_history.append(float(t_curr))
 
@@ -379,10 +376,10 @@ def _(dt, mo, np, solve_times_arr):
     | **Sustained Rate** | **`{freq_hz:.1f} Hz`** | — |
 
     > [!NOTE]
-    > These are single-threaded CPU timings of the whole Python-level `prob.solve` call, warm-started but with no attempt at real-time scheduling, so whether they clear the $\Delta t$ budget depends on the machine. The simulation above is not real-time: it applies each solved $u_0^*$ regardless of how long the solve took. Read the numbers as relative cost per step, not as a latency guarantee.
+    > These are single-threaded CPU timings of the whole Python-level `mpc.solve` call, warm-started but with no attempt at real-time scheduling, so whether they clear the $\Delta t$ budget depends on the machine. The simulation above is not real-time: it applies each solved $u_0^*$ regardless of how long the solve took. Read the numbers as relative cost per step, not as a latency guarantee.
 
     > [!TIP]
-    > **Warm-Starting Efficacy**: Once JIT-compiled by XLA, `MPCState.shift()` initializes both the primal trajectory and the Augmented Lagrangian dual multipliers close to the optimal manifold. Between steps $k$ and $k+1$, ALTRO needs far fewer Riccati sweeps to re-converge than the cold first solve does.
+    > **Warm-Starting Efficacy**: Once JIT-compiled by XLA, `MPC.shift()` initializes both the primal trajectory and the Augmented Lagrangian dual multipliers close to the optimal manifold. Between steps $k$ and $k+1$, ALTRO needs far fewer Riccati sweeps to re-converge than the cold first solve does.
     """)
     return budget_ms, p95_lat
 
@@ -630,7 +627,7 @@ def _(mo):
     1. **The initial guess picks the local minimum.** ALTRO is a shooting method: its first act is an open-loop rollout from $X_0[0]$ under $U_0$, so the guessed *states* past the first knot are thrown away and only the guessed *controls* decide which branch it descends. From the default all-zero controls the pole falls during that rollout and ALTRO converges — reporting `converged`, with every constraint satisfied — to a swing-through solution far more expensive than Ipopt's balancing one. Handed Ipopt's trajectory it agrees with Ipopt to ten digits. A converged status is not a claim of global optimality.
     2. **Horizon length is part of the formulation.** At $N = 20$ (a $0.95\,\text{s}$ horizon) the balancing branch is not reachable at all here: even seeded from Ipopt's plan, the closed loop cannot absorb the kick and the pole goes over the top. $N = 40$ ($1.95\,\text{s}$) gives the optimizer enough runway to trade cart travel against angular recovery.
     3. **Receding-horizon disturbance rejection.** With those two things fixed, replanning at $20\,\text{Hz}$ absorbs the unmodeled impulse ($\Delta\dot{\theta} = +1.5\,\text{rad/s}$ at $t = 1.0\,\text{s}$) with no gain scheduling: $\theta$ dips about $0.38\,\text{rad}$ below upright (its minimum lands around $t = 1.5\,\text{s}$) and climbs back toward $\pi$ over the second that follows.
-    4. **State feedback and warm-starting.** `MPCState.with_measurement(x_meas, t_meas)` injects the new measurement and `MPCState.shift(dt)` rolls the primal trajectory and the augmented-Lagrangian duals forward, so each solve after the first starts from the previous plan rather than from scratch.
+    4. **State feedback and warm-starting.** `MPC.measure(x_meas, t_meas)` injects the new measurement and `MPC.shift(dt)` rolls the primal trajectory and the augmented-Lagrangian duals forward, so each solve after the first starts from the previous plan rather than from scratch.
     5. **Constraint fidelity.** Commanded force stays inside $[-20\,\text{N}, +20\,\text{N}]$ throughout, peaking at the step-20 reaction to the kick, and the cart never leaves the track envelope $|p| \le 0.8\,\text{m}$. Both bounds are enforced by the augmented Lagrangian and the projected-Newton polish, not by clipping after the fact.
     """)
     return

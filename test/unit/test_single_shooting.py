@@ -8,7 +8,8 @@ from trajopt.constraints.linear import GoalConstraint, LinearConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.single_shooting import (
     SingleShooting,
@@ -31,7 +32,7 @@ def test_single_shooting_dimensions() -> None:
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
     constraints.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=dt, integrator=RK4())
 
     n_u, p_user = single_shooting_dimensions(prob)
     assert n_u == (N - 1) * m
@@ -52,11 +53,9 @@ def test_single_shooting_rejects_state_bound() -> None:
     obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), N=N)
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(StateBound(n=n, x_min=[-1.0, -1.0], x_max=[1.0, 1.0]), range(N))
-    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=jnp.zeros(n), xf=xf, dt=0.05)
-
+    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=0.05, integrator=RK4())
     with pytest.raises(ValueError, match="state bound"):
-        SingleShooting(Ipopt()).solve(prob, state)
+        MPC(prob, SingleShooting(Ipopt()), x0=jnp.zeros(n), xf=xf).solve()
 
 
 def test_single_shooting_accepts_general_stage_constraint() -> None:
@@ -70,10 +69,8 @@ def test_single_shooting_accepts_general_stage_constraint() -> None:
         LinearConstraint(n=n, m=m, A=jnp.array([[1.0, 0.0, 0.0]]), b=jnp.array([10.0])),
         range(N - 1),
     )
-    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=jnp.zeros(n), xf=xf, dt=0.05)
-
-    result = SingleShooting(Ipopt()).solve(prob, state)
+    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=0.05, integrator=RK4())
+    result = MPC(prob, SingleShooting(Ipopt()), x0=jnp.zeros(n), xf=xf).solve()
 
     assert result.success
 
@@ -110,17 +107,16 @@ def test_single_shooting_matches_multiple_shooting() -> None:
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
     constraints.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=dt, integrator=RK4())
     x0 = jnp.array([0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
-
     options = {"max_iter": 200, "tol": 1e-8, "print_level": 0}
-    ms = prob.solve(state, solver=Ipopt(options=options))
-    ss = prob.solve(state, solver=SingleShooting(Ipopt(options=options), hessian="dense"))
+    ms = MPC(prob, Ipopt(options=options), x0=x0, xf=xf).solve()
+    ss_mpc = MPC(prob, SingleShooting(Ipopt(options=options), hessian="dense"), x0=x0, xf=xf)
+    ss = ss_mpc.solve()
 
-    np.testing.assert_allclose(ss.controls, ms.controls, atol=1e-5, rtol=1e-5)
-    np.testing.assert_allclose(ss.states, ms.states, atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(ss.trajectory.U, ms.trajectory.U, atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(ss.trajectory.X, ms.trajectory.X, atol=1e-5, rtol=1e-5)
 
     # Single shooting satisfies dynamics by construction, not merely to solver tolerance.
-    rolled = prob.model.rollout(ss.to_trajectory())
-    np.testing.assert_allclose(rolled.X, ss.states, atol=1e-12)
+    rolled = prob.model.rollout(ss_mpc.trajectory())
+    np.testing.assert_allclose(rolled.X, ss.trajectory.X, atol=1e-12)

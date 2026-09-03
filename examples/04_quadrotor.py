@@ -23,7 +23,8 @@ def _():
     from trajopt.costs.rotations import QuatGeodesicCost
     from trajopt.dynamics.integrators import RK4
     from trajopt.models.quadrotor import Quadrotor
-    from trajopt.problem import MPCState, Problem
+    from trajopt.mpc import MPC
+    from trajopt.problem import Problem
     from trajopt.solvers.altro import ALTRO
     from trajopt.trajectory import Trajectory
     from trajopt.transcription.ipopt import Ipopt
@@ -34,7 +35,7 @@ def _():
         ControlBound,
         GoalConstraint,
         Ipopt,
-        MPCState,
+        MPC,
         Objective,
         Problem,
         Quadrotor,
@@ -262,14 +263,16 @@ def _(mo):
     - **Position / Attitude**: Straight-line Euclidean interpolation $\mathbf{x}_{\text{init}}(t)$ from $\mathbf{x}_0$ to $\mathbf{x}_f$.
     - **Controls**: Constant hover thrust $u_i = u_{\text{hover}} = \frac{mg}{4} \approx 1.226\,\text{N}$ per motor.
 
-    We bundle the model, objective, constraints, and `RK4` numerical integrator into a `Problem` and instantiate an `MPCState`.
+    We bundle the model, objective, constraints, and `RK4` numerical integrator into a `Problem` and hand it to an `MPC` driver.
     """)
     return
 
 
 @app.cell
 def _(
-    MPCState,
+    ALTRO,
+    Ipopt,
+    MPC,
     N,
     Problem,
     Trajectory,
@@ -285,7 +288,7 @@ def _(
     xf,
 ):
     # Assemble problem
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=integrator)
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=integrator)
 
     # Construct initial warm-start trajectory
     X_init = jnp.linspace(x0, xf, N)
@@ -294,9 +297,16 @@ def _(
     t_init = jnp.concatenate([jnp.zeros(1), jnp.cumsum(dt_arr)])
     init_traj = Trajectory(X=X_init, U=U_init, t=t_init, dt=dt_arr)
 
-    # Create initial MPCState
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=init_traj)
-    return X_init, prob, state
+    # One driver per solver, both warm-started from that trajectory
+    altro_mpc = MPC(prob, ALTRO(), x0=x0, xf=xf, initial_trajectory=init_traj)
+    ipopt_mpc = MPC(
+        prob,
+        Ipopt(options={"print_level": 0, "max_iter": 500, "tol": 1e-6}),
+        x0=x0,
+        xf=xf,
+        initial_trajectory=init_traj,
+    )
+    return X_init, altro_mpc, ipopt_mpc, prob
 
 
 @app.cell(hide_code=True)
@@ -312,15 +322,13 @@ def _(mo):
 
 
 @app.cell
-def _(ALTRO, mo, prob, state, time):
-    altro_solver = ALTRO()
-
+def _(altro_mpc, mo, time):
     # JIT warm-up solve
-    _ = altro_solver.solve(prob, state)
+    _ = altro_mpc.solve()
 
     # Timed ALTRO solve
     t_start_altro = time.perf_counter()
-    res_altro = altro_solver.solve(prob, state)
+    res_altro = altro_mpc.solve()
     time_altro_ms = (time.perf_counter() - t_start_altro) * 1000.0
 
     mo.md(
@@ -337,12 +345,10 @@ def _(ALTRO, mo, prob, state, time):
 
 
 @app.cell
-def _(Ipopt, mo, prob, state, time):
-    ipopt_solver = Ipopt(options={"print_level": 0, "max_iter": 500, "tol": 1e-6})
-
+def _(ipopt_mpc, mo, time):
     # Timed Ipopt solve
     t_start_ipopt = time.perf_counter()
-    res_ipopt = ipopt_solver.solve(prob, state)
+    res_ipopt = ipopt_mpc.solve()
     time_ipopt_ms = (time.perf_counter() - t_start_ipopt) * 1000.0
 
     mo.md(

@@ -12,7 +12,8 @@ from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant
 if TYPE_CHECKING:
     from trajopt.constraints.base import Constraint
     from trajopt.constraints.constraint_list import BuiltKnotConstraint
-    from trajopt.problem import MPCState, Problem
+    from trajopt.problem import BoundaryConditions, Problem
+    from trajopt.program import WarmStart
     from trajopt.trajectory import Trajectory
 
 
@@ -288,16 +289,17 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
 
 
 def parse_solver_initial_state(
-    state: MPCState,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
-    """Extract standard JAX array representations of `state`'s boundary and warm-start data."""
-    x0_arr = jnp.asarray(state.x0, dtype=jnp.float64)
-    t0_arr = jnp.asarray(state.t0, dtype=jnp.float64)
-    dt_arr = jnp.asarray(state.dt, dtype=jnp.float64)
-    xf_val = jnp.asarray(state.xf, dtype=jnp.float64) if state.xf is not None else None
-    z0 = state.Z
+    problem: Problem,
+    bc: BoundaryConditions,
+    ws: WarmStart,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array]:
+    """Extract standard JAX array representations of one solve's boundary, time-grid and warm-start data."""
+    x0_arr = jnp.asarray(bc.x0, dtype=jnp.float64)
+    t0_arr = jnp.asarray(bc.t0, dtype=jnp.float64)
+    dt_arr = jnp.asarray(problem.dt, dtype=jnp.float64)
+    xf_val = jnp.asarray(bc.xf, dtype=jnp.float64) if bc.xf is not None else None
 
-    return x0_arr, t0_arr, dt_arr, xf_val, z0
+    return x0_arr, t0_arr, dt_arr, xf_val, ws.Z
 
 
 def operating_point_z(problem: Problem, operating_point: Trajectory | jax.Array | None) -> jax.Array:

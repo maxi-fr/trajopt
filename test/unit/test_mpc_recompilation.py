@@ -5,7 +5,8 @@ import pytest
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.program import Program
 from trajopt.solvers.ilqr import ILQR
 
@@ -18,7 +19,7 @@ GOAL = jnp.array([np.pi, 0.0], dtype=jnp.float64)
 def _build() -> Problem:
     """Unconstrained pendulum swing-up problem with a quadratic objective the run-time goal retargets."""
     obj = LQRObjective(Q=jnp.eye(2) * DT, R=jnp.eye(1) * DT, Qf=jnp.eye(2) * 10.0, N=N)
-    return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, integrator=RK4())
+    return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, dt=DT, integrator=RK4())
 
 
 def _count_core_compiles(monkeypatch: pytest.MonkeyPatch, *, moving_goal: bool) -> int:
@@ -42,14 +43,14 @@ def _count_core_compiles(monkeypatch: pytest.MonkeyPatch, *, moving_goal: bool) 
     problem = _build()
     solver = ILQR()
     x0 = jnp.array([0.1, 0.0], dtype=jnp.float64)
-    state = MPCState.initial(problem, x0=x0, dt=DT, xf=GOAL)
+    mpc = MPC(problem, solver, x0=x0, xf=GOAL)
     t = 0.0
     for step in range(N_STEPS):
         if moving_goal:
-            state = state.with_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
-        state = state.with_measurement(x0, t)
-        state = problem.solve(state, solver=solver)
-        state = state.shift(DT)
+            mpc.set_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
+        mpc.measure(x0, t)
+        mpc.solve()
+        mpc.shift(DT)
         t += DT
     return builds
 

@@ -19,7 +19,8 @@ def _():
     from trajopt.costs.objective import TrackingObjective
     from trajopt.dynamics.integrators import RK4
     from trajopt.models.dubins import DubinsCar
-    from trajopt.problem import MPCState, Problem
+    from trajopt.mpc import MPC
+    from trajopt.problem import Problem
     from trajopt.solvers.altro import ALTRO
     from trajopt.trajectory import Trajectory
     from trajopt.transcription.ipopt import Ipopt
@@ -31,7 +32,7 @@ def _():
         DubinsCar,
         GoalConstraint,
         Ipopt,
-        MPCState,
+        MPC,
         Problem,
         RK4,
         StateBound,
@@ -152,11 +153,13 @@ def _(mo):
 
 @app.cell
 def _(
+    ALTRO,
     ConstraintList,
     ControlBound,
     DubinsCar,
     GoalConstraint,
-    MPCState,
+    Ipopt,
+    MPC,
     N,
     Problem,
     RK4,
@@ -201,18 +204,22 @@ def _(
         obj=obj,
         constraints=constraints,
         N=N,
+        dt=dt,
         integrator=RK4(),
     )
 
-    # Initialize MPC state container with the nominal reference warm-start
-    initial_state = MPCState.initial(
+    # A driver per solver, each tracking the nominal reference and warm-started from it
+    altro_mpc = MPC(
+        problem, ALTRO(), x0=x0, reference=ref_trajectory, initial_trajectory=ref_trajectory
+    )
+    ipopt_mpc = MPC(
         problem,
+        Ipopt(options={"print_level": 0}),
         x0=x0,
-        dt=dt,
         reference=ref_trajectory,
         initial_trajectory=ref_trajectory,
     )
-    return initial_state, omega_max, problem, v_max, y_corridor_bound
+    return altro_mpc, ipopt_mpc, omega_max, problem, v_max, y_corridor_bound
 
 
 @app.cell
@@ -233,15 +240,13 @@ def _(mo):
 
 
 @app.cell
-def _(ALTRO, initial_state, mo, problem, time):
-    altro_solver = ALTRO()
-
+def _(altro_mpc, mo, time):
     # Discarded solve for JIT warmup
-    _ = altro_solver.solve(problem, initial_state)
+    _ = altro_mpc.solve()
 
     # Timed solve
     t_start_altro = time.perf_counter()
-    res_altro = altro_solver.solve(problem, initial_state)
+    res_altro = altro_mpc.solve()
     time_altro_ms = (time.perf_counter() - t_start_altro) * 1000.0
 
     mo.md(
@@ -258,12 +263,10 @@ def _(ALTRO, initial_state, mo, problem, time):
 
 
 @app.cell
-def _(Ipopt, initial_state, mo, problem, time):
-    ipopt_solver = Ipopt(options={"print_level": 0})
-
+def _(ipopt_mpc, mo, time):
     # Timed solve
     t_start_ipopt = time.perf_counter()
-    res_ipopt = ipopt_solver.solve(problem, initial_state)
+    res_ipopt = ipopt_mpc.solve()
     time_ipopt_ms = (time.perf_counter() - t_start_ipopt) * 1000.0
 
     mo.md(

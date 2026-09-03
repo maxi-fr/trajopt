@@ -19,7 +19,8 @@ def _():
     from trajopt.costs.objective import LQRObjective
     from trajopt.dynamics.integrators import RK4
     from trajopt.models.cartpole import Cartpole
-    from trajopt.problem import MPCState, Problem
+    from trajopt.mpc import MPC
+    from trajopt.problem import Problem
     from trajopt.solvers.altro import ALTRO
     from trajopt.transcription.ipopt import Ipopt
 
@@ -31,7 +32,7 @@ def _():
         GoalConstraint,
         Ipopt,
         LQRObjective,
-        MPCState,
+        MPC,
         Problem,
         RK4,
         StateBound,
@@ -115,28 +116,27 @@ def _(
 
 
 @app.cell
-def _(MPCState, N, Problem, RK4, cl, dt, model, obj, x0, xf):
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
-    return prob, state
+def _(N, Problem, RK4, cl, dt, model, obj):
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
+    return (prob,)
 
 
 @app.cell
-def _(ALTRO, prob, state, time):
-    altro_solver = ALTRO()
+def _(ALTRO, MPC, prob, time, x0, xf):
+    altro_mpc = MPC(prob, ALTRO(), x0=x0, xf=xf)
 
     t_start_altro = time.perf_counter()
-    altro_res = altro_solver.solve(prob, state)
+    altro_res = altro_mpc.solve()
     time.perf_counter() - t_start_altro
     return (altro_res,)
 
 
 @app.cell
-def _(Ipopt, prob, state, time):
-    ipopt_solver = Ipopt(options={"print_level": 0, "tol": 1e-6, "max_iter": 300})
+def _(Ipopt, MPC, prob, time, x0, xf):
+    ipopt_mpc = MPC(prob, Ipopt(options={"print_level": 0, "tol": 1e-6, "max_iter": 300}), x0=x0, xf=xf)
 
     t_start_ipopt = time.perf_counter()
-    ipopt_res = ipopt_solver.solve(prob, state)
+    ipopt_res = ipopt_mpc.solve()
     time.perf_counter() - t_start_ipopt
     return (ipopt_res,)
 

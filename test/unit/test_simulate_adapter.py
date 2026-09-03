@@ -15,7 +15,8 @@ from trajopt.dynamics.base import DiscretizedDynamics
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import BoundaryConditions, Problem
 from trajopt.simulate import (
     TrajOptDynamics,
     TrajOptMPC,
@@ -24,7 +25,7 @@ from trajopt.simulate import (
 from trajopt.transcription.ipopt import Ipopt
 
 
-def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, MPCState]:
+def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, BoundaryConditions]:
     """Helper to build a small pendulum optimal control problem."""
     model = Pendulum()
     xf = jnp.array([np.pi, 0.0])
@@ -37,18 +38,17 @@ def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, MPCS
     constraints.add_constraint(ControlBound(n=2, m=1, u_min=[-5.0], u_max=[5.0]), range(N - 1))
     constraints.add_constraint(GoalConstraint(n=2, xf=xf), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=jnp.array([0.1, 0.0]), t0=0.0, xf=xf, dt=dt)
-    return prob, state
+    prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=dt, integrator=RK4())
+    return prob, MPC(prob, Ipopt(), x0=jnp.array([0.1, 0.0]), t0=0.0, xf=xf).bc
 
 
 def test_mpc_update_step_and_warmstart_shift() -> None:
     """Verify one update step runs the solve, returns control, and shifts the internal state."""
-    prob, initial_state = _make_pendulum_problem(N=10, dt=0.05)
+    prob, boundary = _make_pendulum_problem(N=10, dt=0.05)
     controller = TrajOptMPC(
         dt=0.05,
         problem=prob,
-        initial_state=initial_state,
+        boundary=boundary,
         solver=Ipopt(options={"print_level": 0, "max_iter": 50}),
     )
 
@@ -67,16 +67,16 @@ def test_mpc_update_step_and_warmstart_shift() -> None:
     assert log.solve_time_s > 0.0
     np.testing.assert_allclose(log.u, u)
 
-    assert float(controller.state.t0) == pytest.approx(0.05)
+    assert float(controller.mpc.t0) == pytest.approx(0.05)
 
 
 def test_mpc_from_config_direct_problem() -> None:
     """Verify instantiating MPC from config dict with an existing Problem."""
-    prob, initial_state = _make_pendulum_problem()
+    prob, boundary = _make_pendulum_problem()
     cfg = {
         "dt": 0.05,
         "problem": prob,
-        "initial_state": initial_state,
+        "boundary": boundary,
         "solver": Ipopt(options={"print_level": 0}),
     }
 
@@ -105,11 +105,11 @@ def test_mpc_from_config_class_path() -> None:
 
 def test_mpc_fallback_on_solver_failure() -> None:
     """Verify solver failure triggers warm-start fallback without raising."""
-    prob, initial_state = _make_pendulum_problem()
+    prob, boundary = _make_pendulum_problem()
     controller = TrajOptMPC(
         dt=0.05,
         problem=prob,
-        initial_state=initial_state,
+        boundary=boundary,
         # An option cyipopt rejects at add_option time is what breaks the solve; the fallback
         # path doesn't care why the solver failed, only that it did.
         solver=Ipopt(options={"max_iter": "not_a_number"}),
@@ -191,11 +191,11 @@ def test_unified_closed_loop_plant_and_mpc() -> None:
 
     plant = TrajOptDynamics(dt=dt, model=model, x0=np.array([0.1, 0.0]))
 
-    prob, initial_state = _make_pendulum_problem(N=10, dt=dt)
+    prob, boundary = _make_pendulum_problem(N=10, dt=dt)
     controller = TrajOptMPC(
         dt=dt,
         problem=prob,
-        initial_state=initial_state,
+        boundary=boundary,
         solver=Ipopt(options={"print_level": 0, "max_iter": 30}),
     )
 

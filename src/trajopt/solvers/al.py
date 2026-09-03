@@ -11,8 +11,8 @@ from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.program import Program, program_for
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.ilqr import SolveKD, build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
@@ -910,7 +910,7 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
     to end with `options` static. `al0` is caller-supplied rather than built here: allocating its
     padded row layout (`ALConstraints.build`) is eager Python/NumPy over `problem.constraints`
     (ticket 28), not traceable, and is also where `reset_duals`/`reset_penalties`-gated
-    warm-starting from a prior `MPCState.al` belongs (reference §5.5's note that the outer loop
+    warm-starting from a prior `WarmStart.al` belongs (reference §5.5's note that the outer loop
     body itself never resets duals/penalties -- only a whole solve's start does).
 
     Parameters
@@ -1000,7 +1000,7 @@ class ALResult(NamedTuple):
         `TerminationStatus` member name -- the precise Altro exit reason, kept for diagnostics.
     solver_status : SolverStatus
         `status` mapped through `to_solver_status`'s table; the authoritative public status
-        `Problem.solve` uses for `MPCState.status`, rather than guessing from `message`.
+        the `MPC` driver reports, rather than guessing from `message`.
     cost : float
         Final AL-augmented objective value.
     Z : jax.Array
@@ -1017,7 +1017,7 @@ class ALResult(NamedTuple):
     mu : np.ndarray, optional
         Always empty, for the same reason as `lam`. Defaults to empty.
     al : ALConstraints | None, optional
-        Final padded duals and penalties, threaded into `MPCState.al` for warm-starting the next
+        Final padded duals and penalties, threaded into `WarmStart.al` for warm-starting the next
         solve. Defaults to None.
     """
 
@@ -1042,7 +1042,7 @@ class AL:
 
     A thin eager wrapper over the traced `al_solve` core (ticket 29): `.solve()` builds the
     warm-start trajectory from `state`, builds or warm-starts the initial padded duals/penalties
-    from `state.al` (subject to `options.reset_duals` / `reset_penalties`), calls the jitted
+    from `ws.al` (subject to `options.reset_duals` / `reset_penalties`), calls the jitted
     core, then converts the traced status int and stats buffers into `success` / `message` /
     `info` at the boundary -- work that cannot happen inside a trace. Bound constraints
     (`ControlBound`, state bounds) are ordinary inequality constraints here, handled by the outer
@@ -1057,41 +1057,42 @@ class AL:
 
     options: SolverOptions = field(default_factory=SolverOptions)
 
-    def solve(self, problem: Problem, state: MPCState) -> ALResult:
-        """Run the traced AL outer loop from `state`'s warm-start trajectory/duals and boundary-convert the result.
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> ALResult:
+        """Run the traced AL outer loop from `ws`'s warm-start trajectory/duals and boundary-convert the result.
 
         Raises
         ------
         ValueError
-            `state.al` carries duals built under the opposite `use_conic_cost` convention
+            `ws.al` carries duals built under the opposite `use_conic_cost` convention
             (finding E: the conic and non-conic paths store lambda with opposite signs) and
             `options.reset_duals` is False, so warm-starting them would silently reinterpret the
             sign (ticket 31). Set `options.reset_duals=True` to discard the old duals instead.
         """
+        problem = program.problem
         options = self.options
-        init_traj, bc = build_warm_start(problem, state)
+        init_traj = build_warm_start(problem, bc, ws)
 
         fresh_al = ALConstraints.build(
             problem.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
         )
-        if state.al is not None:
-            if not options.reset_duals and bool(state.al.is_conic) != options.use_conic_cost:
+        if ws.al is not None:
+            if not options.reset_duals and bool(ws.al.is_conic) != options.use_conic_cost:
                 msg = (
-                    f"state.al was built with use_conic_cost={bool(state.al.is_conic)}, but "
+                    f"ws.al was built with use_conic_cost={bool(ws.al.is_conic)}, but "
                     f"options.use_conic_cost={options.use_conic_cost}. The two conventions store "
                     "lambda with opposite signs (finding E), so warm-starting across the switch "
                     "would silently reinterpret it. Set options.reset_duals=True to discard the "
                     "old duals, or keep use_conic_cost consistent with the state that produced them."
                 )
                 raise ValueError(msg)
-            lam = fresh_al.lam if options.reset_duals else state.al.lam
-            mu = fresh_al.mu if options.reset_penalties else state.al.mu
+            lam = fresh_al.lam if options.reset_duals else ws.al.lam
+            mu = fresh_al.mu if options.reset_penalties else ws.al.mu
             init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))
         else:
             init_al = fresh_al
 
         final_traj, final_al, stats, status_int = _jit_al_solve(
-            program_for(self, problem), init_traj, init_al, options, bc=bc
+            program, init_traj, init_al, options, bc=bc
         )
 
         status = TerminationStatus(int(status_int))

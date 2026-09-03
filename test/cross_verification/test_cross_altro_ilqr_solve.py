@@ -6,7 +6,7 @@ import pytest
 
 from trajopt.costs.objective import LQRObjective, Objective
 from trajopt.models import Cartpole, Pendulum
-from trajopt.problem import MPCState, Problem, retarget_to_goal
+from trajopt.problem import Problem, retarget_to_goal
 from trajopt.solvers.ilqr import ILQR, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus
 from trajopt.trajectory import Trajectory
@@ -124,7 +124,7 @@ def _assert_solve_matches_altro(jl: Any, setup: _BenchmarkSetup, jl_model_expr: 
     options = SolverOptions()
     solver = _build_jl_solver(jl, setup, jl_model_expr, options)
 
-    prob = Problem(model=setup.model, obj=setup.obj, N=setup.N)
+    prob = Problem(model=setup.model, obj=setup.obj, N=setup.N, dt=setup.dt)
     t = jnp.arange(setup.N) * setup.dt
     dt = jnp.full(setup.N - 1, setup.dt)
     guess = Trajectory(X=jnp.zeros((setup.N, setup.x0.shape[0])), U=jnp.asarray(setup.U0), t=t, dt=dt)

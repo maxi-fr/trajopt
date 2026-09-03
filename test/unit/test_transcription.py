@@ -13,7 +13,8 @@ from trajopt.costs.objective import LQRObjective
 from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
     _trajectory_to_z,
@@ -368,11 +369,10 @@ def test_unconstrained_solve() -> None:
     Q = jnp.eye(2)
     R = jnp.eye(1)
     obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
 
     x0 = jnp.array([0.5, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
-    res = Ipopt(options={"print_level": 0}).solve(prob, state)
+    res = MPC(prob, Ipopt(options={"print_level": 0}), x0=x0).solve()
     assert res.success
     np.testing.assert_allclose(res.trajectory.X[0], x0, atol=1e-4)
 
@@ -380,8 +380,8 @@ def test_unconstrained_solve() -> None:
 @pytest.mark.slow
 def test_hessian_with_unstacked_stage_cost_at_colliding_horizon() -> None:
     """Assert the Lagrangian Hessian builds when the control dimension equals N - 1."""
-    prob, state, _ = quadrotor_obstacle_benchmark(N=5)  # m == 4 == N - 1
-    hess_val = hessian(prob, state.Z, dt=state.dt, bc=state.bc)
+    prob, bc, ws, _ = quadrotor_obstacle_benchmark(N=5)  # m == 4 == N - 1
+    hess_val = hessian(prob, ws.Z, dt=prob.dt, bc=bc)
 
     hess_rows, _ = hessian_sparsity_pattern(prob.N, prob.model.n, prob.model.m)
     assert hess_val.shape == hess_rows.shape

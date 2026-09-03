@@ -29,10 +29,11 @@ from trajopt.benchmarks import (  # noqa: E402 -- must follow the sys.path setup
     measure_transcription_setup,
     quadrotor_obstacle_benchmark,
 )
-from trajopt.problem import MPCState, Problem  # noqa: E402 -- must follow the sys.path setup above
+from trajopt.problem import BoundaryConditions, Problem  # noqa: E402 -- must follow the sys.path setup above
+from trajopt.program import WarmStart  # noqa: E402 -- must follow the sys.path setup above
 from trajopt.transcription.ipopt import Ipopt  # noqa: E402 -- must follow the sys.path setup above
 
-BenchmarkFactory = Callable[..., tuple[Problem, MPCState, dict[str, Any]]]
+BenchmarkFactory = Callable[..., tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]]
 
 
 class ProblemSpec(NamedTuple):
@@ -99,17 +100,18 @@ def _measure_casadi_solve(
 
 def compare_one(spec: ProblemSpec) -> None:
     """Build, time, and print a trajopt-vs-CasADi comparison for one benchmark problem."""
-    prob, state, info = spec.factory(**spec.factory_kwargs)
-    x0 = state.x0
+    prob, bc, ws, info = spec.factory(**spec.factory_kwargs)
+    x0 = bc.x0
     dt = float(info["dt"])
 
     trajopt_setup_s = measure_transcription_setup(prob, x0, dt=dt)
-    trajopt_solve_res, trajopt_timing = measure_solver_runtime(prob, state, Ipopt(options=spec.solver_opts))
+    trajopt_solve_res, trajopt_timing = measure_solver_runtime(prob, bc, ws, Ipopt(options=spec.solver_opts))
 
     casadi_setup_s = _measure_casadi_setup(prob, x0, dt)
     casadi_prob = build_casadi_from_problem(prob, x0=x0, dt=dt)
-    initial_X = np.asarray(state.states) if spec.use_state_as_init_guess else None
-    initial_U = np.asarray(state.controls) if spec.use_state_as_init_guess else None
+    X_guess, U_guess = ws.unpack(prob)
+    initial_X = np.asarray(X_guess) if spec.use_state_as_init_guess else None
+    initial_U = np.asarray(U_guess) if spec.use_state_as_init_guess else None
     casadi_solve_s, casadi_success, casadi_iters = _measure_casadi_solve(
         casadi_prob, options=spec.solver_opts, initial_X=initial_X, initial_U=initial_U
     )

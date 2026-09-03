@@ -12,8 +12,8 @@ import numpy as np
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.program import Program, program_for
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
@@ -812,38 +812,38 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
     return final.trajectory, final.stats, final.status
 
 
-def build_warm_start(problem: Problem, state: MPCState) -> tuple[Trajectory, BoundaryConditions]:
-    """Build the eager warm-start trajectory and the traced boundary conditions from `state`.
+def build_warm_start(problem: Problem, bc: BoundaryConditions, ws: WarmStart) -> Trajectory:
+    """Build the eager warm-start trajectory from `ws`, on the absolute time grid starting at `bc.t0`.
 
-    Shared by every native solver's `.solve()` (ticket 29 wraps ticket 27's `.solve()` boundary):
-    each parses `state.Z` into `(X, U)` and builds the absolute time grid from `state.t0`/
-    `state.dt`. The run-time target is no longer folded into a derived `Problem` here; it stays
-    in `state.bc` and is passed to the jitted core as a traced argument, so a goal that moves
-    between MPC steps changes traced values rather than the compilation key.
+    Shared by every native solver's `.solve()`: each parses `ws.Z` into `(X, U)` and lays it on
+    the problem's time grid. The run-time target is not folded in here; it stays in `bc` and is
+    passed to the jitted core as a traced argument, so a goal that moves between MPC steps changes
+    traced values rather than the compilation key.
 
     Parameters
     ----------
     problem : Problem
-        Problem to warm-start, supplying the horizon and dimensions.
-    state : MPCState
-        Per-step state supplying the flat primal `Z`, `dt`, and the boundary conditions.
+        Problem to warm-start, supplying the horizon, dimensions and step durations.
+    bc : BoundaryConditions
+        Traced boundary data supplying the initial timestamp.
+    ws : WarmStart
+        Warm start supplying the flat primal `Z`.
 
     Returns
     -------
-    tuple[Trajectory, BoundaryConditions]
-        The warm-start trajectory built from `state.Z`, and `state.bc`.
+    Trajectory
+        The warm-start trajectory of N knot points built from `ws.Z`.
     """
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
 
-    _x0_arr, t0_arr, dt_arr, _xf_val, z0 = parse_solver_initial_state(state)
-    assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
+    _x0_arr, t0_arr, dt_arr, _xf_val, z0 = parse_solver_initial_state(problem, bc, ws)
     dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
     t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
     X0, U0 = _z_to_trajectory(z0, N, n, m)
 
-    return Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr), state.bc
+    return Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
 
 
 def _jit_ilqr_solve(
@@ -890,7 +890,7 @@ class ILQRResult(NamedTuple):
         `TerminationStatus` member name -- the precise Altro exit reason, kept for diagnostics.
     solver_status : SolverStatus
         `status` mapped through `to_solver_status`'s table; the authoritative public status
-        `Problem.solve` uses for `MPCState.status`, rather than guessing from `message`.
+        the `MPC` driver reports, rather than guessing from `message`.
     cost : float
         Final objective value.
     Z : jax.Array
@@ -929,10 +929,10 @@ class ILQR:
     """Native iLQR solver backend, satisfying the `Solver` protocol for an unconstrained problem.
 
     A thin eager wrapper over the traced `ilqr_solve` core (ticket 27): `.solve()` builds the
-    warm-start trajectory from `state`, calls the jitted core, then converts the traced status
+    warm-start trajectory from `ws`, calls the jitted core, then converts the traced status
     int and stats buffers into `success` / `message` / `info` at the boundary -- work that
-    cannot happen inside a trace. Swapping `ILQR()` for `Ipopt()` in `problem.solve(state,
-    solver=...)` is then a one-word change.
+    cannot happen inside a trace. Swapping `ILQR()` for `Ipopt()` as the `MPC` driver's solver
+    is then a one-word change.
 
     Parameters
     ----------
@@ -942,13 +942,14 @@ class ILQR:
 
     options: SolverOptions = field(default_factory=SolverOptions)
 
-    def solve(self, problem: Problem, state: MPCState) -> ILQRResult:
-        """Run the traced iLQR core from `state`'s warm-start trajectory and boundary-convert the result.
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> ILQRResult:
+        """Run the traced iLQR core from `ws`'s warm-start trajectory and boundary-convert the result.
 
         Warns when `problem` carries constraints: iLQR ignores them and solves the unconstrained
         problem, so the returned trajectory answers a different question than the one asked. The
         reported `constraint_violation` then measures how different.
         """
+        problem = program.problem
         if not problem.constraints.is_unconstrained():
             warnings.warn(
                 "ILQR ignores constraints and box bounds: solving the unconstrained problem, so the "
@@ -956,9 +957,9 @@ class ILQR:
                 stacklevel=2,
             )
 
-        init_traj, bc = build_warm_start(problem, state)
+        init_traj = build_warm_start(problem, bc, ws)
 
-        final_traj, stats, status_int = _jit_ilqr_solve(program_for(self, problem), init_traj, self.options, bc)
+        final_traj, stats, status_int = _jit_ilqr_solve(program, init_traj, self.options, bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
@@ -976,10 +977,10 @@ class ILQR:
             constraint_violation=compute_constraint_violation(
                 problem,
                 Z,
-                state.x0,
-                t0=state.t0,
+                bc.x0,
+                t0=bc.t0,
                 dt=final_traj.dt,
-                xf=state.xf,
+                xf=bc.xf,
             ),
             iterations=n_iter,
         )

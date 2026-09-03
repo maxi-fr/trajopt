@@ -9,7 +9,8 @@ from trajopt.constraints.constraint_list import ConstraintList
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.solvers.altro import ALTRO
 
 GOLDEN = Path(__file__).resolve().parent.parent / "golden" / "mpc_cartpole_closed_loop.npz"
@@ -27,7 +28,7 @@ def _build():
     """Cartpole balancing problem of examples/05: bounded force, bounded track, LQR to upright.
 
     Returns the problem, its discretized model, the initial state, and the upright goal, which is
-    now run-time data the MPCState carries rather than a target baked into the objective.
+    now run-time data the BoundaryConditions carry rather than a target baked into the objective.
     """
     n, m = 4, 1
     x0 = jnp.array([0.0, np.pi - 0.25, 0.1, -0.2], dtype=jnp.float64)
@@ -54,7 +55,7 @@ def _build():
 
     model = Cartpole(mc=1.0, mp=0.2, l=0.5, g=9.81)
     integrator = RK4()
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=integrator)
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=DT, integrator=integrator)
     return prob, model.discretize(integrator), x0, xf
 
 
@@ -67,15 +68,13 @@ def _record_ipopt_seed(prob, x0, xf):
     pytest.importorskip("cyipopt", reason="regenerating the golden needs the Ipopt seed")
     from trajopt.transcription.ipopt import Ipopt
 
-    state = MPCState.initial(prob, x0=x0, dt=DT, xf=xf)
-    return np.asarray(prob.solve(state, solver=Ipopt()).Z)
+    return np.asarray(MPC(prob, Ipopt(), x0=x0, xf=xf).solve().Z)
 
 
 def _run_closed_loop(z_seed):
     """Run the receding-horizon loop from the seeded plan, returning closed-loop states and controls."""
     prob, dmodel, x0, xf = _build()
-    state = MPCState.initial(prob, x0=x0, dt=DT, xf=xf, initial_z=jnp.asarray(z_seed))
-    solver = ALTRO()
+    mpc = MPC(prob, ALTRO(), x0=x0, xf=xf, initial_z=jnp.asarray(z_seed))
 
     x_curr, t_curr = x0, 0.0
     X_hist, U_hist = [np.asarray(x_curr)], []
@@ -84,16 +83,16 @@ def _run_closed_loop(z_seed):
         if step == KICK_STEP:
             x_curr = x_curr.at[3].add(KICK)
 
-        state = state.with_measurement(x_curr, t_curr)
-        state = prob.solve(state, solver=solver)
+        mpc.measure(x_curr, t_curr)
+        mpc.solve()
 
-        u_cmd = state.controls[0]
+        u_cmd = mpc.controls[0]
         U_hist.append(np.asarray(u_cmd))
 
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, DT)
         X_hist.append(np.asarray(x_curr))
 
-        state = state.shift(DT)
+        mpc.shift(DT)
         t_curr += DT
 
     return np.array(X_hist), np.array(U_hist)

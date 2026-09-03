@@ -11,7 +11,8 @@ import scipy.sparse as sp
 from trajopt.cones import NegativeOrthant, SecondOrderCone, ZeroCone
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem, retarget_problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
@@ -193,20 +194,20 @@ def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extracti
     return A_rows, l_vals, u_vals
 
 
-def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the state, and the row map
+def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the warm start, and the row map
     solver: Any,  # noqa: ANN401 -- osqp.OSQP is an untyped C-extension
     problem: Problem,
-    state: MPCState,
+    ws: WarmStart,
     *,
     z0: jax.Array | None,
     canonical_rows: np.ndarray,
     n_rows: int,
 ) -> None:
-    """Seed OSQP with the previous primal and, when the MPCState carries them, dual iterates."""
+    """Seed OSQP with the previous primal and, when the WarmStart carries them, dual iterates."""
     if z0 is not None:
         solver.warm_start(x=z0)
 
-    lam0, mu0 = warm_start_duals(problem, state)
+    lam0, mu0 = warm_start_duals(problem, ws)
     if lam0 is None or mu0 is None:
         return
 
@@ -249,13 +250,14 @@ class OSQP:
     operating_point: Trajectory | jax.Array | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
 
-    def solve(self, problem: Problem, state: MPCState) -> OSQPResult:
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> OSQPResult:  # noqa: PLR0915 -- one straight-line transcribe, solve and unpack
         """Solve the transcribed optimal control problem using OSQP, warning that it is one linearization.
 
         The warning is unconditional rather than gated on the problem being nonlinear: every
         caller handing this Backend a `Problem` gets one convex solve about the Operating
         Point, and whether that answers their problem is theirs to judge.
         """
+        problem = program.problem
         warnings.warn(
             "OSQP solves a single convex subproblem built about the Operating Point: the "
             "dynamics are linearized and the cost taken to second order once, so the result "
@@ -277,8 +279,8 @@ class OSQP:
         m = int(problem.model.m)
         nz = N * n + (N - 1) * m
 
-        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
-        problem = retarget_problem(problem, state.bc)
+        x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(problem, bc, ws)
+        problem = retarget_problem(problem, bc)
 
         t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
         t_term = t0_arr + jnp.sum(dt_arr)
@@ -338,7 +340,7 @@ class OSQP:
             solver_opts.update(self.options)
 
         solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
-        _warm_start(solver, problem, state, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
+        _warm_start(solver, problem, ws, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
 
         res = solver.solve()
 

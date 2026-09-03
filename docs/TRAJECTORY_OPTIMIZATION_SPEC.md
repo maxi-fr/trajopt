@@ -24,7 +24,7 @@ diverges from the Julia package, the divergence is listed in
 10. [Constraint catalog and ConstraintList](#10-constraint-catalog-and-constraintlist)
 11. [Expansions](#11-expansions)
 12. [NLP transcription](#12-nlp-transcription)
-13. [Problem, MPCState, and the MPC loop](#13-problem-mpcstate-and-the-mpc-loop)
+13. [Problem, MPC, and the control loop](#13-problem-mpc-and-the-control-loop)
 14. [Models](#14-models)
 15. [Verification strategy](#15-verification-strategy)
 16. [Deferred work](#16-deferred-work)
@@ -126,7 +126,9 @@ src/trajopt/
 ├── costs/              stage + terminal cost, stacked parameters, Objective
 ├── constraints/        constraint catalog, ConstraintList
 ├── trajectory.py       struct-of-arrays storage, KnotPoint view
-├── problem.py          Problem (structure) and MPCState (per-step data)
+├── problem.py          Problem (structure) and BoundaryConditions (per-step data)
+├── program.py          Program (a Problem compiled for one solver) and WarmStart
+├── mpc.py              MPC, the receding-horizon driver
 ├── expansions.py       Expansion: stacked A, B, q, r, Q, R, H in error coordinates
 ├── transcription/      Z layout, c(Z), COO sparsity pattern, solver adapters
 └── models/             benchmark models and model transforms
@@ -183,7 +185,7 @@ Fusing across these gains nothing, because Ipopt invokes them at different frequ
 
 `x0`, `t0`, and `xf` change on **every** MPC iteration. If any of them becomes a trace
 constant, every control step triggers a recompile and every deadline is missed. This is
-enforced structurally by the `Problem` / `MPCState` split
+enforced structurally by the `Problem` / `BoundaryConditions` split
 ([section 13](#13-problem-mpcstate-and-the-mpc-loop)) and asserted by a test that runs 100
 MPC iterations and requires the compilation counter to remain at zero.
 
@@ -651,11 +653,11 @@ allocates inside the iteration loop.
 
 ---
 
-## 13. Problem, MPCState, and the MPC loop
+## 13. Problem, MPC, and the control loop
 
 Structure and per-step data are **separate types**. This turns "never let `x0` become static"
 from a discipline into a property of the type system: nothing in `Problem` can change per
-step, and nothing in `MPCState` is ever a trace constant.
+step, and nothing in `BoundaryConditions` is ever a trace constant.
 
 ### `Problem` — structure, the compilation cache key
 
@@ -665,49 +667,66 @@ step, and nothing in `MPCState` is ever a trace constant.
 | `obj` | `Objective` with stacked parameters |
 | `constraints` | built `ConstraintList` |
 | `N` | static |
+| `dt` | leaf, shape `(N - 1,)` |
 | `integrator` | static |
 
 `Problem` is itself an `eqx.Module` passed as a traced pytree. The compilation cache key is
 its treedef plus its static fields; model parameters flow through as leaves, which is what
 makes "change the mass without recompiling" actually true.
 
-### `MPCState` — per-step data, always traced
+### `BoundaryConditions` — per-step data, always traced
 
 | Field | Kind |
 | :--- | :--- |
-| `x0`, `t0`, `xf` | leaves |
-| `lam`, `mu` | leaves |
-| `Z` | warm-start trajectory (leaves) |
+| `x0`, `t0` | leaves |
+| `X_ref`, `U_ref` | leaves (the reference window; a goal is a constant window) |
 
-### Methods
+Zero static fields, so a boundary update can never key a recompile.
 
-- `problem.cost(state)` — scalar objective at `state.Z`.
-- `problem.solve(state, solver=None)` — solve from `state`, returning an updated `MPCState`;
-  `solver` defaults to `Ipopt()` and also accepts `OSQP()` or `Clarabel()`.
-- `state.states`, `state.controls` — properties unpacking `state.Z` into the stacked state and
-  control arrays.
-- `state.with_measurement(x, t)` — new state with updated $x_0$, $t_0$
-- `state.with_goal(xf)` — new state with updated $x_f$
-- `state.shift(dt)` — warm-start shift
-- `state.with_states(X0)`, `state.with_controls(U0)` — new state with `state.Z` replaced
+### `Program` — a Problem compiled and allocated for one solver
+
+Mutable, eager-side, and the single `jax.jit` call site: it caches the traced cores keyed by
+function and shape, and holds any live backend handle across receding-horizon steps.
+
+### `WarmStart` — the primal/dual iterates carried between steps
+
+| Field | Kind |
+| :--- | :--- |
+| `Z` | flat primal vector |
+| `lam`, `mu` | transcription duals |
+| `al` | AL duals and penalties, or `None` |
+
+### `MPC` — the driver
+
+Holds one `Program`, the current `BoundaryConditions`, and the warm start.
+
+- `mpc.solve()` — solve this step, folding the result into the warm start and returning the
+  backend's `SolverResult`.
+- `mpc.cost()` — scalar objective at the current warm start.
+- `mpc.states`, `mpc.controls`, `mpc.trajectory()` — the current plan.
+- `mpc.measure(x, t)` — inject the measurement into $x_0$, $t_0$.
+- `mpc.set_goal(xf)` — replace the reference with a constant window.
+- `mpc.set_reference(window)` / `mpc.push_reference(x_ref, u_ref)` — replace the tracked window
+  wholesale, or stage the point that enters it at the far end on the next shift.
+- `mpc.shift(dt)` — advance a knot: warm start and reference window both slide.
 
 ### Control loop
 
 ```text
-problem = Problem(model, obj, constraints, N)   # built once, compiled once
-state   = MPCState.initial(problem, x0, t0)
+problem = Problem(model, obj, constraints, N, dt)   # built once, compiled once
+mpc     = MPC(problem, Ipopt(), x0=x0, t0=t0, xf=xf)
 
 loop:
-    state = state.with_measurement(x_measured, t_current)
-    state = state.with_goal(xf)                 # optional
-    state = problem.solve(state)                # Ipopt() / OSQP() / Clarabel()
-    u_command = state.controls[0]
-    state = state.shift(dt)                     # warm start next solve
+    mpc.measure(x_measured, t_current)
+    mpc.set_goal(xf)                 # optional
+    mpc.solve()                      # Ipopt() / OSQP() / Clarabel() / ALTRO() / ...
+    u_command = mpc.controls[0]
+    mpc.shift(dt)                    # warm start next solve
 ```
 
 The Julia `set_goal_state!` mutates the problem, the objective, and the goal constraints in
-sync. Under this split, $x_f$ lives in `MPCState` alone and both the objective and the goal
-constraint read it as an argument, so there is nothing to keep in sync.
+sync. Under this split, $x_f$ lives in the boundary conditions alone and both the objective and
+the goal constraint read it as an argument, so there is nothing to keep in sync.
 
 ---
 
@@ -884,7 +903,7 @@ Documented expansion paths, each designed to be additive rather than breaking:
 | `ConstraintList.sigs` | removed | in-place versus return-new is meaningless with immutable arrays |
 | `ConstraintList.diffs` | removed | AD compiles to the analytic form; an override is a second place to be wrong |
 | In-place `!` mutators | value-returning methods | arrays are immutable |
-| `Problem` holds `x0`, `xf` | split into `Problem` and `MPCState` | makes the zero-recompile invariant structural |
+| `Problem` holds `x0`, `xf` | split into `Problem`, `BoundaryConditions` and the `MPC` driver | makes the zero-recompile invariant structural |
 | Time-varying $n_k$, $m_k$ | fixed `n`, `m` | ragged buffers are incompatible with `vmap`; no benchmark needs it |
 | Multiple dispatch on abstract type trees | `eqx.Module` and explicit composition | no Python equivalent worth emulating |
 

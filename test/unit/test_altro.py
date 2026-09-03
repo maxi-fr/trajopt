@@ -10,8 +10,8 @@ from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
-from trajopt.program import program_for
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.solvers.al import ALConstraints, ALStats, evaluate_al_constraints, max_violation
 from trajopt.solvers.altro import (
     ALTRO,
@@ -42,7 +42,7 @@ def _cartpole_problem(u_bnd: float = 3.0, N: int = 101) -> tuple[Problem, jnp.nd
         clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt, integrator=RK4())
     return prob, x0, dt, xf
 
 
@@ -55,7 +55,7 @@ def _lq_problem() -> tuple[Problem, jnp.ndarray, float, jnp.ndarray]:
     Qf = jnp.diag(jnp.array([10.0, 1.0]))
     xf = jnp.array([jnp.pi, 0.0])
     obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
     x0 = jnp.array([0.0, 0.0])
     return prob, x0, 0.05, xf
 
@@ -67,9 +67,8 @@ def test_altro_satisfies_solver_protocol() -> None:
 
 def test_altro_result_satisfies_solver_result_protocol() -> None:
     """ALTROResult structurally satisfies the SolverResult protocol."""
-    prob, x0, dt, xf = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
-    result = ALTRO().solve(prob, state)
+    prob, x0, _dt, xf = _lq_problem()
+    result = MPC(prob, ALTRO(), x0=x0, xf=xf).solve()
     assert isinstance(result, ALTROResult)
     assert isinstance(result, SolverResult)
 
@@ -89,10 +88,10 @@ def test_altro_unconstrained_takes_ilqr_shortcut_without_al_or_pn_state(monkeypa
     monkeypatch.setattr(altro_module, "al_solve", fail_al_solve)
     monkeypatch.setattr(altro_module, "pn_solve", fail_pn_solve)
 
-    prob, x0, dt, xf = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
-    result = ALTRO().solve(prob, state)
+    prob, x0, _dt, xf = _lq_problem()
+    result = MPC(prob, ALTRO(), x0=x0, xf=xf).solve()
 
+    assert isinstance(result, ALTROResult)
     assert result.success
     assert result.al is None
     assert result.info["ran_pn"] is False
@@ -148,11 +147,10 @@ def test_altro_cartpole_reaches_tight_violation_via_pn() -> None:
     (1e-3); the real `constraint_tolerance` default (1e-6) is tighter, so PN must actually run and
     do the polishing for this to pass.
     """
-    prob, x0, dt, xf = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    prob, x0, _dt, xf = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30)
 
-    result = ALTRO(options=options).solve(prob, state)
+    result = MPC(prob, ALTRO(options=options), x0=x0, xf=xf).solve()
 
     assert result.success
     assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
@@ -174,11 +172,10 @@ def test_altro_negative_projected_newton_tolerance_works_end_to_end_via_kickout(
     constraint_tolerance without PN's help, so it is `al_iterations < iterations_outer` -- not
     `ran_pn` -- that proves the kickout path actually fired.
     """
-    prob, x0, dt, xf = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    prob, x0, _dt, xf = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30, projected_newton_tolerance=-1.0)
 
-    result = ALTRO(options=options).solve(prob, state)
+    result = MPC(prob, ALTRO(options=options), x0=x0, xf=xf).solve()
 
     assert result.iterations < options.iterations_outer  # exited via kickout, not iteration exhaustion
     assert result.success
@@ -317,24 +314,24 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
 
 
 def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem() -> None:
-    """Two `.solve()` calls on the same `ALTRO` instance and `problem` reuse the same compiled `jax.jit` closure.
+    """Two `.solve()` calls on the same driver reuse the same compiled `jax.jit` closure.
 
     Verifies fix 2 (ticket 34): the solver's `Program` hands back the core it already built on a
     repeat call (same `problem` identity, same `options`) instead of compiling a fresh `jax.jit`
     wrapper every `.solve()` call -- the MPC-loop regime the Program exists for.
     """
-    prob, x0, dt, xf = _cartpole_problem(N=5)
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    prob, x0, _dt, xf = _cartpole_problem(N=5)
     altro = ALTRO(options=SolverOptions(iterations=2, iterations_outer=2, n_steps=1))
 
-    _ = altro.solve(prob, state)
-    program = program_for(altro, prob)
+    mpc = MPC(prob, altro, x0=x0, xf=xf)
+    _ = mpc.solve()
+    program = mpc.program
     cores_after_first = dict(program._cores)  # noqa: SLF001 -- white-box core-reuse check
     assert len(cores_after_first) == 1
 
-    _ = altro.solve(prob, state)
+    _ = mpc.solve()
 
-    assert program_for(altro, prob) is program
+    assert mpc.program is program
     assert program._cores == cores_after_first  # noqa: SLF001 -- white-box core-reuse check
 
 

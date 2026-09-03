@@ -19,7 +19,8 @@ def _():
     from trajopt.costs.objective import LQRObjective
     from trajopt.dynamics.integrators import RK4
     from trajopt.models.pendulum import Pendulum
-    from trajopt.problem import MPCState, Problem
+    from trajopt.mpc import MPC
+    from trajopt.problem import Problem
     from trajopt.solvers.altro import ALTRO
     from trajopt.transcription.ipopt import Ipopt
 
@@ -30,7 +31,7 @@ def _():
         GoalConstraint,
         Ipopt,
         LQRObjective,
-        MPCState,
+        MPC,
         Pendulum,
         Problem,
         RK4,
@@ -156,19 +157,21 @@ def _(ConstraintList, ControlBound, GoalConstraint, N, m, n, xf):
 
 
 @app.cell
-def _(MPCState, N, Problem, clist, dt, integrator, model, obj, x0, xf):
+def _(ALTRO, Ipopt, MPC, N, Problem, clist, dt, integrator, model, obj, x0, xf):
     # Assemble the optimal control problem
     prob = Problem(
         model=model,
         obj=obj,
         constraints=clist,
         N=N,
+        dt=dt,
         integrator=integrator,
     )
 
-    # Initial MPC state containing initial conditions and timestep
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
-    return prob, state
+    # One driver per solver: each owns its compiled Program, its boundary conditions and its warm start
+    altro_mpc = MPC(prob, ALTRO(), x0=x0, xf=xf)
+    ipopt_mpc = MPC(prob, Ipopt(options={"print_level": 0}), x0=x0, xf=xf)
+    return altro_mpc, ipopt_mpc, prob
 
 
 @app.cell
@@ -184,22 +187,22 @@ def _(mo):
 
 
 @app.cell
-def _(ALTRO, prob, state, time):
+def _(altro_mpc, time):
     # Warmup solve for JIT compilation
-    _ = ALTRO().solve(prob, state)
+    _ = altro_mpc.solve()
 
     # Timed solve with ALTRO
     t0_altro = time.perf_counter()
-    res_altro = ALTRO().solve(prob, state)
+    res_altro = altro_mpc.solve()
     altro_solve_time_ms = (time.perf_counter() - t0_altro) * 1000.0
     return altro_solve_time_ms, res_altro
 
 
 @app.cell
-def _(Ipopt, prob, state, time):
+def _(ipopt_mpc, time):
     # Solve with Ipopt (print_level=0 for clean output)
     t0_ipopt = time.perf_counter()
-    res_ipopt = Ipopt(options={"print_level": 0}).solve(prob, state)
+    res_ipopt = ipopt_mpc.solve()
     ipopt_solve_time_ms = (time.perf_counter() - t0_ipopt) * 1000.0
     return ipopt_solve_time_ms, res_ipopt
 

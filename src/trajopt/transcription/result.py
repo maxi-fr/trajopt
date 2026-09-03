@@ -7,7 +7,8 @@ from trajopt.problem import Problem
 from trajopt.trajectory import Trajectory
 
 if TYPE_CHECKING:
-    from trajopt.problem import MPCState
+    from trajopt.problem import BoundaryConditions
+    from trajopt.program import Program, WarmStart
 
 SolverStatus = Literal["converged", "infeasible", "iteration_limit", "error"]
 
@@ -17,7 +18,7 @@ class SolverResult(Protocol):
     """The result every solver adapter returns, with duals in the canonical row order.
 
     `lam` and `mu` are normalised by the adapter, not by the caller: each backend knows its
-    own row layout and sign convention, so `problem.solve` reads these two fields directly
+    own row layout and sign convention, so the `MPC` driver reads these two fields directly
     rather than sniffing a backend-specific key out of `info`.
 
     Every member is a read-only property rather than a plain attribute so that the backends'
@@ -84,15 +85,20 @@ class SolverResult(Protocol):
 
 @runtime_checkable
 class Solver(Protocol):
-    """A solver backend that solves a transcribed `Problem` from an `MPCState`."""
+    """A solver backend that solves a `Program`'s Problem from boundary conditions and a warm start."""
 
-    def solve(self, problem: Problem, state: "MPCState") -> SolverResult:
-        """Solve `problem` starting from `state` and return the backend's raw result."""
+    def solve(self, program: "Program", bc: "BoundaryConditions", ws: "WarmStart") -> SolverResult:
+        """Solve `program`'s problem from `bc` and `ws`, returning the backend's raw result.
+
+        The Program rather than the Problem is the argument because a backend needs both: its
+        structural problem, at `program.problem`, and the compiled cores and live handles the
+        Program holds on its behalf across receding-horizon steps.
+        """
         ...
 
 
 def normalize_status(*, success: bool, message: str) -> SolverStatus:
-    """Map a backend's success flag and native status message onto MPCState's normalized vocabulary.
+    """Map a backend's success flag and native status message onto the normalized status vocabulary.
 
     Every backend's `message` field already carries a human-readable native status (Ipopt's
     `status_msg`, OSQP's `status`, Clarabel's `status`), so pattern-matching that text is what
@@ -160,16 +166,15 @@ def split_bound_duals(mu: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.maximum(-mu, 0.0), np.maximum(mu, 0.0)
 
 
-def warm_start_duals(problem: Problem, state: "MPCState") -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Return `(lam, mu)` from an MPCState when they are usable as a warm start, else `(None, None)`.
+def warm_start_duals(problem: Problem, ws: "WarmStart") -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return `(lam, mu)` from a WarmStart when they are usable as one, else `(None, None)`.
 
-    A freshly built MPCState carries zero multipliers, which are not a warm start but the
-    absence of one -- handing them over would replace the solver's own initialisation with
-    a worse guess. Duals whose length no longer matches the problem are refused for the
-    same reason.
+    A cold WarmStart carries zero multipliers, which are not a warm start but the absence of
+    one -- handing them over would replace the solver's own initialisation with a worse guess.
+    Duals whose length no longer matches the problem are refused for the same reason.
     """
-    lam = np.asarray(state.lam, dtype=np.float64)
-    mu = np.asarray(state.mu, dtype=np.float64)
+    lam = np.asarray(ws.lam, dtype=np.float64)
+    mu = np.asarray(ws.mu, dtype=np.float64)
 
     nz = int(problem.N) * int(problem.model.n) + (int(problem.N) - 1) * int(problem.model.m)
     if lam.shape != (constraint_row_count(problem),) or mu.shape != (nz,):

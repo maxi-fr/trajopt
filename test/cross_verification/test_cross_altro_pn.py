@@ -8,7 +8,8 @@ from trajopt.constraints import ConstraintList, ControlBound, GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models import Cartpole
-from trajopt.problem import MPCState, Problem, retarget_to_goal
+from trajopt.mpc import MPC
+from trajopt.problem import Problem, retarget_to_goal
 from trajopt.solvers.al import AL
 from trajopt.solvers.options import SolverOptions, TerminationStatus
 from trajopt.solvers.pn import pn_solve
@@ -104,16 +105,14 @@ def _python_problem() -> tuple[Problem, float, np.ndarray]:
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt, integrator=RK4())
     return prob, dt, xf
 
 
-def _al_warm_start(prob: Problem, dt: float) -> Trajectory:
+def _al_warm_start(prob: Problem) -> Trajectory:
     """Run AL to convergence and return the resulting trajectory, a realistic PN warm start."""
-    n = int(prob.model.n)
-    x0 = jnp.zeros(n)
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
-    al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
+    x0 = jnp.zeros(int(prob.model.n))
+    al_result = MPC(prob, AL(options=SolverOptions(iterations=300, iterations_outer=30)), x0=x0).solve()
     assert al_result.success
     return al_result.trajectory
 
@@ -138,13 +137,13 @@ def _build_jl_pn_solver(
 
 
 def test_cross_pn_solve_cartpole_matches_altro(jl_altro: Any) -> None:
-    prob, dt, xf = _python_problem()
+    prob, _dt, xf = _python_problem()
     n = int(prob.model.n)
     x0 = np.zeros(n)
     u_bnd = 3.0
     options = SolverOptions(multiplier_projection=False)
 
-    warm_traj = _al_warm_start(prob, dt)
+    warm_traj = _al_warm_start(prob)
 
     solver = _build_jl_pn_solver(jl_altro, options, u_bnd, x0, xf, np.asarray(warm_traj.X), np.asarray(warm_traj.U))
     run_pn = jl_altro.seval("trajopt_ticket32_run")

@@ -128,7 +128,9 @@ from trajopt.constraints.linear import GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
+from trajopt.transcription.ipopt import Ipopt
 
 # 1. Define model and problem dimensions
 model = Pendulum()
@@ -140,22 +142,21 @@ xf = jnp.array([np.pi, 0.0])
 Q = jnp.diag(jnp.array([10.0, 1.0]))
 R = jnp.diag(jnp.array([0.1]))
 Qf = jnp.diag(jnp.array([100.0, 10.0]))
-obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)  # shape only; the goal arrives with the MPCState
+obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)  # shape only; the goal arrives as boundary conditions
 
 # 3. Add constraints (torque limits and terminal goal)
 constraints = ConstraintList(n=n, m=m, N=N)
 constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
 constraints.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
 
-# 4. Build problem and initialize MPC state
-prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
-x0 = jnp.array([0.0, 0.0])
-state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
+# 4. Build the problem and hand it to a driver
+prob = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=dt, integrator=RK4())
+mpc = MPC(prob, Ipopt(), x0=jnp.array([0.0, 0.0]), t0=0.0, xf=xf)
 
 # 5. Solve the trajectory optimization problem with Ipopt
-opt_state = prob.solve(state)
-X = opt_state.states
-U = opt_state.controls
+result = mpc.solve()
+X = result.trajectory.X
+U = result.trajectory.U
 
 print(f"Optimal final state: {np.asarray(X[-1])}")
 ```
@@ -181,7 +182,7 @@ instance and problem identity -- so a bare first call pays a one-off compile, an
   Cheapest of the three; reach for it when the problem has no general constraints, or when a
   caller is doing its own AL-style penalty wrapping.
 - **`AL`** -- augmented-Lagrangian outer loop wrapping `ILQR`'s inner solve, for problems with
-  general (in)equality and conic constraints. `MPCState.al` carries the per-knot duals and
+  general (in)equality and conic constraints. the driver's warm start carries the per-knot duals and
   penalties so they warm-start across MPC steps, which is most of the reason AL suits MPC over a
   cold-started NLP solve.
 - **`ALTRO`** -- `AL` followed by a Projected Newton polish phase (`PN`) that drives the
@@ -197,7 +198,8 @@ Swapping backends is a one-word change, since every solver satisfies the same `S
 ```python3
 from trajopt.solvers.altro import ALTRO
 
-opt_state = prob.solve(state, solver=ALTRO())  # was: prob.solve(state), the Ipopt default
+mpc = MPC(prob, ALTRO(), x0=x0, xf=xf)  # was: MPC(prob, Ipopt(), ...)
+result = mpc.solve()
 ```
 
 See `docs/altro-jl-reference.md` (corrected by `docs/altro-port/00-overview.md`'s findings) for

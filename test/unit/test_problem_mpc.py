@@ -14,9 +14,9 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
 from trajopt.models.quadrotor import Quadrotor
+from trajopt.mpc import MPC
 from trajopt.problem import (
     BoundaryConditions,
-    MPCState,
     Problem,
 )
 from trajopt.trajectory import Trajectory
@@ -29,8 +29,34 @@ from trajopt.transcription.transcription import (
 )
 
 
-def test_problem_structure_mpcstate_split() -> None:
-    """Verify Problem holds static structure and MPCState holds dynamic per-step data."""
+def _window(mpc: MPC) -> tuple[jax.Array, jax.Array]:
+    """Return the driver's reference window, asserting it tracks one at all."""
+    X_ref, U_ref = mpc.bc.X_ref, mpc.bc.U_ref
+    assert X_ref is not None
+    assert U_ref is not None
+    return X_ref, U_ref
+
+
+def _tracking_problem() -> tuple[Problem, Trajectory]:
+    """Build a Dubins-style problem whose objective tracks a reference and whose goal is a constraint."""
+    model = DubinsCar()
+    n, m, N, dt = model.n, model.m, 8, 0.1
+    xf = jnp.array([2.0, 0.0, 0.0])
+
+    t_arr = jnp.linspace(0.0, (N - 1) * dt, N)
+    dt_arr = jnp.full((N - 1,), dt)
+    X_ref = jnp.zeros((N, n)).at[:, 0].set(jnp.linspace(0.0, float(xf[0]), N))
+    U_ref = jnp.ones((N - 1, m)) * jnp.array([float(xf[0]) / ((N - 1) * dt), 0.0])
+    ref = Trajectory(X=X_ref, U=U_ref, t=t_arr, dt=dt_arr)
+
+    obj = TrackingObjective(Q=jnp.diag(jnp.array([1.0, 10.0, 0.1])), R=jnp.diag(jnp.array([0.1, 0.1])), trajectory=ref)
+    cl = ConstraintList(n=n, m=m, N=N)
+    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
+    return Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4()), ref
+
+
+def test_problem_structure_driver_split() -> None:
+    """Verify Problem holds static structure and the driver holds the dynamic per-step data."""
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
@@ -46,79 +72,123 @@ def test_problem_structure_mpcstate_split() -> None:
     assert hasattr(prob, "obj")
     assert hasattr(prob, "constraints")
     assert hasattr(prob, "N")
+    assert hasattr(prob, "dt")
     assert not hasattr(prob, "integrator")
     assert not hasattr(prob, "x0")
     assert not hasattr(prob, "t0")
+    assert not hasattr(prob, "solve")
+    assert not hasattr(prob, "cost")
 
-    # MPCState fields and pytree leaves
+    # Boundary conditions and warm start, split across the driver
     x0 = jnp.array([0.1, 0.2])
-    t0 = 0.0
-    state = MPCState.initial(prob, x0=x0, t0=t0, xf=xf)
-    assert isinstance(state, MPCState)
-    assert hasattr(state, "x0")
-    assert hasattr(state, "t0")
-    assert hasattr(state, "xf")
-    assert hasattr(state, "lam")
-    assert hasattr(state, "mu")
-    assert hasattr(state, "Z")
+    mpc = MPC(prob, Ipopt(), x0=x0, t0=0.0, xf=xf)
+    assert isinstance(mpc.bc, BoundaryConditions)
+    assert hasattr(mpc.bc, "x0")
+    assert hasattr(mpc.bc, "t0")
+    assert mpc.bc.xf is not None
+    assert hasattr(mpc.warm_start, "lam")
+    assert hasattr(mpc.warm_start, "mu")
+    assert hasattr(mpc.warm_start, "Z")
 
-    # Static metadata vs leaves
-    leaves, _ = jax.tree.flatten(state)
-    assert len(leaves) > 0
-    assert state.n == 2
-    assert state.m == 1
-    assert state.N == N
+    # Boundary conditions are all traced leaves, with no static field to retrace on
+    leaves, _ = jax.tree.flatten(mpc.bc)
+    assert len(leaves) == 4
+    assert mpc.states.shape == (N, 2)
+    assert mpc.controls.shape == (N - 1, 1)
 
 
-def test_mpcstate_per_step_operations_return_new_values() -> None:
-    """Verify per-step measurement update, goal update, and trajectory shift return new instances."""
+def test_driver_per_step_operations_update_boundary_and_warm_start() -> None:
+    """Verify per-step measurement update, goal update, and trajectory shift move the driver's state."""
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
     xf = jnp.array([np.pi, 0.0])
     N = 5
     obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.1, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=0.1)
+    mpc = MPC(prob, Ipopt(), x0=x0, t0=0.0, xf=xf)
 
     # 1. Update measurement
     new_x = jnp.array([0.5, -0.1])
     new_t = 0.1
-    s_meas = state.with_measurement(new_x, new_t)
-    assert s_meas is not state
-    np.testing.assert_allclose(s_meas.x0, new_x)
-    np.testing.assert_allclose(s_meas.t0, new_t)
-    np.testing.assert_allclose(s_meas.states[0], new_x)
+    mpc.measure(new_x, new_t)
+    np.testing.assert_allclose(mpc.x0, new_x)
+    np.testing.assert_allclose(mpc.t0, new_t)
+    np.testing.assert_allclose(mpc.states[0], new_x)
 
     # 2. Update goal
     new_xf = jnp.array([0.0, 0.0])
-    s_goal = state.with_goal(new_xf)
-    assert s_goal is not state
-    assert s_goal.xf is not None
-    np.testing.assert_allclose(s_goal.xf, new_xf)
+    mpc.set_goal(new_xf)
+    assert mpc.xf is not None
+    np.testing.assert_allclose(mpc.xf, new_xf)
 
     # 3. Shift trajectory forward
     X_init = jnp.arange(N * 2, dtype=jnp.float64).reshape((N, 2))
     U_init = jnp.arange((N - 1) * 1, dtype=jnp.float64).reshape((N - 1, 1))
-    s_custom = state.with_states(X_init).with_controls(U_init)
+    mpc._ws = mpc.warm_start.with_primal(prob, X=X_init, U=U_init)  # noqa: SLF001 -- seeding a known primal
 
-    s_shifted = s_custom.shift(dt=0.1)
-    assert s_shifted is not s_custom
-    X_shifted = s_shifted.states
-    U_shifted = s_shifted.controls
+    t_before = mpc.t0
+    mpc.shift(dt=0.1)
+    X_shifted, U_shifted = mpc.states, mpc.controls
 
     # Shift drops index 0, shifts remaining forward, and duplicates the final element
     np.testing.assert_allclose(X_shifted[:-1], X_init[1:])
     np.testing.assert_allclose(X_shifted[-1], X_init[-1])
     np.testing.assert_allclose(U_shifted[:-1], U_init[1:])
     np.testing.assert_allclose(U_shifted[-1], U_init[-1])
-    np.testing.assert_allclose(s_shifted.t0, state.t0 + 0.1)
+    np.testing.assert_allclose(mpc.t0, t_before + 0.1)
+    np.testing.assert_allclose(mpc.x0, X_init[1])
+
+
+def test_pushed_reference_window_shifts_and_appends() -> None:
+    """Verify the reference window advances one knot per shift, appending a pushed point or holding the last."""
+    model = Pendulum()
+    N = 5
+    obj = LQRObjective(Q=jnp.eye(2), R=jnp.eye(1), Qf=jnp.eye(2), N=N)
+    prob = Problem(model=model, obj=obj, N=N, dt=0.1, integrator=RK4())
+
+    goal = jnp.array([np.pi, 0.0])
+    mpc = MPC(prob, Ipopt(), x0=jnp.zeros(2), xf=goal)
+    X_ref_0 = mpc.bc.X_ref
+    assert X_ref_0 is not None
+
+    # Nothing pushed: a constant window is shift-invariant, which is why a fixed goal needs no
+    # special case at all.
+    mpc.shift()
+    np.testing.assert_allclose(_window(mpc)[0], X_ref_0)
+
+    # Pushed: the point enters at the far end, one knot per shift, and the window slides under it.
+    entering = jnp.array([1.0, 2.0])
+    mpc.push_reference(entering, jnp.array([0.5]))
+    mpc.shift()
+    X_ref, U_ref = _window(mpc)
+    np.testing.assert_allclose(X_ref[:-1], X_ref_0[1:])
+    np.testing.assert_allclose(X_ref[-1], entering)
+    np.testing.assert_allclose(U_ref[-1], jnp.array([0.5]))
+
+    # The push is consumed, so the next shift holds that last point rather than repeating it.
+    mpc.shift()
+    X_ref, _ = _window(mpc)
+    np.testing.assert_allclose(X_ref[-1], entering)
+    np.testing.assert_allclose(X_ref[-2], entering)
+
+
+def test_set_reference_replaces_the_window_wholesale() -> None:
+    """Verify set_reference swaps the whole tracked window in one call."""
+    prob, ref = _tracking_problem()
+    mpc = MPC(prob, Ipopt(), x0=jnp.zeros(3), reference=ref)
+
+    shifted = Trajectory(X=ref.X + 1.0, U=ref.U, t=ref.t, dt=ref.dt)
+    mpc.set_reference(shifted)
+    X_ref, U_ref = _window(mpc)
+    np.testing.assert_allclose(X_ref, ref.X + 1.0)
+    np.testing.assert_allclose(U_ref, ref.U)
 
 
 def test_goal_state_single_source_of_truth() -> None:
-    """Verify goal state lives in MPCState alone and is read by both objective and goal constraint."""
+    """Verify the goal state lives in the boundary conditions alone, read by objective and goal constraint."""
     model = Pendulum()
     n, m, N = 2, 1, 4
     Q = jnp.eye(n)
@@ -130,26 +200,23 @@ def test_goal_state_single_source_of_truth() -> None:
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     x0 = jnp.array([0.1, 0.0])
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf_initial)
+    mpc = MPC(prob, Ipopt(), x0=x0, t0=0.0, xf=xf_initial)
+    X_state = mpc.states
 
     # Initial cost and constraint evaluation
-    c1 = prob.cost(state)
-    con1, _ = constraints_and_jac(prob, state.Z, state.x0, state.t0, state.dt, xf=state.xf)
+    c1 = mpc.cost()
+    con1, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
 
-    # Update goal on state alone
+    # Update goal on the driver alone
     xf_new = jnp.array([0.0, 0.0])
-    state_new = state.with_goal(xf_new)
-    assert state_new.xf is not state.xf
+    mpc.set_goal(xf_new)
 
-    c2 = prob.cost(state_new)
-    con2, _ = constraints_and_jac(prob, state_new.Z, state_new.x0, state_new.t0, state_new.dt, xf=state_new.xf)
+    c2 = mpc.cost()
+    con2, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
 
     # Goal constraint residual at terminal index must reflect xf_new directly
-    terminal_con1 = con1[-n:]
-    terminal_con2 = con2[-n:]
-    X_state = state.states
-    np.testing.assert_allclose(terminal_con1, X_state[-1] - xf_initial)
-    np.testing.assert_allclose(terminal_con2, X_state[-1] - xf_new)
+    np.testing.assert_allclose(con1[-n:], X_state[-1] - xf_initial)
+    np.testing.assert_allclose(con2[-n:], X_state[-1] - xf_new)
     assert not np.allclose(c1, c2)
 
 
@@ -162,10 +229,10 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
     R = jnp.eye(m)
     xf_init = jnp.array([0.0, np.pi, 0.0, 0.0])
     obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
 
     x0 = jnp.zeros(n)
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf_init, dt=0.05)
+    mpc = MPC(prob, Ipopt(), x0=x0, t0=0.0, xf=xf_init)
 
     compile_count_cost = 0
     compile_count_jac = 0
@@ -203,9 +270,9 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
     jit_hess = eqx.filter_jit(hess_target)
 
     # Initial warmup compile (iteration 0)
-    _ = jit_cost(prob, state.Z, state.t0, state.dt, state.bc)
-    _ = jit_jac(prob, state.Z, state.x0, state.t0, state.dt, state.xf)
-    _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.bc)
+    _ = jit_cost(prob, mpc.Z, mpc.t0, prob.dt, mpc.bc)
+    _ = jit_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, mpc.xf)
+    _ = jit_hess(prob, mpc.Z, mpc.t0, prob.dt, 1.0, mpc.warm_start.lam, mpc.bc)
 
     assert compile_count_cost == 1
     assert compile_count_jac == 1
@@ -217,11 +284,12 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
         x_meas = jnp.sin(jnp.arange(n, dtype=jnp.float64) + i * 0.1)
         xf_step = jnp.cos(jnp.arange(n, dtype=jnp.float64) + i * 0.05)
 
-        state = state.with_measurement(x_meas, t_curr).with_goal(xf_step)
+        mpc.measure(x_meas, t_curr)
+        mpc.set_goal(xf_step)
 
-        _ = jit_cost(prob, state.Z, state.t0, state.dt, state.bc)
-        _ = jit_jac(prob, state.Z, state.x0, state.t0, state.dt, state.xf)
-        _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.bc)
+        _ = jit_cost(prob, mpc.Z, mpc.t0, prob.dt, mpc.bc)
+        _ = jit_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, mpc.xf)
+        _ = jit_hess(prob, mpc.Z, mpc.t0, prob.dt, 1.0, mpc.warm_start.lam, mpc.bc)
 
     # Assert exactly zero new compilations occurred across all 100 steps
     assert compile_count_cost == 1
@@ -239,7 +307,7 @@ def test_model_parameters_traced_zero_recompile() -> None:
     obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob1 = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
-    state = MPCState.initial(prob1, x0=jnp.zeros(n), t0=0.0, xf=xf)
+    mpc = MPC(prob1, Ipopt(), x0=jnp.zeros(n), t0=0.0, xf=xf)
 
     compile_count = 0
 
@@ -251,12 +319,12 @@ def test_model_parameters_traced_zero_recompile() -> None:
     jit_jac = eqx.filter_jit(jac_fn)
 
     # First call compiles
-    _c1, j1 = jit_jac(prob1, state.Z, state.x0, state.t0, state.dt)
+    _c1, j1 = jit_jac(prob1, mpc.Z, mpc.x0, mpc.t0, prob1.dt)
     assert compile_count == 1
 
     # Change mass parameter in model
     prob2 = eqx.tree_at(lambda p: p.model.continuous_dynamics.mp, prob1, jnp.asarray(0.35, dtype=jnp.float64))
-    _c2, j2 = jit_jac(prob2, state.Z, state.x0, state.t0, state.dt)
+    _c2, j2 = jit_jac(prob2, mpc.Z, mpc.x0, mpc.t0, prob2.dt)
 
     # Must NOT recompile (compile_count stays 1)
     assert compile_count == 1
@@ -283,25 +351,26 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=dt)
+    options = {"max_iter": 200, "tol": 1e-4, "print_level": 0}
+    mpc = MPC(prob, Ipopt(options=options), x0=x0, t0=0.0, xf=xf)
 
     # Initial solve
-    state_opt = prob.solve(state, solver=Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}))
-    u0 = state_opt.controls[0]
+    mpc.solve()
+    u0 = mpc.controls[0]
 
     # Advance 1 step
     dmodel = RK4(model)
     x1 = dmodel.discrete_dynamics(x0, u0, 0.0, dt)
 
     # 1. Warm start: shift previous optimal solution
-    state_warm = state_opt.with_measurement(x1, dt).shift(dt)
-    res_warm = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state_warm)
+    mpc.measure(x1, dt)
+    mpc.shift(dt)
+    res_warm = mpc.solve()
 
     # 2. Cold start: reset trajectory to constant x1 and zero controls
-    state_cold = MPCState.initial(prob, x0=x1, t0=dt, xf=xf, dt=dt)
-    res_cold = Ipopt(options={"max_iter": 200, "tol": 1e-4, "print_level": 0}).solve(prob, state_cold)
+    res_cold = MPC(prob, Ipopt(options=options), x0=x1, t0=dt, xf=xf).solve()
 
     # Warm start measurably reduces solver iterations vs cold start
     assert res_warm.iterations < res_cold.iterations
@@ -329,23 +398,23 @@ def test_closed_loop_cartpole_mpc() -> None:
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
-    state = MPCState.initial(prob, x0=x_curr, t0=0.0, xf=xf, dt=dt)
+    mpc = MPC(prob, Ipopt(options={"max_iter": 50, "tol": 1e-4, "print_level": 0}), x0=x_curr, t0=0.0, xf=xf)
     dmodel = RK4(model)
 
     sim_steps = 20
     t_curr = 0.0
 
     for _ in range(sim_steps):
-        state = state.with_measurement(x_curr, t_curr)
-        state = prob.solve(state, solver=Ipopt(options={"max_iter": 50, "tol": 1e-4, "print_level": 0}))
-        u_cmd = state.controls[0]
+        mpc.measure(x_curr, t_curr)
+        mpc.solve()
+        u_cmd = mpc.controls[0]
 
         # Simulate system forward with applied control
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
         t_curr += dt
-        state = state.shift(dt)
+        mpc.shift(dt)
 
     # After 20 steps (1.0 second), cartpole should be stabilized close to upright [0, pi, 0, 0]
     np.testing.assert_allclose(x_curr[1], np.pi, atol=0.1)
@@ -361,14 +430,14 @@ def test_rollout_problem_state() -> None:
     R = jnp.eye(m)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
-    prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, N=N, dt=0.05, integrator=RK4())
 
     x0 = jnp.array([0.1, 0.2, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, t0=0.0, xf=xf, dt=0.05)
+    mpc = MPC(prob, Ipopt(), x0=x0, t0=0.0, xf=xf)
     U_const = jnp.full((N - 1, m), 0.5)
-    state = state.with_controls(U_const)
+    mpc._ws = mpc.warm_start.with_primal(prob, U=U_const)  # noqa: SLF001 -- seeding a known control guess
 
-    traj = prob.model.rollout(state.to_trajectory())
+    traj = prob.model.rollout(mpc.trajectory())
     assert isinstance(traj, Trajectory)
     assert traj.N == N
     assert traj.n == n
@@ -383,24 +452,6 @@ def test_rollout_problem_state() -> None:
         np.testing.assert_allclose(traj.X[k + 1], x_next)
 
 
-def _tracking_problem() -> tuple[Problem, Trajectory]:
-    """Build a Dubins-style problem whose objective tracks a reference and whose goal is a constraint."""
-    model = DubinsCar()
-    n, m, N, dt = model.n, model.m, 8, 0.1
-    xf = jnp.array([2.0, 0.0, 0.0])
-
-    t_arr = jnp.linspace(0.0, (N - 1) * dt, N)
-    dt_arr = jnp.full((N - 1,), dt)
-    X_ref = jnp.zeros((N, n)).at[:, 0].set(jnp.linspace(0.0, float(xf[0]), N))
-    U_ref = jnp.ones((N - 1, m)) * jnp.array([float(xf[0]) / ((N - 1) * dt), 0.0])
-    ref = Trajectory(X=X_ref, U=U_ref, t=t_arr, dt=dt_arr)
-
-    obj = TrackingObjective(Q=jnp.diag(jnp.array([1.0, 10.0, 0.1])), R=jnp.diag(jnp.array([0.1, 0.1])), trajectory=ref)
-    cl = ConstraintList(n=n, m=m, N=N)
-    cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
-    return Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4()), ref
-
-
 def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
     """Assert a run-time xf moves a shape-only LQRObjective exactly as baking that goal in would."""
     model = Cartpole()
@@ -411,31 +462,32 @@ def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
     xf_build = jnp.array([0.0, np.pi, 0.0, 0.0])
     xf_new = jnp.array([0.3, 2.0, -0.1, 0.4])
 
-    prob = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, N=N), N=N, integrator=RK4())
+    prob = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, N=N), N=N, dt=0.05, integrator=RK4())
     obj_rebuilt = LQRObjective(Q=Q, R=R, Qf=Qf, N=N).with_reference(
         jnp.broadcast_to(xf_new, (N, model.n)),
         jnp.zeros((N - 1, model.m)),
     )
-    prob_rebuilt = Problem(model=model, obj=obj_rebuilt, N=N, integrator=RK4())
+    prob_rebuilt = Problem(model=model, obj=obj_rebuilt, N=N, dt=0.05, integrator=RK4())
 
-    state = MPCState.initial(prob, x0=jnp.array([0.1, 0.2, 0.0, 0.0]), dt=0.05, xf=xf_build)
-    Z = state.Z + 0.05 * jnp.arange(len(state.Z), dtype=state.Z.dtype)
+    mpc = MPC(prob, Ipopt(), x0=jnp.array([0.1, 0.2, 0.0, 0.0]), xf=xf_build)
+    Z = mpc.Z + 0.05 * jnp.arange(len(mpc.Z), dtype=mpc.Z.dtype)
 
     # The retarget rebuilds q, r and c from the new target, so a retargeted objective and one
     # rebuilt at that target agree by a constant offset (here zero) and their gradients outright.
-    bc_new = state.with_goal(xf_new).bc
+    mpc.set_goal(xf_new)
+    bc_new = mpc.bc
     np.testing.assert_allclose(
-        eval_grad_f(prob, Z, state.t0, state.dt, bc_new),
-        eval_grad_f(prob_rebuilt, Z, state.t0, state.dt, None),
+        eval_grad_f(prob, Z, mpc.t0, prob.dt, bc_new),
+        eval_grad_f(prob_rebuilt, Z, mpc.t0, prob.dt, None),
         rtol=1e-12,
         atol=1e-12,
     )
-    j_retargeted = eval_f(prob, Z, state.t0, state.dt, bc_new)
-    j_rebuilt = eval_f(prob_rebuilt, Z, state.t0, state.dt, None)
+    j_retargeted = eval_f(prob, Z, mpc.t0, prob.dt, bc_new)
+    j_rebuilt = eval_f(prob_rebuilt, Z, mpc.t0, prob.dt, None)
     offset = j_retargeted - j_rebuilt
     Z2 = Z * 0.5
     np.testing.assert_allclose(
-        eval_f(prob, Z2, state.t0, state.dt, bc_new) - eval_f(prob_rebuilt, Z2, state.t0, state.dt, None),
+        eval_f(prob, Z2, mpc.t0, prob.dt, bc_new) - eval_f(prob_rebuilt, Z2, mpc.t0, prob.dt, None),
         offset,
         rtol=1e-12,
         atol=1e-12,
@@ -445,17 +497,21 @@ def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
 def test_runtime_reference_window_tracks_while_the_goal_constrains() -> None:
     """Assert a run-time reference window aims the cost while xf still drives the goal constraint."""
     prob, ref = _tracking_problem()
-    state = MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, reference=ref, initial_trajectory=ref)
+    mpc = MPC(prob, Ipopt(), x0=jnp.zeros(3), reference=ref, initial_trajectory=ref)
 
     # At the reference the tracking cost is zero, and retargeting to the run-time window, which
     # here is that same reference, reproduces it exactly.
     np.testing.assert_allclose(prob.obj.cost(ref), 0.0, atol=1e-12)
-    np.testing.assert_allclose(state.bc.retarget(prob.obj).cost(ref), 0.0, atol=1e-12)
+    np.testing.assert_allclose(mpc.bc.retarget(prob.obj).cost(ref), 0.0, atol=1e-12)
 
-    # The goal constraint still follows the run-time goal.
+    # The goal constraint follows the run-time goal, which a pushed point moves.
     xf_new = jnp.array([1.0, 0.25, 0.0])
-    con, _ = constraints_and_jac(prob, state.Z, state.x0, state.t0, state.dt, xf=state.with_goal(xf_new).xf)
-    np.testing.assert_allclose(con[-3:], state.states[-1] - xf_new, atol=1e-12)
+    mpc.push_reference(xf_new)
+    mpc.shift()
+    assert mpc.xf is not None
+    np.testing.assert_allclose(mpc.xf, xf_new, atol=1e-12)
+    con, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
+    np.testing.assert_allclose(con[-3:], mpc.states[-1] - xf_new, atol=1e-12)
 
 
 def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
@@ -466,16 +522,16 @@ def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
     Q = jnp.ones(model.n).at[3:7].set(0.0)
     stage = QuatGeodesicCost(Q=Q, R=jnp.full(model.m, 0.01), q_ref=q_ref, w=10.0, m=model.m)
     term = QuatGeodesicCost(Q=Q, q_ref=q_ref, w=100.0, terminal=True)
-    prob = Problem(model=model, obj=Objective(stage_cost=stage, terminal_cost=term, N=N), N=N, integrator=RK4())
+    prob = Problem(model=model, obj=Objective(stage_cost=stage, terminal_cost=term, N=N), N=N, dt=0.1, integrator=RK4())
     x0 = jnp.zeros(model.n).at[3].set(1.0)
 
     with pytest.raises(ValueError, match="nothing in the problem reads it"):
-        MPCState.initial(prob, x0=x0, dt=0.1, xf=x0)
+        MPC(prob, Ipopt(), x0=x0, xf=x0)
 
-    state = MPCState.initial(prob, x0=x0, dt=0.1)
-    assert state.xf is None
+    mpc = MPC(prob, Ipopt(), x0=x0)
+    assert mpc.xf is None
     with pytest.raises(ValueError, match="built without a goal"):
-        state.with_goal(x0)
+        mpc.set_goal(x0)
 
 
 def test_constant_goal_rejected_against_an_objective_that_already_tracks() -> None:
@@ -487,6 +543,6 @@ def test_constant_goal_rejected_against_an_objective_that_already_tracks() -> No
     prob, ref = _tracking_problem()
 
     with pytest.raises(ValueError, match="already tracks a build-time reference"):
-        MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, xf=jnp.array([2.0, 0.0, 0.0]))
+        MPC(prob, Ipopt(), x0=jnp.zeros(3), xf=jnp.array([2.0, 0.0, 0.0]))
 
-    MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, reference=ref)
+    MPC(prob, Ipopt(), x0=jnp.zeros(3), reference=ref)

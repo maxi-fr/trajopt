@@ -1,4 +1,3 @@
-import dataclasses
 import statistics
 import time
 from collections.abc import Mapping, Sequence
@@ -19,7 +18,9 @@ from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.quadrotor import Quadrotor
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import BoundaryConditions, Problem
+from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.clarabel import Clarabel
 from trajopt.transcription.ipopt import Ipopt
@@ -97,7 +98,7 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
     xf: Sequence[float] | jax.Array = (0.0, np.pi, 0.0, 0.0),
     u_bound: float = 20.0,
     x_pos_bound: float = 0.4,
-) -> tuple[Problem, MPCState, dict[str, Any]]:
+) -> tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]:
     """Build the underactuated Cartpole swing-up benchmark problem with state and control limits.
 
     Parameters
@@ -118,8 +119,9 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
 
     Returns
     -------
-    tuple[Problem, MPCState, dict[str, Any]]
-        Transcribed Problem instance, initial MPCState, and benchmark metadata dictionary.
+    tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]
+        Transcribed Problem instance, its initial BoundaryConditions and WarmStart, and the
+        benchmark metadata dictionary.
     """
     model = Cartpole()
     n, m = model.n, model.m
@@ -140,8 +142,14 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-u_bound], u_max=[u_bound]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf_arr), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=x0_arr, dt=dt, xf=xf_arr)
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
+    bc = BoundaryConditions(
+        x0=x0_arr,
+        t0=jnp.zeros((), dtype=jnp.float64),
+        X_ref=jnp.repeat(xf_arr[None, :], N, axis=0),
+        U_ref=jnp.zeros((N - 1, m), dtype=jnp.float64),
+    )
+    ws = WarmStart.cold(prob, x0_arr)
 
     info = {
         "name": "cartpole_swingup",
@@ -152,7 +160,7 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
         "N": N,
         "x_pos_bound": x_pos_bound,
     }
-    return prob, state, info
+    return prob, bc, ws, info
 
 
 def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory parameters
@@ -163,7 +171,7 @@ def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory 
     xf: Sequence[float] | jax.Array = (3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     obstacles: Sequence[tuple[float, float, float, float]] = ((1.5, 1.5, 1.5, 0.5),),
     u_max: float = 10.0,
-) -> tuple[Problem, MPCState, dict[str, Any]]:
+) -> tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]:
     """Build the Quadrotor obstacle avoidance benchmark problem with attitude tracking on SO(3).
 
     Parameters
@@ -183,8 +191,9 @@ def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory 
 
     Returns
     -------
-    tuple[Problem, MPCState, dict[str, Any]]
-        Transcribed Problem instance, initial MPCState, and benchmark metadata dictionary.
+    tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]
+        Transcribed Problem instance, its initial BoundaryConditions and WarmStart, and the
+        benchmark metadata dictionary.
     """
     model = Quadrotor()
     n, m = model.n, model.m
@@ -213,7 +222,7 @@ def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory 
     cl.add_constraint(GoalConstraint(n=n, xf=xf_arr[jnp.array(non_quat_inds)], inds=non_quat_inds), N - 1)
     cl.add_constraint(QuatVecEq(n=n, qf=xf_arr[3:7], qind=(3, 4, 5, 6)), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
 
     # Build sensible initial trajectory guess
     X_init = jnp.linspace(x0_arr, xf_arr, N)
@@ -223,7 +232,13 @@ def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory 
     t_init = jnp.concatenate([jnp.zeros(1), jnp.cumsum(dt_arr)])
     init_traj = Trajectory(X=X_init, U=U_init, t=t_init, dt=dt_arr)
 
-    state = MPCState.initial(prob, x0=x0_arr, dt=dt, xf=xf_arr, initial_trajectory=init_traj)
+    bc = BoundaryConditions(
+        x0=x0_arr,
+        t0=jnp.zeros((), dtype=jnp.float64),
+        X_ref=jnp.repeat(xf_arr[None, :], N, axis=0),
+        U_ref=jnp.zeros((N - 1, m), dtype=jnp.float64),
+    )
+    ws = WarmStart.cold(prob, x0_arr, initial_trajectory=init_traj)
 
     info = {
         "name": "quadrotor_obstacle_avoidance",
@@ -234,7 +249,7 @@ def quadrotor_obstacle_benchmark(  # noqa: PLR0913 -- benchmark problem factory 
         "N": N,
         "obstacles": obstacles,
     }
-    return prob, state, info
+    return prob, bc, ws, info
 
 
 def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory parameters
@@ -247,7 +262,7 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
     y_ref_bulge: float = 1.0,
     v_max: float = 2.0,
     omega_max: float = 1.5,
-) -> tuple[Problem, MPCState, dict[str, Any]]:
+) -> tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]:
     """Build the nonholonomic Dubins car benchmark problem with corridor constraints and tracking objective.
 
     Parameters
@@ -274,8 +289,9 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
 
     Returns
     -------
-    tuple[Problem, MPCState, dict[str, Any]]
-        Transcribed Problem instance, initial MPCState, and benchmark metadata dictionary.
+    tuple[Problem, BoundaryConditions, WarmStart, dict[str, Any]]
+        Transcribed Problem instance, its initial BoundaryConditions and WarmStart, and the
+        benchmark metadata dictionary.
     """
     model = DubinsCar()
     n, m = model.n, model.m
@@ -314,8 +330,9 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[0.0, -omega_max], u_max=[v_max, omega_max]), range(N - 1))
     cl.add_constraint(GoalConstraint(n=n, xf=xf_arr), N - 1)
 
-    prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=x0_arr, dt=dt, reference=ref_traj, initial_trajectory=ref_traj)
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=dt, integrator=RK4())
+    bc = BoundaryConditions(x0=x0_arr, t0=jnp.zeros((), dtype=jnp.float64), X_ref=X_ref, U_ref=U_ref)
+    ws = WarmStart.cold(prob, x0_arr, initial_trajectory=ref_traj)
 
     info = {
         "name": "dubins_corridor_tracking",
@@ -327,7 +344,7 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
         "corridor_bound": y_corridor_bound,
         "y_ref_bulge": y_ref_bulge,
     }
-    return prob, state, info
+    return prob, bc, ws, info
 
 
 def measure_transcription_setup(
@@ -360,18 +377,18 @@ def measure_transcription_setup(
 
 def measure_derivative_evaluations(
     problem: Problem,
-    state: MPCState,
+    bc: BoundaryConditions,
+    ws: WarmStart,
     *,
     num_evals: int = 30,
 ) -> dict[str, float]:
     """Measure per-iteration derivative evaluation times in seconds."""
-    z = state.Z
-    t0 = state.t0
-    dt = state.dt
-    xf = state.xf
-    bc = state.bc
-    x0 = state.x0
-    lam = state.lam
+    z = ws.Z
+    t0 = bc.t0
+    dt = problem.dt
+    xf = bc.xf
+    x0 = bc.x0
+    lam = ws.lam
 
     # Warmup JIT compilation
     _ = eval_grad_f(problem, z, t0, dt, bc).block_until_ready()
@@ -428,24 +445,27 @@ class SolveTiming(NamedTuple):
 
 def measure_solver_runtime(
     problem: Problem,
-    state: MPCState,
+    bc: BoundaryConditions,
+    ws: WarmStart,
     solver: Solver,
     *,
     n_repeats: int = 5,
 ) -> tuple[SolverResult, SolveTiming]:
-    """Time `n_repeats` warm `solver.solve` calls after one discarded call, returning the last result.
+    """Time `n_repeats` warm solves after one discarded call, returning the last result.
 
     The discarded call is reported as `SolveTiming.first_call_time_s` rather than thrown away:
-    it is free, and for a Native Solver it is the compile the jit cache exists to amortize.
+    it is free, and for a Native Solver it is the compile the Program exists to amortize.
     """
+    program = Program(problem, solver)
+
     t_start = time.perf_counter()
-    res = solver.solve(problem, state)
+    res = program.solve(bc, ws)
     t_first = time.perf_counter() - t_start
 
     durations: list[float] = []
     for _ in range(n_repeats):
         t_start = time.perf_counter()
-        res = solver.solve(problem, state)
+        res = program.solve(bc, ws)
         durations.append(time.perf_counter() - t_start)
 
     return res, SolveTiming(
@@ -455,27 +475,21 @@ def measure_solver_runtime(
     )
 
 
-def _measure_warmstart_pair(problem: Problem, state: MPCState, solver: Solver) -> tuple[float, float]:
+def _measure_warmstart_pair(program: Program, bc: BoundaryConditions, ws: WarmStart) -> tuple[float, float]:
     """Time one MPC step solved warm-started and cold, returning (t_warm, t_cold) in seconds.
 
     Both solves face the same problem at the same step and differ only in the initial guess, so
     the ratio isolates warm starting. The cold guess is the default one, x0 repeated with zero
     controls.
     """
-    cold_state = MPCState.initial(
-        problem,
-        x0=state.x0,
-        t0=state.t0,
-        xf=state.xf,
-        dt=state.dt,
-    )
+    cold_ws = WarmStart.cold(program.problem, bc.x0)
 
     t_start = time.perf_counter()
-    _ = solver.solve(problem, state)
+    _ = program.solve(bc, ws)
     t_warm = time.perf_counter() - t_start
 
     t_start = time.perf_counter()
-    _ = solver.solve(problem, cold_state)
+    _ = program.solve(bc, cold_ws)
     t_cold = time.perf_counter() - t_start
 
     return t_warm, t_cold
@@ -483,7 +497,8 @@ def _measure_warmstart_pair(problem: Problem, state: MPCState, solver: Solver) -
 
 def measure_closed_loop_mpc(
     problem: Problem,
-    initial_state: MPCState,
+    bc: BoundaryConditions,
+    ws: WarmStart,
     solver: Solver,
     *,
     num_steps: int = 20,
@@ -495,34 +510,35 @@ def measure_closed_loop_mpc(
     magnitude slower than the rest and would otherwise set the mean, the jitter and the p95.
     """
     # 1. Seed the loop, discarding a compilation solve first
-    _ = solver.solve(problem, initial_state)
-    cold_res = solver.solve(problem, initial_state)
+    seed = Program(problem, solver)
+    _ = seed.solve(bc, ws)
+    cold_res = seed.solve(bc, ws)
 
     # 2. Receding horizon warm-started loop
-    dt_val = float(initial_state.dt[0]) if initial_state.dt.ndim > 0 else float(initial_state.dt)
+    dt_val = float(problem.dt[0])
     model = problem.model
 
-    curr_state = dataclasses.replace(initial_state, Z=cold_res.Z)
+    mpc = MPC(problem, solver, x0=bc.x0, t0=bc.t0, initial_z=cold_res.Z)
+    mpc.bc = bc  # the builder's window, past a constructor that only takes a goal or a Trajectory
 
     durations: list[float] = []
     t_loop_start = time.perf_counter()
 
     for _ in range(num_steps):
-        curr_state = curr_state.shift(dt_val)
+        mpc.shift(dt_val)
         t_step_start = time.perf_counter()
-        solved_state = problem.solve(curr_state, solver=solver)
-        t_step_dur = time.perf_counter() - t_step_start
-        durations.append(t_step_dur)
+        mpc.solve()
+        durations.append(time.perf_counter() - t_step_start)
 
-        u0 = solved_state.controls[0]
-        t0_curr = float(curr_state.t0)
-        x_next = model.discrete_dynamics(curr_state.x0, u0, t0_curr, dt_val)
-        curr_state = solved_state.with_measurement(x_next, t0_curr + dt_val)
+        u0 = mpc.controls[0]
+        t0_curr = float(mpc.t0)
+        x_next = model.discrete_dynamics(mpc.x0, u0, t0_curr, dt_val)
+        mpc.measure(x_next, t0_curr + dt_val)
 
     t_total_loop = time.perf_counter() - t_loop_start
     durations_arr = np.asarray(durations, dtype=np.float64)
 
-    t_warm_step, t_cold_step = _measure_warmstart_pair(problem, curr_state, solver)
+    t_warm_step, t_cold_step = _measure_warmstart_pair(mpc.program, mpc.bc, mpc.warm_start)
 
     mean_lat = float(np.mean(durations_arr))
     std_lat = float(np.std(durations_arr))
@@ -568,7 +584,7 @@ def _labelled(solvers: Sequence[Solver] | Mapping[str, Solver]) -> list[tuple[st
     return [(type(s).__name__, s) for s in solvers]
 
 
-def _score(problem: Problem, state: MPCState, Z: jax.Array) -> tuple[float, float]:
+def _score(problem: Problem, bc: BoundaryConditions, Z: jax.Array) -> tuple[float, float]:
     """Recompute (cost, maximum constraint violation) of a solved `Z` under the transcription.
 
     Every row is scored here rather than read off the solver's own result, because the solvers do
@@ -577,12 +593,11 @@ def _score(problem: Problem, state: MPCState, Z: jax.Array) -> tuple[float, floa
     evaluates a retargeted objective. One definition applied to each returned Primal Vector is
     what makes a column comparable down its length.
     """
-    N = int(problem.N)
     Z_arr = jnp.asarray(Z, dtype=jnp.float64)
-    dt_arr = jnp.broadcast_to(jnp.asarray(state.dt, dtype=jnp.float64), (N - 1,))
+    dt_arr = problem.dt
 
-    cost = float(eval_f(problem, Z_arr, state.t0, dt_arr, state.bc))
-    viol = compute_constraint_violation(problem, Z_arr, state.x0, t0=state.t0, dt=dt_arr, xf=state.xf)
+    cost = float(eval_f(problem, Z_arr, bc.t0, dt_arr, bc))
+    viol = compute_constraint_violation(problem, Z_arr, bc.x0, t0=bc.t0, dt=dt_arr, xf=bc.xf)
     return cost, viol
 
 
@@ -664,7 +679,8 @@ class SolverComparison(NamedTuple):
 
 def compare_solvers(
     problem: Problem,
-    state: MPCState,
+    bc: BoundaryConditions,
+    ws: WarmStart,
     solvers: Sequence[Solver] | Mapping[str, Solver],
     *,
     n_repeats: int = 5,
@@ -689,8 +705,8 @@ def compare_solvers(
     """
     rows = []
     for label, solver in _labelled(solvers):
-        res, timing = measure_solver_runtime(problem, state, solver, n_repeats=n_repeats)
-        cost, viol = _score(problem, state, res.Z)
+        res, timing = measure_solver_runtime(problem, bc, ws, solver, n_repeats=n_repeats)
+        cost, viol = _score(problem, bc, res.Z)
         rows.append(
             SolverRow(
                 solver=label,
@@ -764,7 +780,8 @@ class ClosedLoopComparison(NamedTuple):
 
 def compare_solvers_closed_loop(
     problem: Problem,
-    state: MPCState,
+    bc: BoundaryConditions,
+    ws: WarmStart,
     solvers: Sequence[Solver] | Mapping[str, Solver],
     *,
     num_steps: int = 15,
@@ -779,7 +796,7 @@ def compare_solvers_closed_loop(
         ClosedLoopRow(
             solver=label,
             linearizing=isinstance(solver, _LINEARIZING),
-            stats=measure_closed_loop_mpc(problem, state, solver, num_steps=num_steps),
+            stats=measure_closed_loop_mpc(problem, bc, ws, solver, num_steps=num_steps),
         )
         for label, solver in _labelled(solvers)
     ]

@@ -6,8 +6,9 @@ import pytest
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import MPCState, Problem
-from trajopt.program import Program, program_for
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
+from trajopt.program import Program
 from trajopt.solvers.ilqr import ILQR, ilqr_solve
 
 N = 8
@@ -19,7 +20,7 @@ GOAL = jnp.array([np.pi, 0.0], dtype=jnp.float64)
 def _problem() -> Problem:
     """Unconstrained pendulum swing-up problem whose run-time goal the boundary conditions retarget."""
     obj = LQRObjective(Q=jnp.eye(2) * DT, R=jnp.eye(1) * DT, Qf=jnp.eye(2) * 10.0, N=N)
-    return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, integrator=RK4())
+    return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, dt=DT, integrator=RK4())
 
 
 def test_core_is_built_once_per_key() -> None:
@@ -33,16 +34,17 @@ def test_core_is_built_once_per_key() -> None:
     assert other is not first
 
 
-def test_program_for_reuses_one_program_per_solver_and_problem() -> None:
-    """`program_for` builds a solver's program once for a problem and rebuilds it for a different one."""
+def test_driver_holds_one_program_for_its_life() -> None:
+    """An MPC builds its solver's program once and keeps it; a second driver gets its own."""
     problem = _problem()
     solver = ILQR()
 
-    program = program_for(solver, problem)
-    assert program_for(solver, problem) is program
+    mpc = MPC(problem, solver, x0=jnp.zeros(2), xf=GOAL)
+    program = mpc.program
+    assert mpc.program is program
     assert program.problem is problem
     assert program.solver is solver
-    assert program_for(solver, _problem()) is not program
+    assert MPC(problem, solver, x0=jnp.zeros(2), xf=GOAL).program is not program
 
 
 def test_mpc_loop_builds_one_program_and_one_core(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,18 +69,17 @@ def test_mpc_loop_builds_one_program_and_one_core(monkeypatch: pytest.MonkeyPatc
     problem = _problem()
     solver = ILQR()
     x0 = jnp.array([0.1, 0.0], dtype=jnp.float64)
-    state = MPCState.initial(problem, x0=x0, dt=DT, xf=GOAL)
+    mpc = MPC(problem, solver, x0=x0, xf=GOAL)
     t = 0.0
     for step in range(N_STEPS):
-        state = state.with_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
-        state = state.with_measurement(x0 + 0.01 * step, t)
-        state = problem.solve(state, solver=solver)
-        state = state.shift(DT)
+        mpc.set_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
+        mpc.measure(x0 + 0.01 * step, t)
+        mpc.solve()
+        mpc.shift(DT)
         t += DT
 
     assert constructions == 1
-    program = program_for(solver, problem)
-    assert constructions == 1
+    program = mpc.program
     cores = list(program._cores.values())  # noqa: SLF001 -- the compiled cores are what the test pins
     assert len(cores) == 1
     core = cores[0]

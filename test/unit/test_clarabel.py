@@ -11,7 +11,8 @@ from trajopt.costs.objective import Objective
 from trajopt.costs.quadratic import QuadraticCost
 from trajopt.dynamics.base import ContinuousDynamics, DiscretizedDynamics
 from trajopt.dynamics.integrators import Euler
-from trajopt.problem import MPCState, Problem
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
 from trajopt.transcription.clarabel import Clarabel, ClarabelResult
 
 
@@ -40,11 +41,10 @@ def test_clarabel_basic_solve() -> None:
     term_cost = QuadraticCost(Q=Qf, R=jnp.zeros((m, m)), r=jnp.zeros(m), c=0.0)
     obj = Objective(stage_cost=cost, terminal_cost=term_cost, N=N)
 
-    problem = Problem(model=model, obj=obj, constraints=ConstraintList(n, m, N), N=N)
+    problem = Problem(model=model, obj=obj, constraints=ConstraintList(n, m, N), N=N, dt=dt)
     x0 = jnp.array([2.0, 0.0])
-    state = MPCState.initial(problem, x0=x0, dt=dt)
 
-    res = Clarabel().solve(problem, state)
+    res = MPC(problem, Clarabel(), x0=x0).solve()
 
     assert isinstance(res, ClarabelResult)
     assert res.success is True
@@ -92,11 +92,10 @@ def test_clarabel_with_bounds_and_orthants() -> None:
         range(5, N - 1),
     )
 
-    problem = Problem(model=model, obj=obj, constraints=clist, N=N)
+    problem = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt)
     x0 = jnp.array([2.0, 0.0])
-    state = MPCState.initial(problem, x0=x0, dt=dt)
 
-    res = Clarabel().solve(problem, state)
+    res = MPC(problem, Clarabel(), x0=x0).solve()
 
     assert res.success is True
     assert res.constraint_violation < 1e-4
@@ -125,11 +124,10 @@ def test_clarabel_with_second_order_cone() -> None:
     # Norm constraint on control u <= 0.4
     clist.add_constraint(NormConstraint(n=n, m=m, val=0.4, sense=SecondOrderCone(), inds="control"), range(N - 1))
 
-    problem = Problem(model=model, obj=obj, constraints=clist, N=N)
+    problem = Problem(model=model, obj=obj, constraints=clist, N=N, dt=dt)
     x0 = jnp.array([2.0, 0.0])
-    state = MPCState.initial(problem, x0=x0, dt=dt)
 
-    res = Clarabel().solve(problem, state)
+    res = MPC(problem, Clarabel(), x0=x0).solve()
 
     assert res.success is True
     assert res.constraint_violation < 1e-4

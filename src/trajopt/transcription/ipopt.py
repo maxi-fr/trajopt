@@ -6,7 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.problem import MPCState, Problem, retarget_problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
@@ -178,8 +179,9 @@ class Ipopt:
         """
         return _IpoptCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
-    def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
         """Solve the transcribed optimal control problem using Ipopt via cyipopt."""
+        problem = program.problem
         try:
             import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
         except ImportError as e:
@@ -187,7 +189,7 @@ class Ipopt:
                 "cyipopt is not installed. It is part of the `solvers` extra: install with "
                 '`pip install "trajopt[solvers]"` or `uv add "trajopt[solvers]"`, which compiles '
                 "cyipopt against a system Ipopt (see the README's Installation section). "
-                "Alternatively, pass a different solver to Problem.solve, e.g. OSQP() or ALTRO()."
+                "Alternatively, drive the problem with a different solver, e.g. OSQP() or ALTRO()."
             )
             raise ImportError(msg) from e
 
@@ -195,11 +197,11 @@ class Ipopt:
         n = int(problem.model.n)
         m = int(problem.model.m)
 
-        x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(state)
-        problem = retarget_problem(problem, state.bc)
+        x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(problem, bc, ws)
+        problem = retarget_problem(problem, bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
         z0 = np.asarray(z0_jax, dtype=np.float64)
-        lam0, mu0 = warm_start_duals(problem, state)
+        lam0, mu0 = warm_start_duals(problem, ws)
 
         # Bounds
         zL, zU = primal_bounds(problem)

@@ -35,8 +35,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from trajopt.expansions import _stage_cost_expansion, _terminal_cost_expansion
-from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.program import Program, program_for
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.al import ALConstraints, _evaluate_bound_block, _evaluate_constraint_block
 from trajopt.solvers.ilqr import build_warm_start
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
@@ -637,7 +637,7 @@ class PN:
     """Native Projected Newton polish-phase solver backend, satisfying the `Solver` protocol.
 
     A thin eager wrapper over the traced `pn_solve` core: `.solve()` builds the warm-start
-    trajectory from `state` (typically the AL phase's output), pins `x0` from `state.x0`, calls
+    trajectory from `ws` (typically the AL phase's output), pins `x0` from `bc.x0`, calls
     the jitted core, then converts the traced status int and stats buffers into `success` /
     `message` / `info` at the boundary -- work that cannot happen inside a trace.
 
@@ -649,14 +649,15 @@ class PN:
 
     options: SolverOptions = field(default_factory=SolverOptions)
 
-    def solve(self, problem: Problem, state: MPCState) -> PNResult:
-        """Run the traced PN outer loop from `state`'s warm-start trajectory and boundary-convert the result."""
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> PNResult:
+        """Run the traced PN outer loop from `ws`'s warm-start trajectory and boundary-convert the result."""
+        problem = program.problem
         options = self.options
-        init_traj, bc = build_warm_start(problem, state)
-        x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
+        init_traj = build_warm_start(problem, bc, ws)
+        x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(problem, bc, ws)
         problem_eff = retarget_problem(problem, bc)
 
-        final_traj, stats, duals, status_int = _jit_pn_solve(program_for(self, problem), init_traj, x0_arr, options, bc)
+        final_traj, stats, duals, status_int = _jit_pn_solve(program, init_traj, x0_arr, options, bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

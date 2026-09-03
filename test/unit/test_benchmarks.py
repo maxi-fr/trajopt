@@ -10,14 +10,15 @@ from trajopt.benchmarks import (
     compare_solvers_closed_loop,
     measure_closed_loop_mpc,
 )
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import BoundaryConditions, Problem
+from trajopt.program import Program, WarmStart
 from trajopt.solvers.ilqr import ILQR
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 
 
 class StubSolver:
-    """Solver returning `state`'s own guess while claiming a cost and violation of its choosing.
+    """Solver returning the warm start's own guess while claiming a cost and violation of its choosing.
 
     Lets the harness be tested without a real solve, and pins down that the table's numbers are
     recomputed rather than copied out of the result.
@@ -27,17 +28,20 @@ class StubSolver:
         self.claimed_cost = claimed_cost
         self.claimed_violation = claimed_violation
 
-    def solve(self, problem: Problem, state: MPCState) -> IpoptResult:
-        """Return `state`'s guess dressed up as a converged solve."""
-        del problem
-        t = jnp.concatenate([jnp.zeros(1), jnp.cumsum(state.dt)])
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
+        """Return the warm start's guess dressed up as a converged solve."""
+        del bc
+        problem = program.problem
+        X, U = ws.unpack(problem)
+        dt = problem.dt
+        t = jnp.concatenate([jnp.zeros(1), jnp.cumsum(dt)])
         return IpoptResult(
-            trajectory=Trajectory(X=state.states, U=state.controls, t=t, dt=state.dt),
+            trajectory=Trajectory(X=X, U=U, t=t, dt=dt),
             success=True,
             status=0,
             message="stub",
             cost=self.claimed_cost,
-            Z=state.Z,
+            Z=ws.Z,
             info={},
             constraint_violation=self.claimed_violation,
             iterations=7,
@@ -46,10 +50,10 @@ class StubSolver:
 
 def test_compare_solvers_scores_rows_itself_rather_than_believing_the_solver() -> None:
     """Verify cost and violation are recomputed from the returned Z, not copied from the result."""
-    prob, state, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
     stub = StubSolver(claimed_cost=-1.0, claimed_violation=0.0)
 
-    comparison = compare_solvers(prob, state, [stub], n_repeats=2)
+    comparison = compare_solvers(prob, bc, ws, [stub], n_repeats=2)
 
     (row,) = comparison.rows
     assert row.solver == "StubSolver"
@@ -63,13 +67,13 @@ def test_compare_solvers_scores_rows_itself_rather_than_believing_the_solver() -
 
 def test_compare_solvers_labels_rows_from_a_mapping() -> None:
     """Verify a mapping's keys become row labels, so two configurations of one solver stay apart."""
-    prob, state, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
     solvers = {
         "loose": StubSolver(claimed_cost=1.0, claimed_violation=0.0),
         "tight": StubSolver(claimed_cost=2.0, claimed_violation=0.0),
     }
 
-    comparison = compare_solvers(prob, state, solvers, n_repeats=1)
+    comparison = compare_solvers(prob, bc, ws, solvers, n_repeats=1)
 
     assert [row.solver for row in comparison.rows] == ["loose", "tight"]
     assert comparison.model == "Cartpole"
@@ -78,9 +82,9 @@ def test_compare_solvers_labels_rows_from_a_mapping() -> None:
 
 def test_compare_solvers_timing_orders_first_call_median_and_min() -> None:
     """Verify each row carries a first-call duration alongside the median and minimum warm call."""
-    prob, state, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
 
-    comparison = compare_solvers(prob, state, [StubSolver(claimed_cost=0.0, claimed_violation=0.0)], n_repeats=3)
+    comparison = compare_solvers(prob, bc, ws, [StubSolver(claimed_cost=0.0, claimed_violation=0.0)], n_repeats=3)
 
     timing = comparison.rows[0].timing
     assert timing.first_call_time_s > 0.0
@@ -90,15 +94,15 @@ def test_compare_solvers_timing_orders_first_call_median_and_min() -> None:
 def _row(name: str, *, linearizing: bool) -> SolverRow:
     """Build a table row with placeholder numbers, for rendering tests."""
     stub = StubSolver(claimed_cost=0.0, claimed_violation=0.0)
-    prob, state, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
-    result = stub.solve(prob, state)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=5, dt=0.05)
+    result = stub.solve(Program(prob, stub), bc, ws)
     return SolverRow(
         solver=name,
         success=True,
         iterations=3,
         cost=1.0,
         constraint_violation=1e-9,
-        timing=compare_solvers(prob, state, [stub], n_repeats=1).rows[0].timing,
+        timing=compare_solvers(prob, bc, ws, [stub], n_repeats=1).rows[0].timing,
         linearizing=linearizing,
         result=result,
     )
@@ -127,10 +131,10 @@ def test_format_table_omits_the_footnote_when_no_row_linearizes() -> None:
 @pytest.mark.slow
 def test_ilqr_warns_about_ignored_constraints_and_reports_the_violation_it_leaves() -> None:
     """Verify iLQR announces that it dropped the constraints and measures how far it ends up outside them."""
-    prob, state, _ = cartpole_swingup_benchmark(N=15, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=15, dt=0.05)
 
     with pytest.warns(UserWarning, match="ignores constraints and box bounds"):
-        result = ILQR().solve(prob, state)
+        result = Program(prob, ILQR()).solve(bc, ws)
 
     # The cartpole's cart is bounded to |p| <= 0.4 and its actuator to |u| <= 20; an unconstrained
     # swing-up respects neither, and the violation is now measured rather than reported as zero.
@@ -142,11 +146,11 @@ def test_closed_loop_mpc_measurement_and_jitter() -> None:
     """Verify closed-loop MPC reports sustained frequency, latency jitter, and warm-start speedup."""
     pytest.importorskip("cyipopt")
 
-    prob, state, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=25, dt=0.05)
     num_steps = 10
     solver = Ipopt(options={"max_iter": 50, "tol": 1e-4, "print_level": 0})
 
-    stats: ClosedLoopStats = measure_closed_loop_mpc(prob, state, solver, num_steps=num_steps)
+    stats: ClosedLoopStats = measure_closed_loop_mpc(prob, bc, ws, solver, num_steps=num_steps)
 
     assert stats.num_steps == num_steps
     assert len(stats.durations_s) == num_steps
@@ -163,10 +167,10 @@ def test_closed_loop_mpc_measurement_and_jitter() -> None:
 @pytest.mark.slow
 def test_compare_solvers_closed_loop_gives_every_solver_its_own_latency_row() -> None:
     """Verify the closed-loop comparison runs a receding horizon per solver and keeps their order."""
-    prob, state, _ = cartpole_swingup_benchmark(N=10, dt=0.05)
+    prob, bc, ws, _ = cartpole_swingup_benchmark(N=10, dt=0.05)
     solvers = {"stub_a": StubSolver(claimed_cost=0.0, claimed_violation=0.0), "ilqr": ILQR()}
 
-    comparison = compare_solvers_closed_loop(prob, state, solvers, num_steps=3)
+    comparison = compare_solvers_closed_loop(prob, bc, ws, solvers, num_steps=3)
 
     assert [row.solver for row in comparison.rows] == ["stub_a", "ilqr"]
     assert comparison.num_steps == 3

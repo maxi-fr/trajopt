@@ -2,11 +2,99 @@ import functools
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import equinox as eqx
 import jax
+import jax.numpy as jnp
+
+from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
 if TYPE_CHECKING:
-    from trajopt.problem import MPCState, Problem
+    from trajopt.problem import BoundaryConditions, Problem
+    from trajopt.solvers.al import ALConstraints
+    from trajopt.trajectory import Trajectory
     from trajopt.transcription.result import Solver, SolverResult
+
+
+class WarmStart(eqx.Module):
+    """The primal and dual iterates one receding-horizon step hands to the next.
+
+    Shape lives in the `Problem`, so every method that needs the horizon takes one rather than
+    carrying a second copy of `N`, `n` and `m`.
+
+    Parameters
+    ----------
+    Z : jax.Array
+        Flat primal trajectory of shape (N * n + (N - 1) * m,).
+    lam : jax.Array
+        Transcription constraint duals of shape (P,).
+    mu : jax.Array
+        Signed primal-bound duals, one per entry of `Z`.
+    al : ALConstraints | None
+        Padded augmented-Lagrangian duals and penalties, or None until an AL solve populates them.
+    """
+
+    Z: jax.Array
+    lam: jax.Array
+    mu: jax.Array
+    al: "ALConstraints | None" = None
+
+    @classmethod
+    def cold(
+        cls,
+        problem: "Problem",
+        x0: jax.Array,
+        *,
+        initial_trajectory: "Trajectory | None" = None,
+        initial_z: jax.Array | None = None,
+    ) -> "WarmStart":
+        """Zero duals and a primal guess: `initial_z`, else `initial_trajectory`, else x0 held with zero controls."""
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+
+        if initial_z is not None:
+            Z = jnp.asarray(initial_z, dtype=jnp.float64)
+        elif initial_trajectory is not None:
+            Z = _trajectory_to_z(initial_trajectory.X, initial_trajectory.U)
+        else:
+            Z = _trajectory_to_z(
+                jnp.repeat(jnp.asarray(x0, dtype=jnp.float64)[None, :], N, axis=0),
+                jnp.zeros((N - 1, m), dtype=jnp.float64),
+            )
+
+        P_total = n + (N - 1) * n + sum(problem.constraints.p)
+        return cls(Z=Z, lam=jnp.zeros(P_total, dtype=jnp.float64), mu=jnp.zeros(len(Z), dtype=jnp.float64))
+
+    def unpack(self, problem: "Problem") -> tuple[jax.Array, jax.Array]:
+        """States of shape (N, n) and controls of shape (N - 1, m) parsed out of `Z`."""
+        return _z_to_trajectory(self.Z, int(problem.N), int(problem.model.n), int(problem.model.m))
+
+    def with_x0(self, problem: "Problem", x0: jax.Array) -> "WarmStart":
+        """Return this warm start with the first knot of `Z` pinned to the measured state x0 of shape (n,)."""
+        X, U = self.unpack(problem)
+        return eqx.tree_at(lambda w: w.Z, self, _trajectory_to_z(X.at[0].set(jnp.asarray(x0, dtype=X.dtype)), U))
+
+    def with_primal(self, problem: "Problem", *, X: jax.Array | None = None, U: jax.Array | None = None) -> "WarmStart":
+        """Return this warm start with the states and/or controls in `Z` replaced."""
+        X_cur, U_cur = self.unpack(problem)
+        X_new = X_cur if X is None else jnp.asarray(X, dtype=X_cur.dtype)
+        U_new = U_cur if U is None else jnp.asarray(U, dtype=U_cur.dtype)
+        return eqx.tree_at(lambda w: w.Z, self, _trajectory_to_z(X_new, U_new))
+
+    def shift(self, problem: "Problem") -> "WarmStart":
+        """Advance this warm start one knot: `Z` shifts and holds its last point, the duals do not move.
+
+        The duals are deliberately passed through unshifted. That is a known bug -- after a step
+        `lam`, `mu` and `al` are misaligned by one knot against the trajectory they were computed
+        for -- preserved verbatim from the shift this replaced so that no numbers moved with the
+        refactor. Fixing it belongs to its own change, and this method is the one place to fix it.
+        """
+        X, U = self.unpack(problem)
+        Z = _trajectory_to_z(
+            jnp.concatenate([X[1:], X[-1:]], axis=0),
+            jnp.concatenate([U[1:], U[-1:]], axis=0),
+        )
+        return eqx.tree_at(lambda w: w.Z, self, Z)
 
 
 class Program:
@@ -80,22 +168,6 @@ class Program:
         """Specialize `fn` to this program's problem -- the one `jax.jit` call site, so the one place a compile can start."""
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
-    def solve(self, state: "MPCState") -> "SolverResult":
-        """Solve from `state` with this program's solver, returning the backend's raw result."""
-        return self.solver.solve(self.problem, state)
-
-
-def program_for(solver: "Solver", problem: "Problem") -> Program:
-    """Return `solver`'s Program for `problem`, building one on first use and reusing it thereafter.
-
-    The Program lives on the solver instance because a Program is per-solver: one solver object
-    driven over a receding horizon builds its program once and keeps it, which is the reuse the
-    whole refactor exists for. `problem` is compared by identity and held by the Program, so a
-    solver pointed at a different Problem object gets a different Program.
-    """
-    program = getattr(solver, "_program", None)
-    if isinstance(program, Program) and program.problem is problem:
-        return program
-    program = Program(problem, solver)
-    object.__setattr__(solver, "_program", program)
-    return program
+    def solve(self, bc: "BoundaryConditions", ws: WarmStart) -> "SolverResult":
+        """Solve this program's problem from boundary conditions `bc` and warm start `ws`."""
+        return self.solver.solve(self, bc, ws)
