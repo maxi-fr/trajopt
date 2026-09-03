@@ -12,7 +12,7 @@ import numpy as np
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
@@ -739,6 +739,7 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
     gradient_tolerance: jax.Array | float | None = None,
     solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
     u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, SolverStats, jax.Array]:
     """Traced iLQR core, matching `Altro.iLQRSolver`'s `initialize!` + `solve!` loop.
 
@@ -774,6 +775,10 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
         box-QP feedforward is bound-feasible by construction, but the closed-loop `K @ dx`
         feedback term is not, so this is a deliberate practical safeguard beyond the box-DDP
         paper's strict local guarantee). Defaults to None, meaning no clip.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
+        objective keeps the target it was built with.
 
     Returns
     -------
@@ -781,6 +786,7 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
         The accepted trajectory at exit, the stats history (buffers sized `options.iterations`,
         untrimmed), and the exit `TerminationStatus` ordinal as an int32 scalar.
     """
+    problem = retarget_problem(problem, bc)
     init_traj = problem.model.rollout(trajectory)
     cost_tol = jnp.asarray(options.cost_tolerance if cost_tolerance is None else cost_tolerance, dtype=jnp.float64)
     grad_tol = jnp.asarray(
@@ -806,79 +812,45 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
     return final.trajectory, final.stats, final.status
 
 
-_GOAL_OVERRIDE_CACHE_MAXSIZE = 32
-_goal_override_cache: dict[tuple[int, tuple[float, ...]], Problem] = {}
+def build_warm_start(problem: Problem, state: MPCState) -> tuple[Trajectory, BoundaryConditions]:
+    """Build the eager warm-start trajectory and the traced boundary conditions from `state`.
 
-
-def _cached_goal_override(problem: Problem, xf_val: jax.Array) -> Problem:
-    """Memoized `eqx.tree_at` goal override, keyed on `(id(problem), xf`'s concrete value)`.
-
-    `build_warm_start` would otherwise call `eqx.tree_at` -- which always allocates a new
-    `Problem` -- on every call whose objective regulates to a goal, even when `xf` hasn't
-    actually changed since the last call. That defeats the jitted cores' `JitCacheSlot`, whose
-    reuse is keyed on `problem`'s identity: a fresh object every `.solve()` call means a fresh
-    compile every call, no better than not jitting, for the common MPC case of replanning
-    toward the same goal across consecutive steps. Returning the same `problem_eff` object for
-    the same `(problem, xf)` pair restores the hit. A genuinely new goal still produces a
-    genuinely new object (and a fresh compile) -- the goal is baked into the jitted core as a
-    compile-time constant by this architecture, a residual limitation documented in the ADR,
-    not something this cache papers over.
-    """
-    key = (id(problem), tuple(np.asarray(xf_val, dtype=np.float64).tolist()))
-    cached = _goal_override_cache.get(key)
-    if cached is not None:
-        return cached
-    problem_eff = eqx.tree_at(lambda p: p.obj, problem, problem.obj.with_goal(xf_val))
-    if len(_goal_override_cache) >= _GOAL_OVERRIDE_CACHE_MAXSIZE:
-        _goal_override_cache.clear()
-    _goal_override_cache[key] = problem_eff
-    return problem_eff
-
-
-def build_warm_start(problem: Problem, state: MPCState) -> tuple[Problem, Trajectory]:
-    """Build the eager warm-start trajectory and goal-overridden problem from `state`.
-
-    Shared by `ILQR.solve` and `AL.solve` (ticket 29 wraps ticket 27's `.solve()` boundary):
-    both parse `state.Z` into `(X, U)`, build the absolute time grid from `state.t0`/`state.dt`,
-    and override `problem`'s objective goal from `state.xf` when the objective regulates to a
-    runtime goal.
+    Shared by every native solver's `.solve()` (ticket 29 wraps ticket 27's `.solve()` boundary):
+    each parses `state.Z` into `(X, U)` and builds the absolute time grid from `state.t0`/
+    `state.dt`. The run-time target is no longer folded into a derived `Problem` here; it stays
+    in `state.bc` and is passed to the jitted core as a traced argument, so a goal that moves
+    between MPC steps changes traced values rather than the compilation key.
 
     Parameters
     ----------
     problem : Problem
-        Problem to warm-start; its `obj` may be goal-overridden in the returned copy.
+        Problem to warm-start, supplying the horizon and dimensions.
     state : MPCState
-        Per-step state supplying the flat primal `Z`, `t0`, `dt`, and optional runtime goal `xf`.
+        Per-step state supplying the flat primal `Z`, `dt`, and the boundary conditions.
 
     Returns
     -------
-    tuple[Problem, Trajectory]
-        `(problem_eff, init_traj)`: `problem` with its goal overridden if applicable, and the
-        warm-start trajectory built from `state.Z`.
+    tuple[Trajectory, BoundaryConditions]
+        The warm-start trajectory built from `state.Z`, and `state.bc`.
     """
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
 
-    _x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
+    _x0_arr, t0_arr, dt_arr, _xf_val, z0 = parse_solver_initial_state(state)
     assert z0 is not None  # noqa: S101 -- MPCState.Z is never None; the shared helper's type is just loose
     dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
     t_arr = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
     X0, U0 = _z_to_trajectory(z0, N, n, m)
-    init_traj = Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr)
 
-    problem_eff = problem
-    if xf_val is not None and problem.obj.regulates_to_goal:
-        problem_eff = _cached_goal_override(problem, xf_val)
-
-    return problem_eff, init_traj
+    return Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr), state.bc
 
 
 _ilqr_solve_jit_slot = JitCacheSlot()
 
 
 def _jit_ilqr_solve(
-    problem: Problem, trajectory: Trajectory, options: SolverOptions
+    problem: Problem, trajectory: Trajectory, options: SolverOptions, bc: BoundaryConditions | None = None
 ) -> tuple[Trajectory, SolverStats, jax.Array]:
     """`ilqr_solve`, jit-compiled and cached per `(problem identity, options)`, shared by `ILQR.solve()` and `ALTRO.solve()`'s unconstrained shortcut.
 
@@ -886,10 +858,11 @@ def _jit_ilqr_solve(
     (`JitCacheSlot`'s docstring has the reason: `problem`'s constraint bounds are read with eager
     `np.asarray` during layout construction, which breaks under trace). The returned closure is
     reused across calls with the same `problem` object and `options`, so repeated same-shape calls
-    (e.g. MPC) hit XLA's compilation cache instead of recompiling.
+    (e.g. MPC) hit XLA's compilation cache instead of recompiling. `bc` is a traced argument, so a
+    run-time target that moves between those calls does not disturb the reuse.
     """
     jitted = _ilqr_solve_jit_slot.get_or_build(ilqr_solve, problem, key=options, options=options, solve_kd_builder=None)
-    return jitted(trajectory=trajectory)
+    return jitted(trajectory=trajectory, bc=bc)
 
 
 def _trim_stats(stats: SolverStats, n_iter: int) -> SolverStats:
@@ -987,9 +960,9 @@ class ILQR:
                 stacklevel=2,
             )
 
-        problem_eff, init_traj = build_warm_start(problem, state)
+        init_traj, bc = build_warm_start(problem, state)
 
-        final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, self.options)
+        final_traj, stats, status_int = _jit_ilqr_solve(problem, init_traj, self.options, bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
@@ -1001,11 +974,11 @@ class ILQR:
             status=int(status_int),
             message=status.name,
             solver_status=to_solver_status(status),
-            cost=float(problem_eff.obj.cost(final_traj)),
+            cost=float(bc.retarget(problem.obj).cost(final_traj)),
             Z=Z,
             info={"stats": _trim_stats(stats, n_iter)},
             constraint_violation=compute_constraint_violation(
-                problem_eff,
+                problem,
                 Z,
                 state.x0,
                 t0=state.t0,

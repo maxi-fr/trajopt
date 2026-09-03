@@ -329,7 +329,7 @@ def operating_point_z(problem: Problem, operating_point: Trajectory | jax.Array 
     return z_op
 
 
-def extract_quadratic_cost(  # noqa: PLR0913 -- Cost extraction helper takes 8 parameters
+def extract_quadratic_cost(  # noqa: PLR0913 -- Cost extraction helper takes 7 parameters
     problem: Problem,
     N: int,
     n: int,
@@ -338,20 +338,23 @@ def extract_quadratic_cost(  # noqa: PLR0913 -- Cost extraction helper takes 8 p
     *,
     t0_arr: jax.Array,
     dt_arr: jax.Array,
-    xf_val: jax.Array | None,
     z_op: jax.Array,
 ) -> tuple[sp.csc_matrix, np.ndarray]:
-    """Extract upper-triangular Hessian P_triu and linear term q of the expansion about z_op."""
+    """Extract upper-triangular Hessian P_triu and linear term q of the expansion about z_op.
+
+    `problem`'s objective is expanded as given, so a caller aiming it at a run-time reference
+    window retargets the problem first.
+    """
     from trajopt.transcription.sparsity import hessian_sparsity_pattern  # noqa: PLC0415 -- avoid circular import
     from trajopt.transcription.transcription import (  # noqa: PLC0415 -- avoid circular import
         eval_grad_f,
         eval_h,
     )
 
-    g_jax = eval_grad_f(problem, z_op, t0=t0_arr, dt=dt_arr, xf=xf_val)
+    g_jax = eval_grad_f(problem, z_op, t0=t0_arr, dt=dt_arr)
 
     h_rows, h_cols = hessian_sparsity_pattern(N, n, m)
-    h_vals_jax = eval_h(problem, z_op, t0=t0_arr, dt=dt_arr, xf=xf_val)
+    h_vals_jax = eval_h(problem, z_op, t0=t0_arr, dt=dt_arr)
     h_vals = np.asarray(h_vals_jax, dtype=np.float64)
 
     H_full = sp.coo_matrix((h_vals, (h_rows, h_cols)), shape=(nz, nz), dtype=np.float64).tocsc()

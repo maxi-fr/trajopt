@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Any
 
 import jax
@@ -179,17 +180,11 @@ def _bound_active_double_integrator() -> tuple[Problem, MPCState]:
 
 def _with_state(state: MPCState, Z, lam, mu) -> MPCState:
     """Return a copy of state carrying the given primal vector and multipliers."""
-    return MPCState(
-        x0=state.x0,
-        t0=state.t0,
-        xf=state.xf,
+    return dataclasses.replace(
+        state,
         lam=jnp.asarray(lam, dtype=state.Z.dtype),
         mu=jnp.asarray(mu, dtype=state.Z.dtype),
         Z=jnp.asarray(Z, dtype=state.Z.dtype),
-        dt=state.dt,
-        n=state.n,
-        m=state.m,
-        N=state.N,
     )
 
 

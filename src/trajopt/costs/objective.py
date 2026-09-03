@@ -40,9 +40,6 @@ class Objective(eqx.Module):
         stage_cost.
     N : int | None, optional
         Horizon length in knot points. Required when stage_cost is not stacked.
-    regulates_to_goal : bool, optional
-        Whether every linear state term encodes one constant goal state as q = -Q xf, so that
-        `with_goal` can retarget the objective. Only LQRObjective sets this. Defaults to False.
     """
 
     stage_cost: CostFunction
@@ -50,15 +47,12 @@ class Objective(eqx.Module):
     N: int = eqx.field(static=True)
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
-    regulates_to_goal: bool = eqx.field(static=True)
 
     def __init__(
         self,
         stage_cost: CostFunction,
         terminal_cost: CostFunction | None = None,
         N: int | None = None,
-        *,
-        regulates_to_goal: bool = False,
     ) -> None:
         if stage_cost.is_stacked:
             n_knots = int(_quadratic(stage_cost).Q.shape[0]) + 1
@@ -96,7 +90,6 @@ class Objective(eqx.Module):
         self.N = N_val
         self.n = int(stage_cost.n)
         self.m = int(stage_cost.m)
-        self.regulates_to_goal = bool(regulates_to_goal)
 
     @property
     def Q(self) -> jax.Array:  # noqa: N802
@@ -183,33 +176,38 @@ class Objective(eqx.Module):
         """Objective tracking trajectory from knot point start, keeping the current weights."""
         return update_reference(self, trajectory, start=start)
 
-    def with_goal(self, xf: jax.Array) -> "Objective":
-        """Objective retargeted to goal state xf of shape (n,), keeping Q, R, H, r and c.
+    def with_reference(self, X_ref: jax.Array, U_ref: jax.Array) -> "Objective":
+        """Objective whose linear and constant terms track a reference window, keeping Q, R, H and Q_f.
 
-        Rewrites only the linear state terms as q = -Q xf, the `set_LQR_goal!` of
-        TrajectoryOptimization.jl. The constant term c is left at its build-time value, so a
-        moved goal shifts the reported cost by a constant without moving the minimizer. Safe
-        under trace: xf flows into array leaves only, so a goal that changes between MPC steps
-        does not recompile.
+        Rewrites q, r and c the way `tracking` / `terminal_tracking` build them, so a quadratic
+        objective built as pure shape and one built at a fixed target agree exactly. Safe under
+        trace: the window flows into array leaves only, so a target that moves between MPC steps
+        changes traced values rather than the pytree, and forces no recompile.
+
+        Parameters
+        ----------
+        X_ref : jax.Array
+            Reference states of shape (N, n).
+        U_ref : jax.Array
+            Reference controls of shape (N - 1, m).
 
         Raises
         ------
         TypeError
-            If the objective does not regulate to a single constant goal state, in which case
-            its linear terms are a reference of their own and overwriting them would discard it.
+            If either cost is not quadratic, since only a quadratic cost exposes q, r and c.
         """
-        if not self.regulates_to_goal:
-            msg = (
-                f"{type(self.stage_cost).__name__} objective does not regulate to a goal state, so it cannot be "
-                f"retargeted by xf; its linear terms hold a reference of their own. Use update_reference instead."
-            )
-            raise TypeError(msg)
+        stage_cls = type(_quadratic(self.stage_cost))
+        term_cls = type(_quadratic(self.terminal_cost))
+        X_stage, x_term = X_ref[:-1], X_ref[-1]
         return eqx.tree_at(
-            lambda o: (o.stage_cost.q, o.terminal_cost.q),
+            lambda o: (o.stage_cost.q, o.stage_cost.r, o.stage_cost.c, o.terminal_cost.q, o.terminal_cost.c),
             self,
             (
-                -type(_quadratic(self.stage_cost)).matvec(self.Q, xf),
-                -type(_quadratic(self.terminal_cost)).matvec(self.Q_f, xf),
+                -stage_cls.matvec(self.Q, X_stage),
+                -stage_cls.matvec(self.R, U_ref),
+                0.5 * stage_cls.quad_form(self.Q, X_stage) + 0.5 * stage_cls.quad_form(self.R, U_ref),
+                -term_cls.matvec(self.Q_f, x_term),
+                0.5 * term_cls.quad_form(self.Q_f, x_term),
             ),
         )
 
@@ -278,7 +276,7 @@ def LQRObjective(  # noqa: N802, PLR0913, PLR0917
         uf_arr,
     )
     terminal_cost = cost_cls.terminal_tracking(Qf_arr, xf_arr, m)
-    return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, regulates_to_goal=True)
+    return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
 
 
 def TrackingObjective(  # noqa: N802

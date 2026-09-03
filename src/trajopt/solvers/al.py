@@ -11,7 +11,7 @@ from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.ilqr import SolveKD, build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
@@ -901,6 +901,7 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
     options: SolverOptions,
     solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
     u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
     """Traced augmented-Lagrangian outer loop, matching `Altro.ALSolver`'s `solve!` (`al_solve.jl`).
 
@@ -929,6 +930,10 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
     u_bounds : tuple[jax.Array, jax.Array] | None, optional
         Forwarded to every inner `ilqr_solve` call to clip the closed-loop rollout (ticket 30).
         Defaults to None, meaning no clip.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
+        objective keeps the target it was built with.
 
     Returns
     -------
@@ -937,6 +942,7 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
         `options.iterations_outer`, untrimmed), and the exit `TerminationStatus` ordinal as an
         int32 scalar.
     """
+    problem = retarget_problem(problem, bc)
     init_carry = ALCarry(
         i=jnp.int32(0),
         trajectory=trajectory,
@@ -966,6 +972,7 @@ def _jit_al_solve(  # noqa: PLR0913, PLR0917 -- mirrors al_solve's own load-bear
     options: SolverOptions,
     solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
     u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
     """`al_solve`, jit-compiled and cached per `(problem identity, options, solve_kd_builder)`, shared by `AL.solve()` and `BoxQP.solve()`.
 
@@ -974,13 +981,13 @@ def _jit_al_solve(  # noqa: PLR0913, PLR0917 -- mirrors al_solve's own load-bear
     a Python callable, cannot be a traced pytree leaf at all). The returned closure is reused
     across calls with the same `problem` object, `options`, and `solve_kd_builder`, so repeated
     same-shape calls (e.g. MPC, or `BoxQP`'s memoized builder for unchanged bounds) hit XLA's
-    compilation cache instead of recompiling. `trajectory`/`al0`/`u_bounds` are the genuinely
-    dynamic arguments.
+    compilation cache instead of recompiling. `trajectory`/`al0`/`u_bounds`/`bc` are the
+    genuinely dynamic arguments, so a run-time target that moves between calls keeps the reuse.
     """
     jitted = _al_solve_jit_slot.get_or_build(
         al_solve, problem, key=(options, solve_kd_builder), options=options, solve_kd_builder=solve_kd_builder
     )
-    return jitted(trajectory=trajectory, al0=al0, u_bounds=u_bounds)
+    return jitted(trajectory=trajectory, al0=al0, u_bounds=u_bounds, bc=bc)
 
 
 class ALResult(NamedTuple):
@@ -1067,10 +1074,10 @@ class AL:
             sign (ticket 31). Set `options.reset_duals=True` to discard the old duals instead.
         """
         options = self.options
-        problem_eff, init_traj = build_warm_start(problem, state)
+        init_traj, bc = build_warm_start(problem, state)
 
         fresh_al = ALConstraints.build(
-            problem_eff.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
+            problem.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
         )
         if state.al is not None:
             if not options.reset_duals and bool(state.al.is_conic) != options.use_conic_cost:
@@ -1088,12 +1095,12 @@ class AL:
         else:
             init_al = fresh_al
 
-        final_traj, final_al, stats, status_int = _jit_al_solve(problem_eff, init_traj, init_al, options)
+        final_traj, final_al, stats, status_int = _jit_al_solve(problem, init_traj, init_al, options, bc=bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
-        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem_eff.constraints, problem_eff.model, final_traj)
-        final_cost = _ALObjective(problem_eff.obj, problem_eff.constraints, problem_eff.model, final_al, options).cost(
+        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem.constraints, problem.model, final_traj)
+        final_cost = _ALObjective(bc.retarget(problem.obj), problem.constraints, problem.model, final_al, options).cost(
             final_traj
         )
 

@@ -269,7 +269,9 @@ def _(np, plt, res_altro, res_ipopt, u_max):
 
     axes[2].plot(t_altro[:-1], u_altro_plot, "b-", linewidth=2.5, label=r"ALTRO $\tau(t)$")
     axes[2].plot(t_ipopt[:-1], u_ipopt_plot, "r--", linewidth=2.0, label=r"Ipopt $\tau(t)$")
-    axes[2].axhline(u_max, color="firebrick", linestyle="-.", linewidth=1.5, label=r"Torque Limits $\pm 5.0\,\mathrm{N\cdot m}$")
+    axes[2].axhline(
+        u_max, color="firebrick", linestyle="-.", linewidth=1.5, label=r"Torque Limits $\pm 5.0\,\mathrm{N\cdot m}$"
+    )
     axes[2].axhline(-u_max, color="firebrick", linestyle="-.", linewidth=1.5)
     axes[2].fill_between(t_altro[:-1], u_max, u_max + 1.0, color="firebrick", alpha=0.1)
     axes[2].fill_between(t_altro[:-1], -u_max - 1.0, -u_max, color="firebrick", alpha=0.1)
@@ -299,7 +301,7 @@ def _(X_altro, X_ipopt, model, np, plt):
     b_val = float(model.b)
 
     Theta_dot = Omega
-    Omega_dot = - (g_val / lc_val) * np.sin(Theta) - (b_val / m_eff) * Omega
+    Omega_dot = -(g_val / lc_val) * np.sin(Theta) - (b_val / m_eff) * Omega
 
     ax_phase.streamplot(Theta, Omega, Theta_dot, Omega_dot, color="silver", density=0.8, arrowsize=1.0)
     ax_phase.plot(X_altro[:, 0], X_altro[:, 1], "b-", linewidth=2.5, label="ALTRO Trajectory")

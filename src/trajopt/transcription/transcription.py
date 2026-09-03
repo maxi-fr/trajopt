@@ -6,7 +6,7 @@ import numpy as np
 from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import Problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.transcription.layout import _z_to_trajectory
 
 
@@ -15,9 +15,9 @@ def _cost_fn(
     Z: jax.Array,
     t0: float | jax.Array,
     dt: float | jax.Array,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> jax.Array:
-    """Evaluate total trajectory cost scalar J(Z), retargeting a goal-regulating objective to xf."""
+    """Evaluate total trajectory cost scalar J(Z), aiming the objective at `bc`'s reference window."""
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -27,9 +27,7 @@ def _cost_fn(
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    # A goal-regulating objective follows the run-time goal; every other objective carries a
-    # reference of its own, and xf is there for the goal constraint alone.
-    obj = problem.obj.with_goal(xf) if (xf is not None and problem.obj.regulates_to_goal) else problem.obj
+    obj = retarget_problem(problem, bc).obj
 
     stage_costs = obj.stage_cost.stage_costs(X[:-1], U, t_stage)
     term_cost = obj.terminal_cost.evaluate(X[-1], None, t_term)
@@ -42,7 +40,7 @@ def cost_and_grad(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate objective value J(Z) and its gradient nabla J(Z).
 
@@ -56,15 +54,16 @@ def cost_and_grad(
         Initial time. Defaults to 0.0.
     dt : float | jax.Array, optional
         Time step duration. Defaults to 0.05.
-    xf : jax.Array | None, optional
-        Goal state vector. Defaults to None.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions whose reference window aims the objective. Defaults to None,
+        meaning the objective keeps the target it was built with.
 
     Returns
     -------
     tuple[jax.Array, jax.Array]
         Scalar cost J(Z) and gradient nabla J(Z) of shape (N * n + (N - 1) * m,).
     """
-    return jax.value_and_grad(lambda z: _cost_fn(problem, z, t0, dt, xf))(Z)
+    return jax.value_and_grad(lambda z: _cost_fn(problem, z, t0, dt, bc))(Z)
 
 
 @eqx.filter_jit
@@ -73,10 +72,10 @@ def eval_f(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> jax.Array:
-    """Evaluate objective value J(Z) as a scalar."""
-    return _cost_fn(problem, Z, t0, dt, xf)
+    """Evaluate objective value J(Z) as a scalar, aimed at `bc`'s reference window."""
+    return _cost_fn(problem, Z, t0, dt, bc)
 
 
 @eqx.filter_jit
@@ -85,10 +84,10 @@ def eval_grad_f(
     Z: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> jax.Array:
-    """Evaluate objective gradient nabla J(Z) of shape (N * n + (N - 1) * m,)."""
-    return jax.grad(lambda z: _cost_fn(problem, z, t0, dt, xf))(Z)
+    """Evaluate objective gradient nabla J(Z) of shape (N * n + (N - 1) * m,), aimed at `bc`."""
+    return jax.grad(lambda z: _cost_fn(problem, z, t0, dt, bc))(Z)
 
 
 @eqx.filter_jit
@@ -322,7 +321,7 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     dt: float | jax.Array = 0.05,
     obj_factor: float | jax.Array = 1.0,
     lam: jax.Array | None = None,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the block-diagonal Lagrangian Hessian.
 
@@ -340,15 +339,15 @@ def hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
         Objective scale factor sigma_f. Defaults to 1.0.
     lam : jax.Array | None, optional
         Constraint multiplier vector of shape (P,). Defaults to zeros.
-    xf : jax.Array | None, optional
-        Goal state vector. Defaults to None.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions, accepted for signature parity. Defaults to None.
 
     Returns
     -------
     jax.Array
         Lower-triangular nonzeros of the Lagrangian Hessian of shape (nnz_hess,).
     """
-    del xf  # retargeting rewrites only the linear terms, which the Hessian does not see
+    del bc  # retargeting rewrites only the linear terms, which the Hessian does not see
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -437,7 +436,7 @@ def eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 7 arguments
     dt: float | jax.Array = 0.05,
     obj_factor: float | jax.Array = 1.0,
     lam: jax.Array | None = None,
-    xf: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the Lagrangian Hessian."""
-    return hessian(problem, Z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, xf=xf)
+    return hessian(problem, Z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, bc=bc)

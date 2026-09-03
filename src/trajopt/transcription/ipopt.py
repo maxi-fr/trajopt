@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, retarget_problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
@@ -109,11 +109,11 @@ class _IpoptCallback:
 
     def objective(self, z: np.ndarray) -> float:
         """Evaluate scalar objective value J(z)."""
-        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt, self.xf))
+        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt))
 
     def gradient(self, z: np.ndarray) -> np.ndarray:
         """Evaluate objective gradient nabla J(z)."""
-        return np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt, self.xf), dtype=np.float64)
+        return np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64)
 
     def constraints(self, z: np.ndarray) -> np.ndarray:
         """Evaluate constraint vector c(z)."""
@@ -141,7 +141,6 @@ class _IpoptCallback:
                 # factor Ipopt picks would compile the Hessian afresh.
                 obj_factor=jnp.asarray(obj_factor, dtype=jnp.float64),
                 lam=jnp.asarray(lagrange),
-                xf=self.xf,
             ),
             dtype=np.float64,
         )
@@ -197,6 +196,7 @@ class Ipopt:
         m = int(problem.model.m)
 
         x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(state)
+        problem = retarget_problem(problem, state.bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
         z0 = np.asarray(z0_jax, dtype=np.float64)
         lam0, mu0 = warm_start_duals(problem, state)

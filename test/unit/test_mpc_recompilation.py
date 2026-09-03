@@ -16,7 +16,7 @@ GOAL = jnp.array([np.pi, 0.0], dtype=jnp.float64)
 
 
 def _build() -> Problem:
-    """Unconstrained pendulum swing-up problem with an LQR objective, so `regulates_to_goal` holds."""
+    """Unconstrained pendulum swing-up problem with a quadratic objective the run-time goal retargets."""
     obj = LQRObjective(Q=jnp.eye(2) * DT, R=jnp.eye(1) * DT, Qf=jnp.eye(2) * 10.0, xf=GOAL, N=N)
     return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, integrator=RK4())
 
@@ -61,16 +61,6 @@ def test_fixed_goal_compiles_core_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _count_core_compiles(monkeypatch, moving_goal=False) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The goal is baked into the jitted core as a compile-time constant: build_warm_start's "
-        "_cached_goal_override allocates a new Problem per distinct xf, and JitCacheSlot keys reuse "
-        "on problem identity, so a moving goal recompiles every step. The refactor making "
-        "BoundaryConditions a traced argument fixes this. strict=True is deliberate: once that "
-        "lands this test XPASSes and fails the suite, forcing removal of this marker."
-    ),
-)
 def test_moving_goal_compiles_core_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A receding-horizon loop whose goal moves every step must still compile the ILQR core exactly once."""
     assert _count_core_compiles(monkeypatch, moving_goal=True) == 1

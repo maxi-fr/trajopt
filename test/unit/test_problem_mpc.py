@@ -7,12 +7,15 @@ import pytest
 from trajopt.constraints.bounds import ControlBound
 from trajopt.constraints.constraint_list import ConstraintList
 from trajopt.constraints.linear import GoalConstraint
-from trajopt.costs.objective import LQRObjective, TrackingObjective
+from trajopt.costs.objective import LQRObjective, Objective, TrackingObjective
+from trajopt.costs.rotations import QuatGeodesicCost
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
+from trajopt.models.quadrotor import Quadrotor
 from trajopt.problem import (
+    BoundaryConditions,
     MPCState,
     Problem,
 )
@@ -168,12 +171,12 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
     compile_count_jac = 0
     compile_count_hess = 0
 
-    # xf is Array | None on MPCState, and forwarding it as such is what lets these mirror the
-    # real call sites rather than a narrowed version of them.
-    def cost_target(p: Problem, z: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array | None) -> jax.Array:
+    # The cost path takes the boundary conditions and the constraint path the goal point, exactly
+    # as the real call sites do, so this measures those rather than a narrowed version of them.
+    def cost_target(p: Problem, z: jax.Array, t0: jax.Array, dt: jax.Array, bc: BoundaryConditions | None) -> jax.Array:
         nonlocal compile_count_cost
         compile_count_cost += 1
-        return eval_f(p, z, t0, dt, xf)
+        return eval_f(p, z, t0, dt, bc)
 
     def jac_target(
         p: Problem, z: jax.Array, x_init: jax.Array, t0: jax.Array, dt: jax.Array, xf: jax.Array | None
@@ -189,20 +192,20 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
         dt: jax.Array,
         obj_factor: float,
         lam: jax.Array,
-        xf: jax.Array | None,
+        bc: BoundaryConditions | None,
     ) -> jax.Array:
         nonlocal compile_count_hess
         compile_count_hess += 1
-        return eval_h(p, z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, xf=xf)
+        return eval_h(p, z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, bc=bc)
 
     jit_cost = eqx.filter_jit(cost_target)
     jit_jac = eqx.filter_jit(jac_target)
     jit_hess = eqx.filter_jit(hess_target)
 
     # Initial warmup compile (iteration 0)
-    _ = jit_cost(prob, state.Z, state.t0, state.dt, state.xf)
+    _ = jit_cost(prob, state.Z, state.t0, state.dt, state.bc)
     _ = jit_jac(prob, state.Z, state.x0, state.t0, state.dt, state.xf)
-    _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.xf)
+    _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.bc)
 
     assert compile_count_cost == 1
     assert compile_count_jac == 1
@@ -216,9 +219,9 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
 
         state = state.with_measurement(x_meas, t_curr).with_goal(xf_step)
 
-        _ = jit_cost(prob, state.Z, state.t0, state.dt, state.xf)
+        _ = jit_cost(prob, state.Z, state.t0, state.dt, state.bc)
         _ = jit_jac(prob, state.Z, state.x0, state.t0, state.dt, state.xf)
-        _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.xf)
+        _ = jit_hess(prob, state.Z, state.t0, state.dt, 1.0, state.lam, state.bc)
 
     # Assert exactly zero new compilations occurred across all 100 steps
     assert compile_count_cost == 1
@@ -414,35 +417,36 @@ def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
     state = MPCState.initial(prob, x0=jnp.array([0.1, 0.2, 0.0, 0.0]), dt=0.05, xf=xf_build)
     Z = state.Z + 0.05 * jnp.arange(len(state.Z), dtype=state.Z.dtype)
 
-    # The retarget rewrites q = -Q xf and leaves c at its build value, so the two costs agree up
-    # to that constant; the gradient, which is what the solver sees, agrees outright.
+    # The retarget rebuilds q, r and c from the new target, so a retargeted objective and one
+    # rebuilt at that target agree by a constant offset (here zero) and their gradients outright.
+    bc_new = state.with_goal(xf_new).bc
     np.testing.assert_allclose(
-        eval_grad_f(prob, Z, state.t0, state.dt, xf_new),
+        eval_grad_f(prob, Z, state.t0, state.dt, bc_new),
         eval_grad_f(prob_rebuilt, Z, state.t0, state.dt, None),
         rtol=1e-12,
         atol=1e-12,
     )
-    j_retargeted = eval_f(prob, Z, state.t0, state.dt, xf_new)
+    j_retargeted = eval_f(prob, Z, state.t0, state.dt, bc_new)
     j_rebuilt = eval_f(prob_rebuilt, Z, state.t0, state.dt, None)
     offset = j_retargeted - j_rebuilt
     Z2 = Z * 0.5
     np.testing.assert_allclose(
-        eval_f(prob, Z2, state.t0, state.dt, xf_new) - eval_f(prob_rebuilt, Z2, state.t0, state.dt, None),
+        eval_f(prob, Z2, state.t0, state.dt, bc_new) - eval_f(prob_rebuilt, Z2, state.t0, state.dt, None),
         offset,
         rtol=1e-12,
         atol=1e-12,
     )
 
 
-def test_runtime_goal_leaves_a_tracking_objective_alone() -> None:
-    """Assert xf reaches the goal constraint without displacing a tracking objective's reference."""
+def test_runtime_reference_window_tracks_while_the_goal_constrains() -> None:
+    """Assert a run-time reference window aims the cost while xf still drives the goal constraint."""
     prob, ref = _tracking_problem()
-    xf = jnp.array([2.0, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, xf=xf, initial_trajectory=ref)
+    state = MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, reference=ref, initial_trajectory=ref)
 
-    # At the reference the tracking cost is zero; regulating to xf instead would not be.
+    # At the reference the tracking cost is zero, and retargeting to the run-time window, which
+    # here is that same reference, reproduces it exactly.
     np.testing.assert_allclose(prob.obj.cost(ref), 0.0, atol=1e-12)
-    np.testing.assert_allclose(eval_f(prob, state.Z, state.t0, state.dt, state.xf), 0.0, atol=1e-12)
+    np.testing.assert_allclose(state.bc.retarget(prob.obj).cost(ref), 0.0, atol=1e-12)
 
     # The goal constraint still follows the run-time goal.
     xf_new = jnp.array([1.0, 0.25, 0.0])
@@ -452,21 +456,19 @@ def test_runtime_goal_leaves_a_tracking_objective_alone() -> None:
 
 def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
     """Assert a goal that neither the objective nor a constraint consumes is refused at construction."""
-    prob, ref = _tracking_problem()
-    unconstrained = Problem(model=prob.model, obj=prob.obj, N=prob.N, integrator=RK4())
+    model = Quadrotor()
+    N = 8
+    q_ref = jnp.array([1.0, 0.0, 0.0, 0.0])
+    Q = jnp.ones(model.n).at[3:7].set(0.0)
+    stage = QuatGeodesicCost(Q=Q, R=jnp.full(model.m, 0.01), q_ref=q_ref, w=10.0, m=model.m)
+    term = QuatGeodesicCost(Q=Q, q_ref=q_ref, w=100.0, terminal=True)
+    prob = Problem(model=model, obj=Objective(stage_cost=stage, terminal_cost=term, N=N), N=N, integrator=RK4())
+    x0 = jnp.zeros(model.n).at[3].set(1.0)
 
     with pytest.raises(ValueError, match="nothing in the problem reads it"):
-        MPCState.initial(unconstrained, x0=jnp.zeros(3), dt=0.1, xf=jnp.array([2.0, 0.0, 0.0]))
+        MPCState.initial(prob, x0=x0, dt=0.1, xf=x0)
 
-    state = MPCState.initial(unconstrained, x0=jnp.zeros(3), dt=0.1, initial_trajectory=ref)
+    state = MPCState.initial(prob, x0=x0, dt=0.1)
     assert state.xf is None
     with pytest.raises(ValueError, match="built without a goal"):
-        state.with_goal(jnp.array([2.0, 0.0, 0.0]))
-
-
-def test_tracking_objective_cannot_be_retargeted_by_a_goal() -> None:
-    """Assert retargeting a tracking objective is refused rather than silently discarding its reference."""
-    prob, _ = _tracking_problem()
-    assert prob.obj.regulates_to_goal is False
-    with pytest.raises(TypeError, match="does not regulate to a goal state"):
-        prob.obj.with_goal(jnp.array([2.0, 0.0, 0.0]))
+        state.with_goal(x0)

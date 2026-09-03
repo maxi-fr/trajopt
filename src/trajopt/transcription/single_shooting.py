@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from trajopt.dynamics.rollout import rollout_states
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, retarget_problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
@@ -39,17 +39,20 @@ def _shooting_rollout(
     return X, U, t_arr
 
 
-def _cost_fn(  # noqa: PLR0913, PLR0917 -- Cost evaluation takes 6 arguments
+def _cost_fn(
     problem: Problem,
     u: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array,
     dt: float | jax.Array,
-    xf: jax.Array | None = None,
 ) -> jax.Array:
-    """Evaluate total cost as a function of the flat control vector alone."""
+    """Evaluate total cost as a function of the flat control vector alone.
+
+    `problem`'s objective is used as given, so a caller aiming it at a run-time reference window
+    retargets the problem first.
+    """
     X, U, t_arr = _shooting_rollout(problem, u, x0, t0, dt)
-    obj = problem.obj.with_goal(xf) if (xf is not None and problem.obj.regulates_to_goal) else problem.obj
+    obj = problem.obj
     stage_costs = obj.stage_cost.stage_costs(X[:-1], U, t_arr[:-1])
     term_cost = obj.terminal_cost.evaluate(X[-1], None, t_arr[-1])
     return jnp.sum(stage_costs) + term_cost
@@ -82,29 +85,27 @@ def _constraints_fn(  # noqa: PLR0913, PLR0917 -- Constraint evaluation takes 6 
 
 
 @eqx.filter_jit
-def eval_f(  # noqa: PLR0913, PLR0917 -- Objective callback takes 6 arguments
+def eval_f(
     problem: Problem,
     u: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
-    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate objective value J(u) as a scalar."""
-    return _cost_fn(problem, u, x0, t0, dt, xf)
+    return _cost_fn(problem, u, x0, t0, dt)
 
 
 @eqx.filter_jit
-def eval_grad_f(  # noqa: PLR0913, PLR0917 -- Gradient callback takes 6 arguments
+def eval_grad_f(
     problem: Problem,
     u: jax.Array,
     x0: jax.Array,
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
-    xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate objective gradient nabla J(u) of shape ((N-1)*m,)."""
-    return jax.grad(lambda u_: _cost_fn(problem, u_, x0, t0, dt, xf))(u)
+    return jax.grad(lambda u_: _cost_fn(problem, u_, x0, t0, dt))(u)
 
 
 @eqx.filter_jit
@@ -150,7 +151,7 @@ def eval_h(  # noqa: PLR0913, PLR0917 -- Hessian callback takes 8 arguments
     lam_vec = jnp.zeros(p_user, dtype=u.dtype) if lam is None else jnp.asarray(lam, dtype=u.dtype)
 
     def lagrangian(u_: jax.Array) -> jax.Array:
-        cost = _cost_fn(problem, u_, x0, t0, dt, xf)
+        cost = _cost_fn(problem, u_, x0, t0, dt)
         cons = _constraints_fn(problem, u_, x0, t0, dt, xf=xf)
         return obj_factor * cost + jnp.dot(lam_vec, cons)
 
@@ -268,12 +269,12 @@ class _SingleShootingCallback:
 
     def objective(self, u: np.ndarray) -> float:
         """Evaluate scalar objective value J(u)."""
-        return float(eval_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt, xf=self.xf))
+        return float(eval_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt))
 
     def gradient(self, u: np.ndarray) -> np.ndarray:
         """Evaluate objective gradient nabla J(u)."""
         return np.asarray(
-            eval_grad_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt, xf=self.xf),
+            eval_grad_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt),
             dtype=np.float64,
         )
 
@@ -363,6 +364,7 @@ class SingleShooting:
         m = int(problem.model.m)
 
         x0_arr, t0_arr, dt_arr, xf_val, _ = parse_solver_initial_state(state)
+        problem = retarget_problem(problem, state.bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
 
         u0 = np.asarray(state.controls, dtype=np.float64).reshape(-1)

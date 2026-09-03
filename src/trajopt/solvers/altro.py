@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.al import (
     ALConstraints,
@@ -98,6 +98,7 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
     options: SolverOptions,
     solve_kd_builder: "Callable[[Trajectory], SolveKD] | None" = None,
     u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
+    bc: BoundaryConditions | None = None,
 ) -> ALTROSolveResult:
     """Traced two-phase ALTRO driver, matching `altro_solve.jl`'s `solve!` past its unconstrained shortcut.
 
@@ -149,12 +150,17 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
         to None.
     u_bounds : tuple[jax.Array, jax.Array] | None, optional
         Forwarded to the AL phase to clip its closed-loop rollout (ticket 30). Defaults to None.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
+        objective keeps the target it was built with.
 
     Returns
     -------
     ALTROSolveResult
         See field docstrings.
     """
+    problem = retarget_problem(problem, bc)
     al_tol, kickout = _al_phase_tolerance(options)
     al_options = dataclasses.replace(options, constraint_tolerance=al_tol, kickout_max_penalty=kickout)
 
@@ -202,8 +208,13 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
 _altro_solve_jit_slot = JitCacheSlot()
 
 
-def _jit_altro_solve(
-    problem: Problem, trajectory: Trajectory, al0: ALConstraints, x0: jax.Array, options: SolverOptions
+def _jit_altro_solve(  # noqa: PLR0913, PLR0917 -- the traced core's own five arguments plus bc
+    problem: Problem,
+    trajectory: Trajectory,
+    al0: ALConstraints,
+    x0: jax.Array,
+    options: SolverOptions,
+    bc: BoundaryConditions | None = None,
 ) -> ALTROSolveResult:
     """`altro_solve`, jit-compiled and cached per `(problem identity, options)`, called from `ALTRO.solve()`'s constrained branch.
 
@@ -212,12 +223,13 @@ def _jit_altro_solve(
     `solve_kd_builder`/`u_bounds` (ticket 30's box-QP hook is not wired into the ALTRO driver),
     so those stay at `altro_solve`'s own `None` defaults here too. The returned closure is reused
     across calls with the same `problem` object and `options`, so repeated same-shape calls (e.g.
-    MPC) hit XLA's compilation cache instead of recompiling.
+    MPC) hit XLA's compilation cache instead of recompiling. `bc` is a traced argument, so a
+    run-time target that moves between those calls does not disturb the reuse.
     """
     jitted = _altro_solve_jit_slot.get_or_build(
         altro_solve, problem, key=options, options=options, solve_kd_builder=None
     )
-    return jitted(trajectory=trajectory, al0=al0, x0=x0)
+    return jitted(trajectory=trajectory, al0=al0, x0=x0, bc=bc)
 
 
 class ALTROResult(NamedTuple):
@@ -303,10 +315,10 @@ class ALTRO:
             `options.reset_duals` is False -- identical guard to `AL.solve` (finding E).
         """
         options = self.options
-        problem_eff, init_traj = build_warm_start(problem, state)
+        init_traj, bc = build_warm_start(problem, state)
 
-        if problem_eff.constraints.is_unconstrained():
-            final_traj, stats, status_int = _jit_ilqr_solve(problem_eff, init_traj, options)
+        if problem.constraints.is_unconstrained():
+            final_traj, stats, status_int = _jit_ilqr_solve(problem, init_traj, options, bc)
             status = TerminationStatus(int(status_int))
             n_iter = int(stats.iterations)
             return ALTROResult(
@@ -315,7 +327,7 @@ class ALTRO:
                 status=int(status_int),
                 message=status.name,
                 solver_status=to_solver_status(status),
-                cost=float(problem_eff.obj.cost(final_traj)),
+                cost=float(bc.retarget(problem.obj).cost(final_traj)),
                 Z=_trajectory_to_z(final_traj.X, final_traj.U),
                 info={"stats": trim_ilqr_stats(stats, n_iter), "ran_pn": False},
                 constraint_violation=0.0,  # no rows and no bounds: nothing here can be violated
@@ -324,7 +336,7 @@ class ALTRO:
             )
 
         fresh_al = ALConstraints.build(
-            problem_eff.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
+            problem.constraints, penalty_initial=options.penalty_initial, use_conic_cost=options.use_conic_cost
         )
         if state.al is not None:
             if not options.reset_duals and bool(state.al.is_conic) != options.use_conic_cost:
@@ -344,7 +356,7 @@ class ALTRO:
 
         x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
 
-        result = _jit_altro_solve(problem_eff, init_traj, init_al, x0_arr, options)
+        result = _jit_altro_solve(problem, init_traj, init_al, x0_arr, options, bc)
 
         status = TerminationStatus(int(result.status))
         n_iter_al = int(result.al_stats.iterations)
@@ -357,7 +369,7 @@ class ALTRO:
             status=int(result.status),
             message=status.name,
             solver_status=to_solver_status(status),
-            cost=float(problem_eff.obj.cost(result.trajectory)),
+            cost=float(bc.retarget(problem.obj).cost(result.trajectory)),
             Z=_trajectory_to_z(result.trajectory.X, result.trajectory.U),
             info={
                 "al_stats": trim_al_stats(result.al_stats, n_iter_al),

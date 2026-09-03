@@ -128,8 +128,7 @@ def _(Quadrotor, RK4, jnp):
     n = model.n  # 13 states
     m = model.m  # 4 motor controls
     u_hover = float(model.mass * 9.81 / 4.0)  # ~1.226 N per rotor
-
-    return N, dt, integrator, m, model, n, tf, u_hover, x0, xf
+    return N, dt, integrator, m, model, n, u_hover, x0, xf
 
 
 @app.cell(hide_code=True)
@@ -178,7 +177,7 @@ def _(N, Objective, QuatGeodesicCost, jnp, m, xf):
 
     # Stacked horizon objective
     obj = Objective(stage_cost=stage_cost, terminal_cost=term_cost, N=N)
-    return Q_stage, Q_term, R_stage, obj, stage_cost, term_cost
+    return (obj,)
 
 
 @app.cell(hide_code=True)
@@ -251,8 +250,7 @@ def _(
         QuatVecEq(n=n, qf=xf[3:7], qind=(3, 4, 5, 6)),
         N - 1,
     )
-
-    return cl, non_quat_inds, obs_center, obs_radius, u_max
+    return cl, obs_center, obs_radius, u_max
 
 
 @app.cell(hide_code=True)
@@ -298,8 +296,7 @@ def _(
 
     # Create initial MPCState
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=init_traj)
-
-    return U_init, X_init, dt_arr, init_traj, prob, state, t_init
+    return X_init, prob, state
 
 
 @app.cell(hide_code=True)
@@ -336,7 +333,7 @@ def _(ALTRO, mo, prob, state, time):
         - **Max Constraint Violation:** `{res_altro.constraint_violation:.3e}`
         """
     )
-    return altro_solver, res_altro, t_start_altro, time_altro_ms
+    return res_altro, time_altro_ms
 
 
 @app.cell
@@ -358,7 +355,7 @@ def _(Ipopt, mo, prob, state, time):
         - **Max Constraint Violation:** `{res_ipopt.constraint_violation:.3e}`
         """
     )
-    return ipopt_solver, res_ipopt, t_start_ipopt, time_ipopt_ms
+    return res_ipopt, time_ipopt_ms
 
 
 @app.cell
@@ -380,7 +377,7 @@ def _(mo, res_altro, res_ipopt, time_altro_ms, time_ipopt_ms):
         Ipopt navigates the non-convex spherical obstacle smoothly by discovering a banking curved arc that grazes the keep-out boundary while satisfying actuator thrust limits.
         """
     )
-    return (speedup,)
+    return
 
 
 @app.cell
@@ -469,31 +466,11 @@ def _(X_init, np, obs_center, obs_radius, plt, res_altro, res_ipopt, x0, xf):
 
     plt.tight_layout()
     fig_3d
-    return (
-        ax_3d,
-        fig_3d,
-        traj_altro,
-        traj_ipopt,
-        u_grid,
-        v_grid,
-        xs_obs,
-        ys_obs,
-        zs_obs,
-    )
+    return
 
 
 @app.cell
-def _(
-    N,
-    dt,
-    np,
-    obs_center,
-    obs_radius,
-    plt,
-    res_ipopt,
-    u_hover,
-    u_max,
-):
+def _(N, dt, np, obs_center, obs_radius, plt, res_ipopt, u_hover, u_max):
     # Time history subplots
     opt_traj = res_ipopt.trajectory
     t_knots = np.linspace(0.0, (N - 1) * dt, N)
@@ -578,24 +555,7 @@ def _(
 
     plt.tight_layout()
     fig_profiles
-    return (
-        ax_obs,
-        ax_q,
-        ax_u,
-        ax_v,
-        axes,
-        dist_to_obs,
-        fig_profiles,
-        motor_colors,
-        opt_traj,
-        omega,
-        pos,
-        quat,
-        t_ctrl,
-        t_knots,
-        thrusts,
-        vel,
-    )
+    return
 
 
 @app.cell(hide_code=True)

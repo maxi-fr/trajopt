@@ -1,3 +1,4 @@
+import dataclasses
 import statistics
 import time
 from collections.abc import Mapping, Sequence
@@ -314,7 +315,7 @@ def dubins_corridor_benchmark(  # noqa: PLR0913 -- benchmark problem factory par
     cl.add_constraint(GoalConstraint(n=n, xf=xf_arr), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
-    state = MPCState.initial(prob, x0=x0_arr, dt=dt, xf=xf_arr, initial_trajectory=ref_traj)
+    state = MPCState.initial(prob, x0=x0_arr, dt=dt, reference=ref_traj, initial_trajectory=ref_traj)
 
     info = {
         "name": "dubins_corridor_tracking",
@@ -368,18 +369,19 @@ def measure_derivative_evaluations(
     t0 = state.t0
     dt = state.dt
     xf = state.xf
+    bc = state.bc
     x0 = state.x0
     lam = state.lam
 
     # Warmup JIT compilation
-    _ = eval_grad_f(problem, z, t0, dt, xf).block_until_ready()
+    _ = eval_grad_f(problem, z, t0, dt, bc).block_until_ready()
     _ = eval_jac_g(problem, z, x0, t0, dt, xf=xf).block_until_ready()
-    _ = eval_h(problem, z, t0=t0, dt=dt, obj_factor=1.0, lam=lam, xf=xf).block_until_ready()
+    _ = eval_h(problem, z, t0=t0, dt=dt, obj_factor=1.0, lam=lam, bc=bc).block_until_ready()
 
     # Gradient timing
     t0_time = time.perf_counter()
     for _ in range(num_evals):
-        _ = eval_grad_f(problem, z, t0, dt, xf).block_until_ready()
+        _ = eval_grad_f(problem, z, t0, dt, bc).block_until_ready()
     t_grad = (time.perf_counter() - t0_time) / num_evals
 
     # Jacobian timing
@@ -391,7 +393,7 @@ def measure_derivative_evaluations(
     # Hessian timing
     t0_time = time.perf_counter()
     for _ in range(num_evals):
-        _ = eval_h(problem, z, t0=t0, dt=dt, obj_factor=1.0, lam=lam, xf=xf).block_until_ready()
+        _ = eval_h(problem, z, t0=t0, dt=dt, obj_factor=1.0, lam=lam, bc=bc).block_until_ready()
     t_hess = (time.perf_counter() - t0_time) / num_evals
 
     t_total_deriv = t_grad + t_jac + t_hess
@@ -500,18 +502,7 @@ def measure_closed_loop_mpc(
     dt_val = float(initial_state.dt[0]) if initial_state.dt.ndim > 0 else float(initial_state.dt)
     model = problem.model
 
-    curr_state = MPCState(
-        x0=initial_state.x0,
-        t0=initial_state.t0,
-        xf=initial_state.xf,
-        lam=initial_state.lam,
-        mu=initial_state.mu,
-        Z=cold_res.Z,
-        dt=initial_state.dt,
-        n=initial_state.n,
-        m=initial_state.m,
-        N=initial_state.N,
-    )
+    curr_state = dataclasses.replace(initial_state, Z=cold_res.Z)
 
     durations: list[float] = []
     t_loop_start = time.perf_counter()
@@ -590,7 +581,7 @@ def _score(problem: Problem, state: MPCState, Z: jax.Array) -> tuple[float, floa
     Z_arr = jnp.asarray(Z, dtype=jnp.float64)
     dt_arr = jnp.broadcast_to(jnp.asarray(state.dt, dtype=jnp.float64), (N - 1,))
 
-    cost = float(eval_f(problem, Z_arr, state.t0, dt_arr, state.xf))
+    cost = float(eval_f(problem, Z_arr, state.t0, dt_arr, state.bc))
     viol = compute_constraint_violation(problem, Z_arr, state.x0, t0=state.t0, dt=dt_arr, xf=state.xf)
     return cost, viol
 

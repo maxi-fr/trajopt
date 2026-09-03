@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.23.8"
+__generated_with = "0.24.0"
 app = marimo.App(width="medium")
 
 
 @app.cell
-def __():
+def _():
     import time
 
     import jax
@@ -38,7 +38,6 @@ def __():
         StateBound,
         TrackingObjective,
         Trajectory,
-        jax,
         jnp,
         mo,
         np,
@@ -48,64 +47,60 @@ def __():
 
 
 @app.cell
-def __(mo):
-    mo.md(
-        r"""
-        # Nonholonomic Dubins Car: Corridor Tracking & Optimal Control
+def _(mo):
+    mo.md(r"""
+    # Nonholonomic Dubins Car: Corridor Tracking & Optimal Control
 
-        This notebook demonstrates trajectory optimization for a **nonholonomic Dubins car** navigating through a constrained lateral corridor using `trajopt`.
+    This notebook demonstrates trajectory optimization for a **nonholonomic Dubins car** navigating through a constrained lateral corridor using `trajopt`.
 
-        We formulate a trajectory tracking problem where the nominal reference path extends outside allowable corridor boundaries, forcing the optimizer to find an optimal dynamically feasible trajectory that rides along the boundary walls. We solve the problem using **ALTRO** (Augmented Lagrangian Trajectory Optimizer in native JAX) and compare it against **Ipopt** (sparse nonlinear interior-point solver).
+    We formulate a trajectory tracking problem where the nominal reference path extends outside allowable corridor boundaries, forcing the optimizer to find an optimal dynamically feasible trajectory that rides along the boundary walls. We solve the problem using **ALTRO** (Augmented Lagrangian Trajectory Optimizer in native JAX) and compare it against **Ipopt** (sparse nonlinear interior-point solver).
 
-        ---
+    ---
 
-        ## 1. System Kinematics & Mathematical Model
+    ## 1. System Kinematics & Mathematical Model
 
-        The Dubins car is a classical nonholonomic vehicle model representing planar wheeled mobile robots with rolling-without-slipping kinematics.
+    The Dubins car is a classical nonholonomic vehicle model representing planar wheeled mobile robots with rolling-without-slipping kinematics.
 
-        ### State and Control Vectors
-        $$\mathbf{x} = \begin{bmatrix} x \\ y \\ \theta \end{bmatrix} \in \mathbb{R}^3, \qquad \mathbf{u} = \begin{bmatrix} v \\ \omega \end{bmatrix} \in \mathbb{R}^2$$
+    ### State and Control Vectors
+    $$\mathbf{x} = \begin{bmatrix} x \\ y \\ \theta \end{bmatrix} \in \mathbb{R}^3, \qquad \mathbf{u} = \begin{bmatrix} v \\ \omega \end{bmatrix} \in \mathbb{R}^2$$
 
-        - $x, y \in \mathbb{R}$: Cartesian coordinates of the vehicle reference point in the global inertial frame ($\text{m}$).
-        - $\theta \in [-\pi, \pi]$: Vehicle yaw angle / heading orientation ($\text{rad}$).
-        - $v \in \mathbb{R}$: Forward linear velocity ($\text{m/s}$).
-        - $\omega \in \mathbb{R}$: Angular turning rate / steering velocity ($\text{rad/s}$).
+    - $x, y \in \mathbb{R}$: Cartesian coordinates of the vehicle reference point in the global inertial frame ($\text{m}$).
+    - $\theta \in [-\pi, \pi]$: Vehicle yaw angle / heading orientation ($\text{rad}$).
+    - $v \in \mathbb{R}$: Forward linear velocity ($\text{m/s}$).
+    - $\omega \in \mathbb{R}$: Angular turning rate / steering velocity ($\text{rad/s}$).
 
-        ### Continuous-Time Kinematic Equations
-        The nonholonomic constraint forbids lateral velocity ($\dot{y}\cos\theta - \dot{x}\sin\theta = 0$). The equations of motion $\dot{\mathbf{x}} = \mathbf{f}(\mathbf{x}, \mathbf{u})$ are:
-        $$\begin{aligned}
-        \dot{x}(t) &= v(t) \cos\theta(t) \\
-        \dot{y}(t) &= v(t) \sin\theta(t) \\
-        \dot{\theta}(t) &= \omega(t)
-        \end{aligned}$$
+    ### Continuous-Time Kinematic Equations
+    The nonholonomic constraint forbids lateral velocity ($\dot{y}\cos\theta - \dot{x}\sin\theta = 0$). The equations of motion $\dot{\mathbf{x}} = \mathbf{f}(\mathbf{x}, \mathbf{u})$ are:
+    $$\begin{aligned}
+    \dot{x}(t) &= v(t) \cos\theta(t) \\
+    \dot{y}(t) &= v(t) \sin\theta(t) \\
+    \dot{\theta}(t) &= \omega(t)
+    \end{aligned}$$
 
-        We integrate the continuous dynamics across $N$ discrete knot points with step duration $\Delta t$ using an explicit 4th-order Runge-Kutta integrator (`RK4`).
-        """
-    )
+    We integrate the continuous dynamics across $N$ discrete knot points with step duration $\Delta t$ using an explicit 4th-order Runge-Kutta integrator (`RK4`).
+    """)
     return
 
 
 @app.cell
-def __(mo):
-    mo.md(
-        r"""
-        ## 2. Trajectory Tracking Formulation
+def _(mo):
+    mo.md(r"""
+    ## 2. Trajectory Tracking Formulation
 
-        ### Tracking Cost Function
-        We define a time-varying quadratic tracking objective with diagonal weights $\mathbf{Q}$, $\mathbf{R}$, and terminal weight $\mathbf{Q}_f$:
-        $$J(\mathbf{X}, \mathbf{U}) = \frac{1}{2} (\mathbf{x}_{N-1} - \mathbf{x}_{\text{ref}, N-1})^T \mathbf{Q}_f (\mathbf{x}_{N-1} - \mathbf{x}_{\text{ref}, N-1}) + \sum_{k=0}^{N-2} \left[ \frac{1}{2} (\mathbf{x}_k - \mathbf{x}_{\text{ref}, k})^T \mathbf{Q} (\mathbf{x}_k - \mathbf{x}_{\text{ref}, k}) + \frac{1}{2} (\mathbf{u}_k - \mathbf{u}_{\text{ref}, k})^T \mathbf{R} (\mathbf{u}_k - \mathbf{u}_{\text{ref}, k}) \right]$$
+    ### Tracking Cost Function
+    We define a time-varying quadratic tracking objective with diagonal weights $\mathbf{Q}$, $\mathbf{R}$, and terminal weight $\mathbf{Q}_f$:
+    $$J(\mathbf{X}, \mathbf{U}) = \frac{1}{2} (\mathbf{x}_{N-1} - \mathbf{x}_{\text{ref}, N-1})^T \mathbf{Q}_f (\mathbf{x}_{N-1} - \mathbf{x}_{\text{ref}, N-1}) + \sum_{k=0}^{N-2} \left[ \frac{1}{2} (\mathbf{x}_k - \mathbf{x}_{\text{ref}, k})^T \mathbf{Q} (\mathbf{x}_k - \mathbf{x}_{\text{ref}, k}) + \frac{1}{2} (\mathbf{u}_k - \mathbf{u}_{\text{ref}, k})^T \mathbf{R} (\mathbf{u}_k - \mathbf{u}_{\text{ref}, k}) \right]$$
 
-        ### Infeasible Reference Trajectory
-        To test active constraint enforcement, the nominal reference trajectory features a sinusoidal lateral bulge of amplitude $y_{\text{bulge}} = 1.0\,\text{m}$:
-        $$\mathbf{x}_{\text{ref}}(s) = \begin{bmatrix} x_0 + s (x_f - x_0) \\ y_{\text{bulge}} \sin(\pi s) \\ 0 \end{bmatrix}, \quad s \in [0, 1]$$
-        This reference violates the corridor boundary $|y| \le 0.5\,\text{m}$, requiring the solver to resolve the trade-off between reference tracking and hard constraint satisfaction.
-        """
-    )
+    ### Infeasible Reference Trajectory
+    To test active constraint enforcement, the nominal reference trajectory features a sinusoidal lateral bulge of amplitude $y_{\text{bulge}} = 1.0\,\text{m}$:
+    $$\mathbf{x}_{\text{ref}}(s) = \begin{bmatrix} x_0 + s (x_f - x_0) \\ y_{\text{bulge}} \sin(\pi s) \\ 0 \end{bmatrix}, \quad s \in [0, 1]$$
+    This reference violates the corridor boundary $|y| \le 0.5\,\text{m}$, requiring the solver to resolve the trade-off between reference tracking and hard constraint satisfaction.
+    """)
     return
 
 
 @app.cell
-def __(Trajectory, jnp, np):
+def _(Trajectory, jnp, np):
     # Horizon and time discretization
     N = 25
     dt = 0.1
@@ -133,49 +128,31 @@ def __(Trajectory, jnp, np):
         t=jnp.asarray(t_span),
         dt=dt_arr,
     )
-    return (
-        N,
-        U_ref,
-        X_ref,
-        dt,
-        dt_arr,
-        ref_trajectory,
-        s_arc,
-        t_span,
-        theta_ref_vals,
-        v_ref_nominal,
-        x0,
-        x_ref_vals,
-        xf,
-        y_ref_bulge,
-        y_ref_vals,
-    )
+    return N, X_ref, dt, ref_trajectory, t_span, x0, xf, y_ref_bulge
 
 
 @app.cell
-def __(mo):
-    mo.md(
-        r"""
-        ## 3. Constraints Definition
+def _(mo):
+    mo.md(r"""
+    ## 3. Constraints Definition
 
-        The optimization problem is constrained by physical corridor bounds, actuator limits, and terminal arrival:
+    The optimization problem is constrained by physical corridor bounds, actuator limits, and terminal arrival:
 
-        1. **Lateral Corridor Limits (`StateBound`)**:
-           $$-0.5\,\text{m} \le y_k \le 0.5\,\text{m}, \quad \forall k \in \{0, \dots, N-1\}$$
-           with longitudinal domain $-0.5 \le x_k \le 3.0$ and unconstrained heading $\theta_k \in (-\infty, \infty)$.
+    1. **Lateral Corridor Limits (`StateBound`)**:
+       $$-0.5\,\text{m} \le y_k \le 0.5\,\text{m}, \quad \forall k \in \{0, \dots, N-1\}$$
+       with longitudinal domain $-0.5 \le x_k \le 3.0$ and unconstrained heading $\theta_k \in (-\infty, \infty)$.
 
-        2. **Actuator Velocity & Yaw Rate Bounds (`ControlBound`)**:
-           $$0.0\,\text{m/s} \le v_k \le 2.0\,\text{m/s}, \qquad -1.5\,\text{rad/s} \le \omega_k \le 1.5\,\text{rad/s}, \quad \forall k \in \{0, \dots, N-2\}$$
+    2. **Actuator Velocity & Yaw Rate Bounds (`ControlBound`)**:
+       $$0.0\,\text{m/s} \le v_k \le 2.0\,\text{m/s}, \qquad -1.5\,\text{rad/s} \le \omega_k \le 1.5\,\text{rad/s}, \quad \forall k \in \{0, \dots, N-2\}$$
 
-        3. **Terminal Goal Equality (`GoalConstraint`)**:
-           $$\mathbf{x}_{N-1} - \mathbf{x}_f = \mathbf{0}$$
-        """
-    )
+    3. **Terminal Goal Equality (`GoalConstraint`)**:
+       $$\mathbf{x}_{N-1} - \mathbf{x}_f = \mathbf{0}$$
+    """)
     return
 
 
 @app.cell
-def __(
+def _(
     ConstraintList,
     ControlBound,
     DubinsCar,
@@ -233,49 +210,31 @@ def __(
         problem,
         x0=x0,
         dt=dt,
-        xf=xf,
+        reference=ref_trajectory,
         initial_trajectory=ref_trajectory,
     )
-    return (
-        Q,
-        Qf,
-        R,
-        constraints,
-        initial_state,
-        model,
-        obj,
-        omega_max,
-        problem,
-        u_max,
-        u_min,
-        v_max,
-        x_max,
-        x_min,
-        y_corridor_bound,
-    )
+    return initial_state, omega_max, problem, v_max, y_corridor_bound
 
 
 @app.cell
-def __(mo):
-    mo.md(
-        r"""
-        ## 4. Solving with Native ALTRO & Sparse Ipopt
+def _(mo):
+    mo.md(r"""
+    ## 4. Solving with Native ALTRO & Sparse Ipopt
 
-        ### ALTRO (Augmented Lagrangian Trajectory Optimizer)
-        ALTRO solves constrained trajectory optimization problems via:
-        1. **iLQR Inner Loop**: Fast Riccati backward-forward passes utilizing exact JAX dynamics Jacobians.
-        2. **Augmented Lagrangian Outer Loop**: Dual multiplier and penalty updates for active state/control bounds.
-        3. **Projected Newton (PN) Polish**: Multiplier projection for high-accuracy terminal constraint satisfaction.
+    ### ALTRO (Augmented Lagrangian Trajectory Optimizer)
+    ALTRO solves constrained trajectory optimization problems via:
+    1. **iLQR Inner Loop**: Fast Riccati backward-forward passes utilizing exact JAX dynamics Jacobians.
+    2. **Augmented Lagrangian Outer Loop**: Dual multiplier and penalty updates for active state/control bounds.
+    3. **Projected Newton (PN) Polish**: Multiplier projection for high-accuracy terminal constraint satisfaction.
 
-        ### Ipopt (Interior-Point Optimizer)
-        Ipopt transcribes the problem into a large sparse nonlinear program (NLP) and solves the KKT system with MUMPS.
-        """
-    )
+    ### Ipopt (Interior-Point Optimizer)
+    Ipopt transcribes the problem into a large sparse nonlinear program (NLP) and solves the KKT system with MUMPS.
+    """)
     return
 
 
 @app.cell
-def __(ALTRO, initial_state, mo, problem, time):
+def _(ALTRO, initial_state, mo, problem, time):
     altro_solver = ALTRO()
 
     # Discarded solve for JIT warmup
@@ -296,11 +255,11 @@ def __(ALTRO, initial_state, mo, problem, time):
         - **Max Constraint Violation:** `{res_altro.constraint_violation:.3e}`
         """
     )
-    return altro_solver, res_altro, t_start_altro, time_altro_ms
+    return res_altro, time_altro_ms
 
 
 @app.cell
-def __(Ipopt, initial_state, mo, problem, time):
+def _(Ipopt, initial_state, mo, problem, time):
     ipopt_solver = Ipopt(options={"print_level": 0})
 
     # Timed solve
@@ -318,11 +277,11 @@ def __(Ipopt, initial_state, mo, problem, time):
         - **Max Constraint Violation:** `{res_ipopt.constraint_violation:.3e}`
         """
     )
-    return ipopt_solver, res_ipopt, t_start_ipopt, time_ipopt_ms
+    return res_ipopt, time_ipopt_ms
 
 
 @app.cell
-def __(mo, res_altro, res_ipopt, time_altro_ms, time_ipopt_ms):
+def _(mo, res_altro, res_ipopt, time_altro_ms, time_ipopt_ms):
     speedup = time_ipopt_ms / time_altro_ms if time_altro_ms > 0 else 1.0
 
     mo.md(
@@ -340,11 +299,11 @@ def __(mo, res_altro, res_ipopt, time_altro_ms, time_ipopt_ms):
         Both solvers arrive at the same optimal trajectory. ALTRO achieves fast solve times by exploiting the block-tridiagonal Riccati structure in native JAX without calling external C binaries.
         """
     )
-    return (speedup,)
+    return
 
 
 @app.cell
-def __(
+def _(
     X_ref,
     np,
     plt,
@@ -353,6 +312,7 @@ def __(
     x0,
     xf,
     y_corridor_bound,
+    y_ref_bulge,
 ):
     fig_path, ax_path = plt.subplots(figsize=(11, 5.5), dpi=120)
 
@@ -459,33 +419,11 @@ def __(
 
     plt.tight_layout()
     fig_path
-    return (
-        arrow_len,
-        ax_path,
-        dx,
-        dy,
-        fig_path,
-        k,
-        step_skip,
-        thetak,
-        traj_altro,
-        traj_ipopt,
-        x_grid,
-        xk,
-        yk,
-    )
+    return
 
 
 @app.cell
-def __(
-    omega_max,
-    plt,
-    res_altro,
-    res_ipopt,
-    t_span,
-    v_max,
-    y_corridor_bound,
-):
+def _(omega_max, plt, res_altro, res_ipopt, t_span, v_max, y_corridor_bound):
     fig_profiles, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=120)
 
     t_knots = t_span
@@ -533,7 +471,9 @@ def __(
     # Subplot 3: Forward Velocity v(t) vs Bounds
     ax_v = axes[1, 0]
     ax_v.step(t_ctrl, U_altro[:, 0], where="post", color="#1f77b4", linewidth=2.4, label=r"ALTRO $v(t)$")
-    ax_v.step(t_ctrl, U_ipopt[:, 0], where="post", color="#2ca02c", linestyle="--", linewidth=1.8, label=r"Ipopt $v(t)$")
+    ax_v.step(
+        t_ctrl, U_ipopt[:, 0], where="post", color="#2ca02c", linestyle="--", linewidth=1.8, label=r"Ipopt $v(t)$"
+    )
     ax_v.axhline(v_max, color="#c0392b", linestyle=":", linewidth=1.6, label=f"Max Velocity ({v_max} m/s)")
     ax_v.axhline(0.0, color="#7f8c8d", linestyle=":", linewidth=1.2, label="Min Velocity (0.0 m/s)")
     ax_v.set_title(r"Forward Linear Velocity $v(t)$", fontweight="bold")
@@ -549,9 +489,7 @@ def __(
         t_ctrl, U_ipopt[:, 1], where="post", color="#2ca02c", linestyle="--", linewidth=1.8, label=r"Ipopt $\omega(t)$"
     )
     ax_w.axhline(omega_max, color="#c0392b", linestyle=":", linewidth=1.6, label=f"Max Yaw Rate (+{omega_max} rad/s)")
-    ax_w.axhline(
-        -omega_max, color="#c0392b", linestyle=":", linewidth=1.6, label=f"Min Yaw Rate (-{omega_max} rad/s)"
-    )
+    ax_w.axhline(-omega_max, color="#c0392b", linestyle=":", linewidth=1.6, label=f"Min Yaw Rate (-{omega_max} rad/s)")
     ax_w.set_title(r"Steering Angular Rate $\omega(t)$", fontweight="bold")
     ax_w.set_xlabel("Time (s)")
     ax_w.set_ylabel("Yaw Rate (rad/s)")
@@ -560,34 +498,19 @@ def __(
 
     plt.tight_layout()
     fig_profiles
-    return (
-        U_altro,
-        U_ipopt,
-        X_altro,
-        X_ipopt,
-        ax_th,
-        ax_v,
-        ax_w,
-        ax_y,
-        axes,
-        fig_profiles,
-        t_ctrl,
-        t_knots,
-    )
+    return
 
 
 @app.cell
-def __(mo):
-    mo.md(
-        r"""
-        ---
-        ## 6. Takeaways and Conclusion
+def _(mo):
+    mo.md(r"""
+    ---
+    ## 6. Takeaways and Conclusion
 
-        1. **Active Boundary Clamping**: Although the tracking reference attempts to steer to $y = 1.0\,\text{m}$, the optimal control problem clamps the vehicle along the $y = 0.5\,\text{m}$ corridor wall, with zero bound violation.
-        2. **Nonholonomic Steering Strategy**: To track the reference while respecting kinematics, the Dubins car steers upwards until reaching the boundary wall, drives straight tangentially along the corridor limit ($\theta \approx 0$), and steers smoothly back down to terminate at $\mathbf{x}_f = [2.0, 0.0, 0.0]^T$.
-        3. **Solver Equivalence & Efficiency**: Both `ALTRO` and `Ipopt` converge to the identical optimal trajectory ($J \approx 16.77$), with native JAX `ALTRO` executing significantly faster without external NLP compilation overhead.
-        """
-    )
+    1. **Active Boundary Clamping**: Although the tracking reference attempts to steer to $y = 1.0\,\text{m}$, the optimal control problem clamps the vehicle along the $y = 0.5\,\text{m}$ corridor wall, with zero bound violation.
+    2. **Nonholonomic Steering Strategy**: To track the reference while respecting kinematics, the Dubins car steers upwards until reaching the boundary wall, drives straight tangentially along the corridor limit ($\theta \approx 0$), and steers smoothly back down to terminate at $\mathbf{x}_f = [2.0, 0.0, 0.0]^T$.
+    3. **Solver Equivalence & Efficiency**: Both `ALTRO` and `Ipopt` converge to the identical optimal trajectory ($J \approx 16.77$), with native JAX `ALTRO` executing significantly faster without external NLP compilation overhead.
+    """)
     return
 
 

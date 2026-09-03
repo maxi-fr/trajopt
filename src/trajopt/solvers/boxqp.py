@@ -435,8 +435,8 @@ class BoxQP:
     def solve(self, problem: Problem, state: MPCState) -> BoxQPSolveResult:
         """Run the traced AL outer loop with a box-QP inner backward pass, boundary-converting the result."""
         options = self.options
-        problem_eff, init_traj = build_warm_start(problem, state)
-        constraints = problem_eff.constraints
+        init_traj, bc = build_warm_start(problem, state)
+        constraints = problem.constraints
 
         lo, hi = extract_uniform_control_bounds(constraints)
         solve_kd_builder = _cached_control_bound_solve_kd_builder(
@@ -458,13 +458,13 @@ class BoxQP:
             init_al = fresh_al
 
         final_traj, final_al, stats, status_int = _jit_al_solve(
-            problem_eff, init_traj, init_al, options, solve_kd_builder=solve_kd_builder, u_bounds=(lo, hi)
+            problem, init_traj, init_al, options, solve_kd_builder=solve_kd_builder, u_bounds=(lo, hi), bc=bc
         )
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
-        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem_eff.constraints, problem_eff.model, final_traj)
-        final_cost = problem_eff.obj.cost(final_traj) + al_cost(final_al, C)
+        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem.constraints, problem.model, final_traj)
+        final_cost = bc.retarget(problem.obj).cost(final_traj) + al_cost(final_al, C)
 
         trimmed_stats = ALStats(
             iterations=stats.iterations,

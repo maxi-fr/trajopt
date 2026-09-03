@@ -44,7 +44,7 @@ def test_single_shooting_dimensions() -> None:
     x0 = jnp.array([0.0, 0.0])
     u = jnp.zeros(n_u)
     assert eval_g(prob, u, x0, t0=0.0, dt=dt, xf=xf).shape == (p_user,)
-    assert eval_grad_f(prob, u, x0, t0=0.0, dt=dt, xf=xf).shape == (n_u,)
+    assert eval_grad_f(prob, u, x0, t0=0.0, dt=dt).shape == (n_u,)
     assert eval_jac_g(prob, u, x0, t0=0.0, dt=dt, xf=xf).shape == (p_user * n_u,)
 
 

@@ -388,7 +388,7 @@ def test_unconstrained_solve() -> None:
 def test_hessian_with_unstacked_stage_cost_at_colliding_horizon() -> None:
     """Assert the Lagrangian Hessian builds when the control dimension equals N - 1."""
     prob, state, _ = quadrotor_obstacle_benchmark(N=5)  # m == 4 == N - 1
-    hess_val = hessian(prob, state.Z, dt=state.dt, xf=state.xf)
+    hess_val = hessian(prob, state.Z, dt=state.dt, bc=state.bc)
 
     hess_rows, _ = hessian_sparsity_pattern(prob.N, prob.model.n, prob.model.m)
     assert hess_val.shape == hess_rows.shape

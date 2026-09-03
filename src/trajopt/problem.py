@@ -1,3 +1,4 @@
+import dataclasses
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,74 @@ if TYPE_CHECKING:
     from trajopt.expansions import Expansion
     from trajopt.solvers.al import ALConstraints
     from trajopt.transcription.result import Solver, SolverStatus
+
+
+class BoundaryConditions(eqx.Module):
+    """Traced boundary data of one solve: where the trajectory starts, when, and what it aims at.
+
+    Every field is an array leaf and none is `eqx.field(static=True)`, so an instance can be
+    handed to a jitted solver core as an ordinary traced argument: moving the target between MPC
+    steps changes values, not the pytree, and forces no recompile. That is the whole point of the
+    type, and the reason the target no longer lives fused into the Objective's linear terms.
+
+    A goal point is just a constant reference window, so one mechanism serves regulation and
+    tracking alike.
+
+    Parameters
+    ----------
+    x0 : jax.Array
+        Initial state of shape (n,).
+    t0 : jax.Array
+        Initial timestamp of shape ().
+    X_ref : jax.Array | None
+        Reference states of shape (N, n) the quadratic objective is retargeted onto, or None to
+        leave the objective at the reference it was built with.
+    U_ref : jax.Array | None
+        Reference controls of shape (N - 1, m), paired with X_ref and None exactly when it is.
+    """
+
+    x0: jax.Array
+    t0: jax.Array
+    X_ref: jax.Array | None = None
+    U_ref: jax.Array | None = None
+
+    @property
+    def xf(self) -> jax.Array | None:
+        """Terminal reference state of shape (n,), the run-time goal constraints read, or None."""
+        return None if self.X_ref is None else self.X_ref[-1]
+
+    def retarget(self, obj: Objective) -> Objective:
+        """Objective aimed at this reference window, or `obj` unchanged when there is none."""
+        if self.X_ref is None or self.U_ref is None or not obj.is_quadratic:
+            return obj
+        return obj.with_reference(self.X_ref, self.U_ref)
+
+
+def retarget_to_goal(obj: Objective, xf: jax.Array | None) -> Objective:
+    """Objective regulated to the run-time goal xf of shape (n,), held constant over the horizon.
+
+    A goal point is a constant reference window, so regulation and tracking go through the one
+    `with_reference` mechanism. Returns `obj` untouched when there is no goal, or when the cost is
+    not quadratic and so exposes no linear terms to retarget.
+    """
+    if xf is None or not obj.is_quadratic:
+        return obj
+    xf_arr = jnp.asarray(xf)
+    X_ref = jnp.broadcast_to(xf_arr, (obj.N, xf_arr.shape[-1]))
+    U_ref = jnp.zeros((obj.N - 1, obj.m), dtype=xf_arr.dtype)
+    return obj.with_reference(X_ref, U_ref)
+
+
+def retarget_problem(problem: "Problem", bc: BoundaryConditions | None) -> "Problem":
+    """Problem whose objective is aimed at `bc`'s reference window, unchanged when there is none.
+
+    Called at the top of every traced solver core: `bc` arrives as a traced argument, so the
+    rebuilt objective holds tracers and the core compiles once for every target.
+    """
+    if bc is None:
+        return problem
+    obj = bc.retarget(problem.obj)
+    return problem if obj is problem.obj else eqx.tree_at(lambda p: p.obj, problem, obj)
 
 
 class Problem(eqx.Module):
@@ -113,40 +182,23 @@ class Problem(eqx.Module):
             solver_status if solver_status is not None else normalize_status(success=res.success, message=res.message)
         )
 
-        return MPCState(
-            x0=state.x0,
-            t0=state.t0,
-            xf=state.xf,
-            lam=lam,
-            mu=mu,
-            Z=res.Z,
-            dt=state.dt,
-            n=state.n,
-            m=state.m,
-            N=state.N,
-            status=status,
-            al=al if al is not None else state.al,
-        )
+        return dataclasses.replace(state, lam=lam, mu=mu, Z=res.Z, status=status, al=al if al is not None else state.al)
 
     def cost(self, state: "MPCState") -> jax.Array:
         """Evaluate objective scalar cost J(state.Z) for this problem at `state`."""
         from trajopt.transcription.transcription import eval_f  # noqa: PLC0415 -- avoid circular import
 
-        return eval_f(self, state.Z, state.t0, state.dt, state.xf)
+        return eval_f(self, state.Z, state.t0, state.dt, state.bc)
 
 
 class MPCState(eqx.Module):
-    """Per-step MPC state holding initial condition, goal, trajectory, multipliers, and metadata.
+    """Per-step MPC state holding boundary conditions, trajectory, multipliers, and metadata.
 
     Parameters
     ----------
-    x0 : jax.Array
-        Initial state condition of shape (n,).
-    t0 : jax.Array
-        Initial timestamp scalar of shape ().
-    xf : jax.Array | None
-        Run-time goal state vector of shape (n,), or None when the goal is baked into the
-        objective and the constraints at build time.
+    bc : BoundaryConditions
+        Traced boundary data: initial state x0 of shape (n,), timestamp t0, and the optional
+        reference window the objective and any GoalConstraint are retargeted onto.
     lam : jax.Array
         Constraint dual multipliers vector of shape (P,).
     mu : jax.Array
@@ -171,9 +223,7 @@ class MPCState(eqx.Module):
         carried as a pytree field so AL warm-starts survive across MPC steps.
     """
 
-    x0: jax.Array
-    t0: jax.Array
-    xf: jax.Array | None
+    bc: BoundaryConditions
     lam: jax.Array
     mu: jax.Array
     Z: jax.Array
@@ -184,14 +234,30 @@ class MPCState(eqx.Module):
     status: "SolverStatus | None" = eqx.field(static=True, default=None)
     al: "ALConstraints | None" = None
 
+    @property
+    def x0(self) -> jax.Array:
+        """Initial state of shape (n,), delegated to the boundary conditions."""
+        return self.bc.x0
+
+    @property
+    def t0(self) -> jax.Array:
+        """Initial timestamp of shape (), delegated to the boundary conditions."""
+        return self.bc.t0
+
+    @property
+    def xf(self) -> jax.Array | None:
+        """Run-time goal of shape (n,) -- the last knot of the reference window -- or None."""
+        return self.bc.xf
+
     @classmethod
-    def initial(  # noqa: PLR0913 -- Initial state factory takes 7 arguments
+    def initial(  # noqa: PLR0913 -- Initial state factory takes 8 arguments
         cls,
         problem: Problem,
         x0: jax.Array | Sequence[float],
         *,
         t0: float | jax.Array = 0.0,
         xf: jax.Array | Sequence[float] | None = None,
+        reference: Trajectory | None = None,
         dt: float | jax.Array = 0.05,
         initial_trajectory: Trajectory | None = None,
         initial_z: jax.Array | None = None,
@@ -207,13 +273,13 @@ class MPCState(eqx.Module):
         t0 : float | jax.Array, optional
             Initial timestamp. Defaults to 0.0.
         xf : jax.Array | Sequence[float] | None, optional
-            Run-time goal state vector of shape (n,), read by a goal-regulating objective and by
-            any GoalConstraint. Defaults to None, leaving both at their build-time goal.
-
-        Raises
-        ------
-        ValueError
-            If xf is given but nothing in the problem reads it.
+            Run-time goal state of shape (n,), held constant over the horizon as the reference
+            window a quadratic objective is retargeted onto and any GoalConstraint reads.
+            Defaults to None, leaving both at their build-time target.
+        reference : Trajectory | None, optional
+            Full reference window of N knot points, used in place of a constant goal when the
+            target varies over the horizon. Its last state serves as the run-time goal. Defaults
+            to None.
         dt : float | jax.Array, optional
             Step duration (scalar or array of shape (N - 1,)). Defaults to 0.05.
         initial_trajectory : Trajectory | None, optional
@@ -225,6 +291,12 @@ class MPCState(eqx.Module):
         -------
         MPCState
             Initial per-step state instance.
+
+        Raises
+        ------
+        ValueError
+            If a target is given but nothing in the problem reads it, or if both xf and
+            reference are given.
         """
         N = int(problem.N)
         n = int(problem.model.n)
@@ -234,18 +306,28 @@ class MPCState(eqx.Module):
         t0_arr = jnp.asarray(t0, dtype=jnp.float64)
         dt_arr = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N - 1,))
 
-        if xf is None:
-            xf_arr = None
-        elif problem.obj.regulates_to_goal or problem.constraints.has_goal_constraint():
-            xf_arr = jnp.asarray(xf, dtype=jnp.float64)
-        else:
+        if xf is not None and reference is not None:
+            msg = "Pass either xf (a constant goal) or reference (a window), not both."
+            raise ValueError(msg)
+        if (xf is not None or reference is not None) and not (
+            problem.obj.is_quadratic or problem.constraints.has_goal_constraint()
+        ):
             msg = (
-                f"xf was given but nothing in the problem reads it: the {type(problem.obj.stage_cost).__name__} "
-                f"objective carries a reference of its own rather than regulating to a goal, and no "
-                f"GoalConstraint is registered. Build the objective with LQRObjective to regulate to xf, or "
-                f"add a GoalConstraint, or leave xf unset."
+                f"A run-time target was given but nothing in the problem reads it: the "
+                f"{type(problem.obj.stage_cost).__name__} objective is not quadratic, so it exposes no linear "
+                f"terms to retarget, and no GoalConstraint is registered. Use a quadratic objective, or add a "
+                f"GoalConstraint, or leave the target unset."
             )
             raise ValueError(msg)
+
+        if reference is not None:
+            X_ref = jnp.asarray(reference.X, dtype=jnp.float64)
+            U_ref = jnp.asarray(reference.U, dtype=jnp.float64)
+        elif xf is not None:
+            X_ref = jnp.repeat(jnp.asarray(xf, dtype=jnp.float64)[None, :], N, axis=0)
+            U_ref = jnp.zeros((N - 1, m), dtype=jnp.float64)
+        else:
+            X_ref, U_ref = None, None
 
         if initial_z is not None:
             z_init = jnp.asarray(initial_z, dtype=jnp.float64)
@@ -261,9 +343,7 @@ class MPCState(eqx.Module):
         mu = jnp.zeros(len(z_init), dtype=jnp.float64)
 
         return cls(
-            x0=x0_arr,
-            t0=t0_arr,
-            xf=xf_arr,
+            bc=BoundaryConditions(x0=x0_arr, t0=t0_arr, X_ref=X_ref, U_ref=U_ref),
             lam=lam,
             mu=mu,
             Z=z_init,
@@ -274,92 +354,42 @@ class MPCState(eqx.Module):
         )
 
     def with_measurement(self, x: jax.Array | Sequence[float], t: float | jax.Array) -> "MPCState":
-        """Return a new MPCState with updated measured initial state x0 and timestamp t0.
-
-        Parameters
-        ----------
-        x : jax.Array | Sequence[float]
-            New measured state of shape (n,).
-        t : float | jax.Array
-            New timestamp scalar.
-
-        Returns
-        -------
-        MPCState
-            New state instance with updated measurement.
-        """
+        """Return a new MPCState with updated measured initial state x0 of shape (n,) and timestamp t0."""
         x_arr = jnp.asarray(x, dtype=self.x0.dtype)
         t_arr = jnp.asarray(t, dtype=self.t0.dtype)
 
         X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
-        X_new = X.at[0].set(x_arr)
-        Z_new = _trajectory_to_z(X_new, U)
+        Z_new = _trajectory_to_z(X.at[0].set(x_arr), U)
 
-        return MPCState(
-            x0=x_arr,
-            t0=t_arr,
-            xf=self.xf,
-            lam=self.lam,
-            mu=self.mu,
-            Z=Z_new,
-            dt=self.dt,
-            n=self.n,
-            m=self.m,
-            N=self.N,
-            status=self.status,
-            al=self.al,
-        )
+        return dataclasses.replace(self, bc=dataclasses.replace(self.bc, x0=x_arr, t0=t_arr), Z=Z_new)
 
     def with_goal(self, xf: jax.Array | Sequence[float]) -> "MPCState":
-        """Return a new MPCState with updated goal state xf.
-
-        Parameters
-        ----------
-        xf : jax.Array | Sequence[float]
-            New goal state of shape (n,).
-
-        Returns
-        -------
-        MPCState
-            New state instance with updated goal.
+        """Return a new MPCState whose reference window is the constant goal state xf of shape (n,).
 
         Raises
         ------
         ValueError
-            If this state was built without a goal, since nothing was checked to read one.
+            If this state was built without a target, since nothing was checked to read one.
         """
-        if self.xf is None:
+        if self.bc.X_ref is None:
             msg = "This MPCState was built without a goal. Pass xf to MPCState.initial to make the goal run-time."
             raise ValueError(msg)
-        xf_arr = jnp.asarray(xf, dtype=self.xf.dtype)
-        return MPCState(
-            x0=self.x0,
-            t0=self.t0,
-            xf=xf_arr,
-            lam=self.lam,
-            mu=self.mu,
-            Z=self.Z,
-            dt=self.dt,
-            n=self.n,
-            m=self.m,
-            N=self.N,
-            status=self.status,
-            al=self.al,
+        X_ref = jnp.repeat(jnp.asarray(xf, dtype=self.bc.X_ref.dtype)[None, :], self.N, axis=0)
+        return dataclasses.replace(self, bc=dataclasses.replace(self.bc, X_ref=X_ref))
+
+    def with_reference(self, reference: Trajectory) -> "MPCState":
+        """Return a new MPCState whose reference window is `reference`, a Trajectory of N knot points."""
+        return dataclasses.replace(
+            self,
+            bc=dataclasses.replace(
+                self.bc,
+                X_ref=jnp.asarray(reference.X, dtype=jnp.float64),
+                U_ref=jnp.asarray(reference.U, dtype=jnp.float64),
+            ),
         )
 
     def shift(self, dt: float | jax.Array | None = None) -> "MPCState":
-        """Shift the primal trajectory and timestamps forward for MPC warm-starting.
-
-        Parameters
-        ----------
-        dt : float | jax.Array | None, optional
-            Step duration of the completed step. Defaults to self.dt[0].
-
-        Returns
-        -------
-        MPCState
-            New state instance with warm-start trajectory shifted forward.
-        """
+        """Shift the primal trajectory and timestamps forward by dt for MPC warm-starting, defaulting to self.dt[0]."""
         X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         new_X = jnp.concatenate([X[1:], X[-1:]], axis=0)
         new_U = jnp.concatenate([U[1:], U[-1:]], axis=0)
@@ -367,22 +397,11 @@ class MPCState(eqx.Module):
 
         dt_step = self.dt[0] if (self.dt.ndim > 0 and len(self.dt) > 0) else self.dt
         step_val = dt_step if dt is None else jnp.asarray(dt, dtype=self.t0.dtype)
-        new_t0 = self.t0 + step_val
-        new_x0 = new_X[0]
 
-        return MPCState(
-            x0=new_x0,
-            t0=new_t0,
-            xf=self.xf,
-            lam=self.lam,
-            mu=self.mu,
+        return dataclasses.replace(
+            self,
+            bc=dataclasses.replace(self.bc, x0=new_X[0], t0=self.t0 + step_val),
             Z=new_Z,
-            dt=self.dt,
-            n=self.n,
-            m=self.m,
-            N=self.N,
-            status=self.status,
-            al=self.al,
         )
 
     @property
@@ -398,64 +417,14 @@ class MPCState(eqx.Module):
         return U
 
     def with_states(self, X0: jax.Array) -> "MPCState":
-        """Return a new MPCState with states in Z replaced by X0.
-
-        Parameters
-        ----------
-        X0 : jax.Array
-            New states of shape (N, n).
-
-        Returns
-        -------
-        MPCState
-            New state instance with updated states.
-        """
+        """Return a new MPCState with the states in Z replaced by X0 of shape (N, n)."""
         _, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
-        Z_new = _trajectory_to_z(jnp.asarray(X0, dtype=self.Z.dtype), U)
-        return MPCState(
-            x0=self.x0,
-            t0=self.t0,
-            xf=self.xf,
-            lam=self.lam,
-            mu=self.mu,
-            Z=Z_new,
-            dt=self.dt,
-            n=self.n,
-            m=self.m,
-            N=self.N,
-            status=self.status,
-            al=self.al,
-        )
+        return dataclasses.replace(self, Z=_trajectory_to_z(jnp.asarray(X0, dtype=self.Z.dtype), U))
 
     def with_controls(self, U0: jax.Array) -> "MPCState":
-        """Return a new MPCState with controls in Z replaced by U0.
-
-        Parameters
-        ----------
-        U0 : jax.Array
-            New controls of shape (N - 1, m).
-
-        Returns
-        -------
-        MPCState
-            New state instance with updated controls.
-        """
+        """Return a new MPCState with the controls in Z replaced by U0 of shape (N - 1, m)."""
         X, _ = _z_to_trajectory(self.Z, self.N, self.n, self.m)
-        Z_new = _trajectory_to_z(X, jnp.asarray(U0, dtype=self.Z.dtype))
-        return MPCState(
-            x0=self.x0,
-            t0=self.t0,
-            xf=self.xf,
-            lam=self.lam,
-            mu=self.mu,
-            Z=Z_new,
-            dt=self.dt,
-            n=self.n,
-            m=self.m,
-            N=self.N,
-            status=self.status,
-            al=self.al,
-        )
+        return dataclasses.replace(self, Z=_trajectory_to_z(X, jnp.asarray(U0, dtype=self.Z.dtype)))
 
     def to_trajectory(self) -> Trajectory:
         """Convert state to a Trajectory instance."""

@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from trajopt.expansions import _stage_cost_expansion, _terminal_cost_expansion
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
 from trajopt.solvers._jit_cache import JitCacheSlot
 from trajopt.solvers.al import ALConstraints, _evaluate_bound_block, _evaluate_constraint_block
 from trajopt.solvers.ilqr import build_warm_start
@@ -470,7 +470,11 @@ class _PNCarry(NamedTuple):
 
 
 def pn_solve(
-    problem: Problem, trajectory: Trajectory, x0: jax.Array, options: SolverOptions
+    problem: Problem,
+    trajectory: Trajectory,
+    x0: jax.Array,
+    options: SolverOptions,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, PNStats, jax.Array, jax.Array]:
     """Traced Projected Newton polish-phase outer loop, matching `pn_solve.jl`'s `solve!`.
 
@@ -491,6 +495,10 @@ def pn_solve(
         iteration.
     options : SolverOptions
         Static solve configuration; must not be traced.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
+        objective keeps the target it was built with.
 
     Returns
     -------
@@ -501,6 +509,7 @@ def pn_solve(
         `TerminationStatus` ordinal as an int32 scalar.
     """
     layout = PNLayout.build(problem)
+    problem = retarget_problem(problem, bc)
     z_init = _pack_z_pn(trajectory.X, trajectory.U)
     ev0 = _pn_evaluate(problem, layout, options, x0, trajectory, trajectory.X, trajectory.U)
     viol0 = _violation(ev0.d_pn, ev0.active)
@@ -555,7 +564,11 @@ _pn_solve_jit_slot = JitCacheSlot()
 
 
 def _jit_pn_solve(
-    problem: Problem, trajectory: Trajectory, x0: jax.Array, options: SolverOptions
+    problem: Problem,
+    trajectory: Trajectory,
+    x0: jax.Array,
+    options: SolverOptions,
+    bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, PNStats, jax.Array, jax.Array]:
     """`pn_solve`, jit-compiled and cached per `(problem identity, options)`, called from `PN.solve()`.
 
@@ -566,10 +579,11 @@ def _jit_pn_solve(
     MPC) hit XLA's compilation cache instead of recompiling. `altro_solve`'s own internal call to
     `pn_solve` is left un-wrapped: it already runs inside `ALTRO.solve()`'s own jitted core
     (`altro.py`'s `_jit_altro_solve`), so wrapping it again would just nest one jit inside another
-    for no benefit.
+    for no benefit. `bc` is a traced argument, so a run-time target that moves between calls
+    does not disturb the reuse.
     """
     jitted = _pn_solve_jit_slot.get_or_build(pn_solve, problem, key=options, options=options)
-    return jitted(trajectory=trajectory, x0=x0)
+    return jitted(trajectory=trajectory, x0=x0, bc=bc)
 
 
 class PNResult(NamedTuple):
@@ -643,10 +657,11 @@ class PN:
     def solve(self, problem: Problem, state: MPCState) -> PNResult:
         """Run the traced PN outer loop from `state`'s warm-start trajectory and boundary-convert the result."""
         options = self.options
-        problem_eff, init_traj = build_warm_start(problem, state)
+        init_traj, bc = build_warm_start(problem, state)
         x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(state)
+        problem_eff = retarget_problem(problem, bc)
 
-        final_traj, stats, duals, status_int = _jit_pn_solve(problem_eff, init_traj, x0_arr, options)
+        final_traj, stats, duals, status_int = _jit_pn_solve(problem, init_traj, x0_arr, options, bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

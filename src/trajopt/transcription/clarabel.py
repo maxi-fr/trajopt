@@ -11,7 +11,7 @@ import scipy.sparse as sp
 from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
 from trajopt.dynamics.base import DiscreteDynamics
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, retarget_problem
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
@@ -335,6 +335,7 @@ class Clarabel:
         nz = N * n + (N - 1) * m
 
         x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(state)
+        problem = retarget_problem(problem, state.bc)
 
         t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
         t_term = t0_arr + jnp.sum(dt_arr)
@@ -350,7 +351,6 @@ class Clarabel:
             nz,
             t0_arr=t0_arr,
             dt_arr=dt_arr,
-            xf_val=xf_val,
             z_op=z_op,
         )
 
@@ -407,7 +407,7 @@ class Clarabel:
             else np.asarray(z0, dtype=np.float64)
         )
         Z_opt_jax = jnp.asarray(Z_opt_np, dtype=jnp.float64)
-        cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr, xf=xf_val))
+        cost_val = float(eval_f(problem, Z_opt_jax, t0=t0_arr, dt=dt_arr))
         viol = compute_constraint_violation(problem, Z_opt_jax, x0_arr, t0=t0_arr, dt=dt_arr, xf=xf_val)
 
         X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
