@@ -158,6 +158,77 @@ def _evaluate_constraint_block(
     return C, Jx, Ju
 
 
+def _evaluate_constraint_residuals(
+    constraints: BuiltConstraintList,
+    X: jax.Array,
+    U: jax.Array,
+    T: jax.Array,
+    p_cons_max: int,
+) -> jax.Array:
+    """Scatter each structural constraint group's evaluate into a padded (N, p_cons_max) array."""
+    N = X.shape[0]
+    C = jnp.zeros((N, p_cons_max), dtype=X.dtype)
+    for g in constraints.groups:
+        p_g = g.evaluator.p
+        if p_g == 0:
+            continue
+        knots = jnp.asarray(g.knots)
+        c_g = g.evaluate(X, U, T)
+        C = C.at[knots, :p_g].set(c_g)
+    return C
+
+
+def _evaluate_bound_residuals(
+    constraints: BuiltConstraintList,
+    X: jax.Array,
+    U: jax.Array,
+) -> jax.Array:
+    """Evaluate box-bound residual rows [x_upper | x_lower | u_upper | u_lower]."""
+    m = U.shape[1]
+    dtype = X.dtype
+
+    x_upper, x_lower = constraints.x_upper, constraints.x_lower
+    U_pad = jnp.concatenate([U, jnp.zeros((1, m), dtype=dtype)], axis=0)
+    u_upper_pad = jnp.concatenate([constraints.u_upper, jnp.full((1, m), jnp.inf, dtype=dtype)], axis=0)
+    u_lower_pad = jnp.concatenate([constraints.u_lower, jnp.full((1, m), -jnp.inf, dtype=dtype)], axis=0)
+
+    x_upper_safe = jnp.where(jnp.isfinite(x_upper), x_upper, 0.0)
+    x_lower_safe = jnp.where(jnp.isfinite(x_lower), x_lower, 0.0)
+    u_upper_safe = jnp.where(jnp.isfinite(u_upper_pad), u_upper_pad, 0.0)
+    u_lower_safe = jnp.where(jnp.isfinite(u_lower_pad), u_lower_pad, 0.0)
+
+    return jnp.concatenate(
+        [X - x_upper_safe, x_lower_safe - X, U_pad - u_upper_safe, u_lower_safe - U_pad],
+        axis=-1,
+    )
+
+
+def evaluate_al_residuals(
+    al: ALConstraints,
+    constraints: BuiltConstraintList,
+    traj: Trajectory,
+) -> jax.Array:
+    """Evaluate padded per-Knot Point constraint and box-bound residuals without Jacobians.
+
+    Parameters
+    ----------
+    al : ALConstraints
+        AL layout providing `p_cons_max`.
+    constraints : BuiltConstraintList
+        Built constraint list holding constraint groups and box-bound limits.
+    traj : Trajectory
+        Trajectory holding stacked states X, controls U, and times t.
+
+    Returns
+    -------
+    jax.Array
+        C of shape (N, p_max).
+    """
+    C_cons = _evaluate_constraint_residuals(constraints, traj.X, traj.U, traj.t, al.p_cons_max)
+    C_bound = _evaluate_bound_residuals(constraints, traj.X, traj.U)
+    return jnp.concatenate([C_cons, C_bound], axis=-1)
+
+
 def _evaluate_bound_block(
     constraints: BuiltConstraintList,
     X: jax.Array,
@@ -173,20 +244,7 @@ def _evaluate_bound_block(
     m = U.shape[1]
     dtype = X.dtype
 
-    x_upper, x_lower = constraints.x_upper, constraints.x_lower
-    U_pad = jnp.concatenate([U, jnp.zeros((1, m), dtype=dtype)], axis=0)
-    u_upper_pad = jnp.concatenate([constraints.u_upper, jnp.full((1, m), jnp.inf, dtype=dtype)], axis=0)
-    u_lower_pad = jnp.concatenate([constraints.u_lower, jnp.full((1, m), -jnp.inf, dtype=dtype)], axis=0)
-
-    x_upper_safe = jnp.where(jnp.isfinite(x_upper), x_upper, 0.0)
-    x_lower_safe = jnp.where(jnp.isfinite(x_lower), x_lower, 0.0)
-    u_upper_safe = jnp.where(jnp.isfinite(u_upper_pad), u_upper_pad, 0.0)
-    u_lower_safe = jnp.where(jnp.isfinite(u_lower_pad), u_lower_pad, 0.0)
-
-    C_bound = jnp.concatenate(
-        [X - x_upper_safe, x_lower_safe - X, U_pad - u_upper_safe, u_lower_safe - U_pad],
-        axis=-1,
-    )
+    C_bound = _evaluate_bound_residuals(constraints, X, U)
 
     I_n = jnp.eye(n, dtype=dtype)
     I_m = jnp.eye(m, dtype=dtype)
@@ -642,7 +700,7 @@ class _ALObjective(eqx.Module):
         Dispatches to `conic_al_cost` when `options.use_conic_cost` (ticket 31), else `al_cost`.
         """
         base = self.obj.cost(traj)
-        C, _Jx, _Ju = evaluate_al_constraints(self.al, self.constraints, self.model, traj)
+        C = evaluate_al_residuals(self.al, self.constraints, traj)
         penalty = conic_al_cost(self.al, C, self.constraints) if self.options.use_conic_cost else al_cost(self.al, C)
         return base + penalty
 
@@ -873,7 +931,7 @@ def _al_step(
     )
     inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
 
-    C, _Jx_err, _Ju = evaluate_al_constraints(carry.al, problem.constraints, problem.model, new_traj)
+    C = evaluate_al_residuals(carry.al, problem.constraints, new_traj)
     J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al, options).cost(new_traj)
     c_max = max_violation(carry.al, C)
     mu_max = max_penalty(carry.al)
@@ -1121,7 +1179,7 @@ class AL:
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
-        C, _Jx, _Ju = evaluate_al_constraints(final_al, problem.constraints, problem.model, final_traj)
+        C = evaluate_al_residuals(final_al, problem.constraints, final_traj)
         final_cost = _ALObjective(bc.retarget(problem.obj), problem.constraints, problem.model, final_al, options).cost(
             final_traj
         )

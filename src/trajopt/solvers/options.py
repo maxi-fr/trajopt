@@ -119,7 +119,7 @@ class SolverOptions:
     n_steps: int = 2
     projected_newton_tolerance: float = 1e-3
     active_set_tolerance_pn: float = 1e-3
-    multiplier_projection: bool = True
+    multiplier_projection: bool = False
     rho_primal: float = 1.0e-8
     r_threshold: float = 1.1
 

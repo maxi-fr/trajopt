@@ -370,3 +370,22 @@ def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:
     assert statuses.shape == (2,)
     assert int(statuses[0]) == int(eager.status)
     assert int(statuses[1]) == int(eager.status)
+
+
+def test_altro_bypasses_pn_when_projected_newton_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When projected_newton=False, pn_solve is never called on a constrained problem."""
+    import trajopt.solvers.altro as altro_module
+
+    def fail_pn_solve(*_args: object, **_kwargs: object) -> None:
+        msg = "pn_solve must not be called when projected_newton=False"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(altro_module, "pn_solve", fail_pn_solve)
+
+    prob, x0, dt, xf = _cartpole_problem(N=5)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    options = SolverOptions(iterations=2, iterations_outer=2, projected_newton=False)
+    result = ALTRO(options=options).solve(prob, state)
+
+    assert result.info["ran_pn"] is False
+    assert result.info["pn_stats"] is None

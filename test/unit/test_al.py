@@ -10,6 +10,7 @@ from trajopt.solvers.al import (
     al_grad_hess,
     dual_update,
     evaluate_al_constraints,
+    evaluate_al_residuals,
     max_penalty,
     max_violation,
     penalty_update,
@@ -255,3 +256,17 @@ def test_max_penalty_no_rows_is_zero() -> None:
 
     assert not bool(jnp.any(al.row_mask))
     assert float(max_penalty(al)) == 0.0
+
+
+def test_evaluate_al_residuals_matches_evaluate_al_constraints() -> None:
+    """`evaluate_al_residuals` returns residuals bitwise identical to `evaluate_al_constraints[0]`."""
+    n, m, N = 3, 2, 4
+    clist, _xf = _bound_and_goal_problem(n, m, N)
+    constraints = clist.build()
+    al = ALConstraints.build(constraints, penalty_initial=1.5)
+    traj = _random_trajectory(n, m, N, seed=7)
+
+    C_full, _, _ = evaluate_al_constraints(al, constraints, model=None, traj=traj)
+    C_res = evaluate_al_residuals(al, constraints, traj)
+
+    np.testing.assert_array_equal(np.asarray(C_res), np.asarray(C_full))

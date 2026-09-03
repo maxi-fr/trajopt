@@ -20,7 +20,7 @@ solve and drastically simpler to trace.
 
 **`multiplier_projection` is dead code upstream** (`pn_solve.jl`, Altro issue #35): the
 implementation is commented out and the call site hardcodes `res = Inf`. This port implements it
-for real, gated behind `options.multiplier_projection` (default `True`, Altro's own default),
+for real, gated behind `options.multiplier_projection` (default `False`),
 which makes this a superset of upstream. There is nothing on the Julia side to compare the
 projection's numerical output against, so any cross-parity test must run with the option off on
 both sides.
