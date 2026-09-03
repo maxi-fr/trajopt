@@ -854,7 +854,9 @@ def _evaluate_al_convergence(
     converged_violation = c_max < options.constraint_tolerance
     status = jnp.where(converged_violation, jnp.int32(TerminationStatus.SOLVE_SUCCEEDED), status)
 
+    penalty_overflow = 0.5 * (mu_max * options.penalty_scaling) * (c_max**2) >= options.max_cost_value
     kickout = jnp.asarray(options.kickout_max_penalty) & (mu_max >= options.penalty_max)
+    status = jnp.where(penalty_overflow, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER), status)
 
     max_iters_hit = inner_iterations >= options.iterations
     status = jnp.where(max_iters_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS), status)
@@ -862,8 +864,74 @@ def _evaluate_al_convergence(
     max_outer_hit = iter_num >= options.iterations_outer
     status = jnp.where(max_outer_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER), status)
 
-    done = converged_violation | kickout | max_iters_hit | max_outer_hit
+    done = converged_violation | kickout | penalty_overflow | max_iters_hit | max_outer_hit
     return status, done
+
+
+def _al_transition(  # noqa: PLR0913 -- AL transition requires carry, problem, options, trajectory, and inner outputs
+    carry: ALCarry,
+    problem: Problem,
+    options: SolverOptions,
+    new_traj: Trajectory,
+    inner_iterations: jax.Array,
+    *,
+    inner_status: jax.Array,
+) -> ALCarry:
+    """One outer augmented-Lagrangian state transition, evaluating residuals, convergence, and updates.
+
+    Parameters
+    ----------
+    carry : ALCarry
+        Current AL loop carry.
+    problem : Problem
+        The trajectory optimization problem.
+    options : SolverOptions
+        Solver options.
+    new_traj : Trajectory
+        Trajectory resulting from the inner solve.
+    inner_iterations : jax.Array
+        Number of iterations executed by the inner solve.
+    inner_status : jax.Array
+        TerminationStatus of the inner solve.
+    """
+    inner_stalled = (inner_status == jnp.int32(TerminationStatus.NO_PROGRESS)) | (
+        inner_status == jnp.int32(TerminationStatus.MAX_ITERATIONS)
+    )
+    inner_fatal = (inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)) & (~inner_stalled)
+
+    C = evaluate_al_residuals(carry.al, problem.constraints, new_traj)
+    J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al, options).cost(new_traj)
+    c_max = max_violation(carry.al, C)
+    mu_max = max_penalty(carry.al)
+
+    iter_num = carry.i + 1
+    idx = carry.i
+    stats = carry.stats
+    recorded_stats = ALStats(
+        iterations=iter_num,
+        cost=stats.cost.at[idx].set(J),
+        c_max=stats.c_max.at[idx].set(c_max),
+        penalty_max=stats.penalty_max.at[idx].set(mu_max),
+    )
+    new_stats = jax.tree.map(lambda new, old: jnp.where(inner_fatal, old, new), recorded_stats, stats)
+
+    conv_status, conv_done = _evaluate_al_convergence(c_max, mu_max, inner_iterations, iter_num, options)
+
+    skip_dual_update = inner_fatal | conv_done
+    al_updated = penalty_update(dual_update(carry.al, C, options, problem.constraints), options)
+    new_al = jax.tree.map(lambda new, old: jnp.where(skip_dual_update, old, new), al_updated, carry.al)
+
+    final_status = jnp.where(inner_fatal, inner_status, conv_status)
+    final_done = inner_fatal | conv_done
+
+    return ALCarry(
+        i=iter_num,
+        trajectory=new_traj,
+        al=new_al,
+        stats=new_stats,
+        done=final_done,
+        status=final_status,
+    )
 
 
 def _al_step(
@@ -875,27 +943,10 @@ def _al_step(
 ) -> ALCarry:
     """One augmented-Lagrangian outer iteration, matching `al_solve.jl`'s per-iteration body.
 
-    Follows reference §5.5's order exactly: effective (possibly intermediate) tolerances, solve
-    the inner iLQR on the AL-augmented objective (`_ALProblem`), break on an ordinal inner-status
-    failure (finding C) before anything else runs, then cost/violation/penalty maxima, record,
-    check outer convergence (`_evaluate_al_convergence`), and only when neither break fired: dual
-    update, penalty update. `ilqr_solve`'s own unconditional open-loop re-rollout each call *is*
-    Altro's `initialize!` inside every `solve!(ilqr)` (reference §4.1) -- carrying the previous
-    outer iteration's accepted trajectory in as the next call's warm start reproduces Altro's
-    per-outer-iteration reset without any change to `ilqr.py`.
-
-    The effective `(cost_tolerance, gradient_tolerance)` pair is computed here as traced scalars
-    and passed straight to `ilqr_solve`'s override kwargs, not `dataclasses.replace`-d into a new
-    `SolverOptions` (ticket 29: `options` stays frozen and untraced end to end).
-
-    `solve_kd_builder`, forwarded to `ilqr_solve` unchanged, is ticket 30's box-QP hook: routing
-    `ControlBound` rows to a control-limited backward pass while every other constraint -- state
-    bounds included -- still goes through this AL outer loop is exactly "pass a non-default
-    `solve_kd_builder` into the same `al_solve`", no separate outer loop.
-
-    `u_bounds`, forwarded to `ilqr_solve` unchanged, clips every rolled-out control (ticket 30):
-    the box-QP feedforward is bound-feasible by construction, but the closed-loop `K @ dx`
-    feedback term is not, so this is a deliberate practical safeguard on top of it.
+    Follows reference §5.5's order: effective tolerances, solve the inner iLQR on the
+    AL-augmented objective (`_ALProblem`), and transition the outer AL state machine via
+    `_al_transition`. Soft inner stalls (NO_PROGRESS, MAX_ITERATIONS) continue outer
+    iterations with dual and penalty updates; fatal numerical failures abort immediately.
     """
     i = carry.i
     is_last = i == jnp.int32(options.iterations_outer - 1)
@@ -915,41 +966,7 @@ def _al_step(
         solve_kd_builder=solve_kd_builder,
         u_bounds=u_bounds,
     )
-    inner_failed = inner_status > jnp.int32(TerminationStatus.SOLVE_SUCCEEDED)
-
-    C = evaluate_al_residuals(carry.al, problem.constraints, new_traj)
-    J = _ALObjective(problem.obj, problem.constraints, problem.model, carry.al, options).cost(new_traj)
-    c_max = max_violation(carry.al, C)
-    mu_max = max_penalty(carry.al)
-
-    iter_num = i + 1
-    idx = i
-    stats = carry.stats
-    recorded_stats = ALStats(
-        iterations=iter_num,
-        cost=stats.cost.at[idx].set(J),
-        c_max=stats.c_max.at[idx].set(c_max),
-        penalty_max=stats.penalty_max.at[idx].set(mu_max),
-    )
-    new_stats = jax.tree.map(lambda new, old: jnp.where(inner_failed, old, new), recorded_stats, stats)
-
-    conv_status, conv_done = _evaluate_al_convergence(c_max, mu_max, inner_stats.iterations, iter_num, options)
-
-    skip_dual_update = inner_failed | conv_done
-    al_updated = penalty_update(dual_update(carry.al, C, options, problem.constraints), options)
-    new_al = jax.tree.map(lambda new, old: jnp.where(skip_dual_update, old, new), al_updated, carry.al)
-
-    final_status = jnp.where(inner_failed, inner_status, conv_status)
-    final_done = inner_failed | conv_done
-
-    return ALCarry(
-        i=iter_num,
-        trajectory=new_traj,
-        al=new_al,
-        stats=new_stats,
-        done=final_done,
-        status=final_status,
-    )
+    return _al_transition(carry, problem, options, new_traj, inner_stats.iterations, inner_status=inner_status)
 
 
 def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, load-bearing argument

@@ -11,6 +11,7 @@ from trajopt.solvers.al import (
     al_grad_hess,
     dual_update,
     evaluate_al_constraints,
+    evaluate_al_residuals,
     max_penalty,
     max_violation,
     penalty_update,
@@ -126,6 +127,8 @@ def test_cross_al_control_bound_matches_altro(jl_altro: Any) -> None:
     )
 
     np.testing.assert_allclose(float(cost), float(J_jl), atol=1e-8)
+    res = evaluate_al_residuals(al, constraints, traj)
+    np.testing.assert_allclose(np.asarray(res[: N - 1, u_start : u_start + 2 * m]), np.asarray(vals_jl).T, atol=1e-8)
     np.testing.assert_allclose(np.asarray(C[: N - 1, u_start : u_start + 2 * m]), np.asarray(vals_jl).T, atol=1e-8)
     # getgrad/gethess restrict to the control-only input block, whose sole entry is index n (0-based).
     np.testing.assert_allclose(np.asarray(grad_u[: N - 1, 0]), np.asarray(grads_jl)[n, :], atol=1e-8)
@@ -174,6 +177,8 @@ def test_cross_al_goal_constraint_matches_altro(jl_altro: Any) -> None:
     )
 
     np.testing.assert_allclose(float(cost), float(J_jl), atol=1e-8)
+    res = evaluate_al_residuals(al, constraints, traj)
+    np.testing.assert_allclose(np.asarray(res[N - 1, :n]), np.asarray(vals_jl)[:, 0], atol=1e-8)
     np.testing.assert_allclose(np.asarray(C[N - 1, :n]), np.asarray(vals_jl)[:, 0], atol=1e-8)
     np.testing.assert_allclose(np.asarray(grad_x[N - 1]), np.asarray(grads_jl)[:, 0], atol=1e-8)
     np.testing.assert_allclose(np.asarray(Hxx[N - 1]), np.asarray(hesses_jl)[:, :, 0], atol=1e-8)
