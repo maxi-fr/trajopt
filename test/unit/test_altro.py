@@ -11,6 +11,7 @@ from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.models.pendulum import Pendulum
 from trajopt.problem import MPCState, Problem
+from trajopt.program import program_for
 from trajopt.solvers.al import ALConstraints, ALStats, evaluate_al_constraints, max_violation
 from trajopt.solvers.altro import (
     ALTRO,
@@ -318,24 +319,23 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
 def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem() -> None:
     """Two `.solve()` calls on the same `ALTRO` instance and `problem` reuse the same compiled `jax.jit` closure.
 
-    Verifies fix 2 (ticket 34): the module-level `_altro_solve_jit_slot` cache actually hits on a
-    repeat call (same `problem` identity, same `options` key) instead of rebuilding a fresh
-    `jax.jit` wrapper every `.solve()` call -- the MPC-loop regime the cache exists for.
+    Verifies fix 2 (ticket 34): the solver's `Program` hands back the core it already built on a
+    repeat call (same `problem` identity, same `options`) instead of compiling a fresh `jax.jit`
+    wrapper every `.solve()` call -- the MPC-loop regime the Program exists for.
     """
-    import trajopt.solvers.altro as altro_module
-
     prob, x0, dt, xf = _cartpole_problem(N=5)
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     altro = ALTRO(options=SolverOptions(iterations=2, iterations_outer=2, n_steps=1))
 
     _ = altro.solve(prob, state)
-    jitted_after_first = altro_module._altro_solve_jit_slot._jitted  # noqa: SLF001 -- white-box cache-hit check
-    assert jitted_after_first is not None
+    program = program_for(altro, prob)
+    cores_after_first = dict(program._cores)  # noqa: SLF001 -- white-box core-reuse check
+    assert len(cores_after_first) == 1
 
     _ = altro.solve(prob, state)
-    jitted_after_second = altro_module._altro_solve_jit_slot._jitted  # noqa: SLF001 -- white-box cache-hit check
 
-    assert jitted_after_second is jitted_after_first
+    assert program_for(altro, prob) is program
+    assert program._cores == cores_after_first  # noqa: SLF001 -- white-box core-reuse check
 
 
 def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:

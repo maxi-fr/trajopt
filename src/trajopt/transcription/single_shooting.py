@@ -1,7 +1,7 @@
 """Single-shooting transcription: the NLP primal is the control trajectory alone."""
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -332,7 +332,6 @@ class SingleShooting:
 
     solver: Ipopt
     hessian: Literal["lbfgs", "dense"] = "lbfgs"
-    single_shooting: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         """Refuse non-Ipopt solvers and unknown Hessian modes at construction."""

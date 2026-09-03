@@ -11,6 +11,7 @@ import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltConstraintList
 from trajopt.problem import MPCState, Problem
+from trajopt.program import program_for
 from trajopt.solvers.al import ALConstraints, ALStats, _jit_al_solve, al_cost, evaluate_al_constraints, max_violation
 from trajopt.solvers.ilqr import SolveKD, build_warm_start
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
@@ -458,7 +459,13 @@ class BoxQP:
             init_al = fresh_al
 
         final_traj, final_al, stats, status_int = _jit_al_solve(
-            problem, init_traj, init_al, options, solve_kd_builder=solve_kd_builder, u_bounds=(lo, hi), bc=bc
+            program_for(self, problem),
+            init_traj,
+            init_al,
+            options,
+            solve_kd_builder=solve_kd_builder,
+            u_bounds=(lo, hi),
+            bc=bc,
         )
 
         status = TerminationStatus(int(status_int))

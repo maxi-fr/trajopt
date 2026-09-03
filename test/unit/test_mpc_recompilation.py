@@ -6,7 +6,7 @@ from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers import _jit_cache
+from trajopt.program import Program
 from trajopt.solvers.ilqr import ILQR
 
 N = 8
@@ -24,22 +24,20 @@ def _build() -> Problem:
 def _count_core_compiles(monkeypatch: pytest.MonkeyPatch, *, moving_goal: bool) -> int:
     """Run an `N_STEPS` receding-horizon ILQR loop and return how many jitted cores got built.
 
-    A compile happens exactly when `JitCacheSlot.get_or_build` misses its single-entry cache and
-    calls `jax.jit`; the wrapper below replays that hit test before delegating, so the count is
-    the number of fresh `jax.jit` closures the loop forces. With `moving_goal`, `xf` changes every
-    step; otherwise it is held at `GOAL`.
+    `Program._build_core` is the only `jax.jit` call site in the solver stack, so counting its
+    invocations counts the fresh jitted closures -- and therefore the XLA compilations -- the loop
+    forces. With `moving_goal`, `xf` changes every step; otherwise it is held at `GOAL`.
     """
-    misses = 0
-    original = _jit_cache.JitCacheSlot.get_or_build
+    builds = 0
+    original = Program._build_core  # noqa: SLF001 -- counting the one jit call site is the point of the test
 
-    def counting_get_or_build(self, fn, problem, key, **static_kwargs):
-        """Delegate to `JitCacheSlot.get_or_build`, counting the calls that miss the cache."""
-        nonlocal misses
-        if not (self._problem_ref is problem and self._key == key and self._jitted is not None):
-            misses += 1
-        return original(self, fn, problem, key, **static_kwargs)
+    def counting_build_core(self, fn, **static_kwargs):
+        """Delegate to `Program._build_core`, counting every core it compiles."""
+        nonlocal builds
+        builds += 1
+        return original(self, fn, **static_kwargs)
 
-    monkeypatch.setattr(_jit_cache.JitCacheSlot, "get_or_build", counting_get_or_build)
+    monkeypatch.setattr(Program, "_build_core", counting_build_core)
 
     problem = _build()
     solver = ILQR()
@@ -53,7 +51,7 @@ def _count_core_compiles(monkeypatch: pytest.MonkeyPatch, *, moving_goal: bool) 
         state = problem.solve(state, solver=solver)
         state = state.shift(DT)
         t += DT
-    return misses
+    return builds
 
 
 def test_fixed_goal_compiles_core_once(monkeypatch: pytest.MonkeyPatch) -> None:

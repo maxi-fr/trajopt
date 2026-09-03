@@ -10,13 +10,14 @@ from trajopt.constraints.constraint_list import BuiltConstraintList, ConstraintL
 from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel, DiscreteDynamics, IntegratorCallable
 from trajopt.dynamics.integrators import Integrator
+from trajopt.program import program_for
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
 if TYPE_CHECKING:
     from trajopt.expansions import Expansion
     from trajopt.solvers.al import ALConstraints
-    from trajopt.transcription.result import Solver, SolverStatus
+    from trajopt.transcription.result import Solver
 
 
 class BoundaryConditions(eqx.Module):
@@ -138,7 +139,7 @@ class Problem(eqx.Module):
         return self.model.dynamics_expansion(traj)
 
     def solve(self, state: "MPCState", solver: "Solver | None" = None) -> "MPCState":
-        """Solve this problem from `state` with `solver`, returning an updated MPCState.
+        """Solve this problem from `state` with `solver`'s Program, returning an updated MPCState.
 
         Parameters
         ----------
@@ -152,37 +153,26 @@ class Problem(eqx.Module):
         Returns
         -------
         MPCState
-            New state containing optimal trajectory Z, dual multipliers lam, mu, and status.
+            New state containing optimal trajectory Z and dual multipliers lam, mu. The solve's
+            status is on the returned `SolverResult`, which this delegator drops; read it by
+            calling the solver (or its Program) directly.
         """
         if solver is None:
             from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415 -- avoid an import cycle
 
             solver = Ipopt()
 
-        from trajopt.transcription.result import normalize_status  # noqa: PLC0415 -- avoid an import cycle
+        res = program_for(solver, self).solve(state)
 
-        res = solver.solve(self, state)
-
-        # Single shooting carries no dynamics or initial-condition duals, so its lam/mu are
-        # shorter than the multiple-shooting layout and are taken as-is (possibly empty).
-        single_shooting = bool(getattr(solver, "single_shooting", False))
-        lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if single_shooting or len(res.lam) > 0 else state.lam
-        mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if single_shooting or len(res.mu) > 0 else state.mu
+        # A backend that returns no duals (an empty vector) leaves the state's own untouched.
+        lam = jnp.asarray(res.lam, dtype=state.Z.dtype) if len(res.lam) > 0 else state.lam
+        mu = jnp.asarray(res.mu, dtype=state.Z.dtype) if len(res.mu) > 0 else state.mu
 
         # AL solvers (ticket 29) populate `res.al` with their padded per-knot duals/penalties for
         # MPCState warm-starting; every other backend leaves it absent, so the prior al survives.
         al = getattr(res, "al", None)
 
-        # Native solvers (ILQR, AL) already know their precise TerminationStatus and map it
-        # through `to_solver_status`'s table, so `res.solver_status` is authoritative when
-        # present; `normalize_status`'s message-substring heuristic is a fallback for backends
-        # (Ipopt, OSQP, Clarabel) that only expose a free-text status string.
-        solver_status = getattr(res, "solver_status", None)
-        status = (
-            solver_status if solver_status is not None else normalize_status(success=res.success, message=res.message)
-        )
-
-        return dataclasses.replace(state, lam=lam, mu=mu, Z=res.Z, status=status, al=al if al is not None else state.al)
+        return dataclasses.replace(state, lam=lam, mu=mu, Z=res.Z, al=al if al is not None else state.al)
 
     def cost(self, state: "MPCState") -> jax.Array:
         """Evaluate objective scalar cost J(state.Z) for this problem at `state`."""
@@ -214,9 +204,6 @@ class MPCState(eqx.Module):
         Control dimension.
     N : int
         Horizon length in knot points.
-    status : SolverStatus | None
-        Normalized outcome of the last solve ("converged", "infeasible", "iteration_limit",
-        "error"), or None before any solve has run.
     al : ALConstraints | None
         Padded augmented-Lagrangian duals and penalties (ticket 28), or None before an AL solve
         has populated them. Distinct from `lam` / `mu`, which keep their transcription meaning;
@@ -231,7 +218,6 @@ class MPCState(eqx.Module):
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
-    status: "SolverStatus | None" = eqx.field(static=True, default=None)
     al: "ALConstraints | None" = None
 
     @property

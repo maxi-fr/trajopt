@@ -78,13 +78,14 @@ def test_ilqr_result_satisfies_solver_result_protocol() -> None:
     assert isinstance(result, SolverResult)
 
 
-def test_ilqr_solve_returns_mpc_state_with_status() -> None:
-    """problem.solve(state, solver=ILQR()) returns an MPCState with a populated status."""
+def test_ilqr_solve_returns_mpc_state() -> None:
+    """problem.solve(state, solver=ILQR()) returns an MPCState carrying the converged solve's Z."""
     prob, x0 = _lq_problem()
     state = MPCState.initial(prob, x0=x0, dt=0.05)
+    assert ILQR().solve(prob, state).solver_status == "converged"
     new_state = prob.solve(state, solver=ILQR())
     assert isinstance(new_state, MPCState)
-    assert new_state.status == "converged"
+    assert not jnp.allclose(new_state.Z, state.Z)
 
 
 def test_ilqr_lq_converges_in_two_iterations_matches_backward_pass_policy() -> None:

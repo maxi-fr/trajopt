@@ -12,7 +12,7 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.solvers._jit_cache import JitCacheSlot
+from trajopt.program import Program, program_for
 from trajopt.solvers.ilqr import SolveKD, build_warm_start, ilqr_solve
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
@@ -962,11 +962,8 @@ def al_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's u_bounds hook is a 6th, l
     return final.trajectory, final.al, final.stats, final.status
 
 
-_al_solve_jit_slot = JitCacheSlot()
-
-
 def _jit_al_solve(  # noqa: PLR0913, PLR0917 -- mirrors al_solve's own load-bearing u_bounds sixth argument
-    problem: Problem,
+    program: Program,
     trajectory: Trajectory,
     al0: ALConstraints,
     options: SolverOptions,
@@ -974,20 +971,18 @@ def _jit_al_solve(  # noqa: PLR0913, PLR0917 -- mirrors al_solve's own load-bear
     u_bounds: "tuple[jax.Array, jax.Array] | None" = None,
     bc: BoundaryConditions | None = None,
 ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
-    """`al_solve`, jit-compiled and cached per `(problem identity, options, solve_kd_builder)`, shared by `AL.solve()` and `BoxQP.solve()`.
+    """Run `program`'s `al_solve` core for `(options, solve_kd_builder)`, shared by `AL.solve()` and `BoxQP.solve()`.
 
-    `problem` and `solve_kd_builder` are closed over via `functools.partial` rather than passed
-    as jit arguments (`JitCacheSlot`'s docstring has the reason for `problem`; `solve_kd_builder`,
-    a Python callable, cannot be a traced pytree leaf at all). The returned closure is reused
-    across calls with the same `problem` object, `options`, and `solve_kd_builder`, so repeated
-    same-shape calls (e.g. MPC, or `BoxQP`'s memoized builder for unchanged bounds) hit XLA's
-    compilation cache instead of recompiling. `trajectory`/`al0`/`u_bounds`/`bc` are the
-    genuinely dynamic arguments, so a run-time target that moves between calls keeps the reuse.
+    `problem` and `solve_kd_builder` are closed over by the core rather than passed as jit
+    arguments (`Program.core`'s docstring has the reason for `problem`; `solve_kd_builder`, a
+    Python callable, cannot be a traced pytree leaf at all). The program builds one core per
+    `(options, solve_kd_builder)` and reuses it, so repeated same-shape calls (e.g. MPC, or
+    `BoxQP`'s memoized builder for unchanged bounds) recompile nothing.
+    `trajectory`/`al0`/`u_bounds`/`bc` are the genuinely dynamic arguments, so a run-time target
+    that moves between calls keeps the reuse.
     """
-    jitted = _al_solve_jit_slot.get_or_build(
-        al_solve, problem, key=(options, solve_kd_builder), options=options, solve_kd_builder=solve_kd_builder
-    )
-    return jitted(trajectory=trajectory, al0=al0, u_bounds=u_bounds, bc=bc)
+    core = program.core(al_solve, key=(options, solve_kd_builder), options=options, solve_kd_builder=solve_kd_builder)
+    return core(trajectory=trajectory, al0=al0, u_bounds=u_bounds, bc=bc)
 
 
 class ALResult(NamedTuple):
@@ -1095,7 +1090,9 @@ class AL:
         else:
             init_al = fresh_al
 
-        final_traj, final_al, stats, status_int = _jit_al_solve(problem, init_traj, init_al, options, bc=bc)
+        final_traj, final_al, stats, status_int = _jit_al_solve(
+            program_for(self, problem), init_traj, init_al, options, bc=bc
+        )
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

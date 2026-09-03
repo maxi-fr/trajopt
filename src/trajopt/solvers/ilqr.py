@@ -13,7 +13,7 @@ from trajopt.costs.objective import Objective
 from trajopt.dynamics.base import AbstractModel
 from trajopt.expansions import Expansion
 from trajopt.problem import BoundaryConditions, MPCState, Problem, retarget_problem
-from trajopt.solvers._jit_cache import JitCacheSlot
+from trajopt.program import Program, program_for
 from trajopt.solvers.options import SolverOptions, SolverStats, TerminationStatus, to_solver_status
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
@@ -846,23 +846,19 @@ def build_warm_start(problem: Problem, state: MPCState) -> tuple[Trajectory, Bou
     return Trajectory(X=X0, U=U0, t=t_arr, dt=dt_arr), state.bc
 
 
-_ilqr_solve_jit_slot = JitCacheSlot()
-
-
 def _jit_ilqr_solve(
-    problem: Problem, trajectory: Trajectory, options: SolverOptions, bc: BoundaryConditions | None = None
+    program: Program, trajectory: Trajectory, options: SolverOptions, bc: BoundaryConditions | None = None
 ) -> tuple[Trajectory, SolverStats, jax.Array]:
-    """`ilqr_solve`, jit-compiled and cached per `(problem identity, options)`, shared by `ILQR.solve()` and `ALTRO.solve()`'s unconstrained shortcut.
+    """Run `program`'s `ilqr_solve` core, shared by `ILQR.solve()` and `ALTRO.solve()`'s unconstrained shortcut.
 
-    `problem` is closed over via `functools.partial` rather than passed as a jit argument
-    (`JitCacheSlot`'s docstring has the reason: `problem`'s constraint bounds are read with eager
-    `np.asarray` during layout construction, which breaks under trace). The returned closure is
-    reused across calls with the same `problem` object and `options`, so repeated same-shape calls
-    (e.g. MPC) hit XLA's compilation cache instead of recompiling. `bc` is a traced argument, so a
-    run-time target that moves between those calls does not disturb the reuse.
+    `problem` is closed over by the core rather than passed as a jit argument (`Program.core`'s
+    docstring has the reason: `problem`'s constraint bounds are read with eager `np.asarray` during
+    layout construction, which breaks under trace). The program builds that core once and reuses it
+    across steps, so repeated same-shape calls (e.g. MPC) recompile nothing. `bc` is a traced
+    argument, so a run-time target that moves between those calls does not disturb the reuse.
     """
-    jitted = _ilqr_solve_jit_slot.get_or_build(ilqr_solve, problem, key=options, options=options, solve_kd_builder=None)
-    return jitted(trajectory=trajectory, bc=bc)
+    core = program.core(ilqr_solve, key=options, options=options, solve_kd_builder=None)
+    return core(trajectory=trajectory, bc=bc)
 
 
 def _trim_stats(stats: SolverStats, n_iter: int) -> SolverStats:
@@ -962,7 +958,7 @@ class ILQR:
 
         init_traj, bc = build_warm_start(problem, state)
 
-        final_traj, stats, status_int = _jit_ilqr_solve(problem, init_traj, self.options, bc)
+        final_traj, stats, status_int = _jit_ilqr_solve(program_for(self, problem), init_traj, self.options, bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)

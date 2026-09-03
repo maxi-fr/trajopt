@@ -124,12 +124,12 @@ def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyP
 
 
 def test_al_max_iterations_outer_maps_to_infeasible_status() -> None:
-    """The real `.solve()` -> `MPCState.status` path reports "infeasible" on MAX_ITERATIONS_OUTER.
+    """`AL.solve()` reports "infeasible" on MAX_ITERATIONS_OUTER.
 
     Regression test for a defect found in mid-point review: `AL.solve()` used to hand
-    `TerminationStatus.MAX_ITERATIONS_OUTER.name` as `message` and let `Problem.solve`'s
-    `normalize_status` substring-match it, which incorrectly produced "iteration_limit" (the
-    substring "iter" matches, but ticket 24's table maps MAX_ITERATIONS_OUTER to "infeasible").
+    `TerminationStatus.MAX_ITERATIONS_OUTER.name` as `message` and leave the status to a
+    substring match on it, which incorrectly produced "iteration_limit" (the substring "iter"
+    matches, but ticket 24's table maps MAX_ITERATIONS_OUTER to "infeasible").
     With `iterations_outer=1`, the cartpole swing-up cannot drive its violation under
     `constraint_tolerance` in a single outer iteration but its inner iLQR solve still succeeds,
     so the outer loop exhausts `MAX_ITERATIONS_OUTER` -- the most common non-convergence outcome
@@ -143,11 +143,6 @@ def test_al_max_iterations_outer_maps_to_infeasible_status() -> None:
     assert result.status == int(TerminationStatus.MAX_ITERATIONS_OUTER)
     assert result.solver_status == "infeasible"
 
-    new_state = prob.solve(
-        MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None), solver=AL(options=options)
-    )
-    assert new_state.status == "infeasible"
-
 
 def test_al_populates_mpc_state_al_for_warm_starting() -> None:
     """prob.solve(state, solver=AL()) returns an MPCState whose `al` field carries the final duals."""
@@ -157,7 +152,6 @@ def test_al_populates_mpc_state_al_for_warm_starting() -> None:
 
     new_state = prob.solve(state, solver=AL(options=options))
 
-    assert new_state.status == "converged"
     assert new_state.al is not None
     assert isinstance(new_state.al, ALConstraints)
     assert bool(jnp.any(new_state.al.lam != 0.0))
