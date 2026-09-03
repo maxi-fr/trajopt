@@ -426,7 +426,7 @@ design — is the polymorphic-dispatch pitfall in its purest form, and it buys a
 (different cost *types* at different knot points) that nothing in the benchmark set needs.
 Stacked parameters preserve everything the list actually provided:
 
-- `LQRObjective(Q, R, Qf, xf, N)` — stacked-constant parameters.
+- `LQRObjective(Q, R, Qf, N)` — stacked-constant parameters carrying shape only; the target arrives as a reference window through `BoundaryConditions`.
 - `TrackingObjective(Q, R, Z_ref)` — stacked time-varying parameters, with
   $q_k = -Q x_{\text{ref},k}$ and $r_k = -R u_{\text{ref},k}$.
 - `update_reference(obj, Z_ref, start=0)` — rebuilds the stacked `q` and `r` arrays.

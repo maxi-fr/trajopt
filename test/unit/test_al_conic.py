@@ -176,7 +176,7 @@ def _small_goal_only_problem() -> tuple[Problem, jax.Array, float, jax.Array]:
     x0 = jnp.zeros(n)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
@@ -187,13 +187,13 @@ def _small_goal_only_problem() -> tuple[Problem, jax.Array, float, jax.Array]:
 
 def test_use_conic_cost_switch_on_warm_started_duals_raises_unless_reset() -> None:
     """Switching options.use_conic_cost with a prior state.al raises (finding E), unless reset_duals discards it."""
-    prob, x0, dt, _xf = _small_goal_only_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _small_goal_only_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
 
     non_conic_result = AL(options=SolverOptions(iterations=20, iterations_outer=3, use_conic_cost=False)).solve(
         prob, state
     )
-    warm_state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=non_conic_result.trajectory)
+    warm_state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=non_conic_result.trajectory)
     state_with_duals = dataclasses.replace(warm_state, al=non_conic_result.al)
 
     with pytest.raises(ValueError, match="use_conic_cost"):
@@ -219,7 +219,7 @@ def test_equality_constraint_conic_and_nonconic_converge_to_same_kkt_point() -> 
     requires `lam_conic ~ -lam_nonconic`, not merely that both happen to be small.
     """
     prob, x0, dt, xf = _small_goal_only_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
 
     result_nonconic = AL(options=SolverOptions(use_conic_cost=False, iterations=150, iterations_outer=25)).solve(
         prob, state

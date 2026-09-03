@@ -26,6 +26,8 @@ from trajopt.solvers.pn import (
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
 
+XF = jnp.array([0.0, np.pi, 0.0, 0.0])
+
 
 def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     """Cartpole swing-up with a symmetric control bound and a terminal goal constraint."""
@@ -35,13 +37,12 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     R = 1e-1 * np.ones(m) * dt
     Qf = 1e2 * np.ones(n)
     x0 = jnp.zeros(n)
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
-    clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
+    clist.add_constraint(GoalConstraint(n=n, xf=XF.tolist()), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
     return prob, x0, dt
@@ -49,7 +50,7 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
 
 def _al_warm_start(prob: Problem, x0: jnp.ndarray, dt: float) -> tuple[jnp.ndarray, Trajectory]:
     """Run AL to convergence and return `(x0, trajectory)` as a realistic PN warm start."""
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
     assert al_result.success
     return x0, al_result.trajectory
@@ -265,7 +266,7 @@ def test_pn_result_satisfies_solver_result_protocol() -> None:
     """PNResult structurally satisfies the SolverResult protocol."""
     prob, x0, dt = _cartpole_problem()
     _x0, warm_traj = _al_warm_start(prob, x0, dt)
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=warm_traj)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=warm_traj)
 
     result = PN(options=SolverOptions()).solve(prob, state)
 
@@ -277,11 +278,11 @@ def test_pn_result_satisfies_solver_result_protocol() -> None:
 def test_pn_cartpole_polishes_al_output_and_cost_barely_moves() -> None:
     """End to end: PN polishes an AL-converged cartpole trajectory to a tighter violation, cost nearly unchanged."""
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
     assert al_result.success
 
-    pn_state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=al_result.trajectory)
+    pn_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=al_result.trajectory)
     pn_result = PN(options=SolverOptions()).solve(prob, pn_state)
 
     assert pn_result.constraint_violation <= al_result.constraint_violation

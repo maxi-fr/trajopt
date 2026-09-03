@@ -84,8 +84,7 @@ def test_primal_bounds() -> None:
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     zL, zU = primal_bounds(prob)
@@ -109,8 +108,7 @@ def test_constraint_bounds() -> None:
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     gL, gU = constraint_bounds(prob)
@@ -179,8 +177,7 @@ def test_runtime_jacobian_value_ordering_matches_build_time_pattern() -> None:
 
     Q = jnp.diag(jnp.array([10.0, 1.0]))
     R = jnp.diag(jnp.array([0.1]))
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     x0 = jnp.array([0.1, 0.2])
@@ -232,8 +229,7 @@ def test_runtime_hessian_value_ordering_matches_build_time_pattern() -> None:
 
     Q = jnp.diag(jnp.array([10.0, 1.0]))
     R = jnp.diag(jnp.array([0.1]))
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     x0 = jnp.array([0.1, 0.2])
@@ -287,8 +283,7 @@ def test_compiled_phases_exist_and_match_callbacks() -> None:
 
     Q = jnp.eye(2)
     R = jnp.eye(1)
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
@@ -333,8 +328,7 @@ def test_callback_allocates_no_sparse_matrices() -> None:
 
     Q = jnp.eye(2)
     R = jnp.eye(1)
-    xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
@@ -373,8 +367,7 @@ def test_unconstrained_solve() -> None:
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
-    xf = jnp.array([0.0, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.array([0.5, 0.0])

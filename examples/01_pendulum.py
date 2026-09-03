@@ -118,13 +118,13 @@ def _(mo):
 
 
 @app.cell
-def _(LQRObjective, N, dt, jnp, xf):
+def _(LQRObjective, N, dt, jnp):
     # Stage and terminal cost matrices
     Q = jnp.diag(jnp.array([1.0, 0.1])) * dt
     R = jnp.diag(jnp.array([0.01])) * dt
     Qf = jnp.diag(jnp.array([100.0, 10.0]))
 
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
     return (obj,)
 
 
@@ -156,7 +156,7 @@ def _(ConstraintList, ControlBound, GoalConstraint, N, m, n, xf):
 
 
 @app.cell
-def _(MPCState, N, Problem, clist, dt, integrator, model, obj, x0):
+def _(MPCState, N, Problem, clist, dt, integrator, model, obj, x0, xf):
     # Assemble the optimal control problem
     prob = Problem(
         model=model,
@@ -167,7 +167,7 @@ def _(MPCState, N, Problem, clist, dt, integrator, model, obj, x0):
     )
 
     # Initial MPC state containing initial conditions and timestep
-    state = MPCState.initial(prob, x0=x0, dt=dt)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
     return prob, state
 
 

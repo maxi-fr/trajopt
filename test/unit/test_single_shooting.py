@@ -26,11 +26,7 @@ def test_single_shooting_dimensions() -> None:
     dt = 0.05
     xf = jnp.array([np.pi, 0.0])
     obj = LQRObjective(
-        Q=jnp.diag(jnp.array([10.0, 1.0])),
-        R=jnp.diag(jnp.array([0.1])),
-        Qf=jnp.diag(jnp.array([100.0, 10.0])),
-        xf=xf,
-        N=N,
+        Q=jnp.diag(jnp.array([10.0, 1.0])), R=jnp.diag(jnp.array([0.1])), Qf=jnp.diag(jnp.array([100.0, 10.0])), N=N
     )
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
@@ -53,7 +49,7 @@ def test_single_shooting_rejects_state_bound() -> None:
     model = Pendulum()
     n, m, N = model.n, model.m, 10
     xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), N=N)
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(StateBound(n=n, x_min=[-1.0, -1.0], x_max=[1.0, 1.0]), range(N))
     prob = Problem(model=model, obj=obj, constraints=constraints, N=N, integrator=RK4())
@@ -68,7 +64,7 @@ def test_single_shooting_accepts_general_stage_constraint() -> None:
     model = Pendulum()
     n, m, N = model.n, model.m, 10
     xf = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), N=N)
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(
         LinearConstraint(n=n, m=m, A=jnp.array([[1.0, 0.0, 0.0]]), b=jnp.array([10.0])),
@@ -109,11 +105,7 @@ def test_single_shooting_matches_multiple_shooting() -> None:
     dt = 0.05
     xf = jnp.array([np.pi, 0.0])
     obj = LQRObjective(
-        Q=jnp.diag(jnp.array([10.0, 1.0])),
-        R=jnp.diag(jnp.array([0.1])),
-        Qf=jnp.diag(jnp.array([100.0, 10.0])),
-        xf=xf,
-        N=N,
+        Q=jnp.diag(jnp.array([10.0, 1.0])), R=jnp.diag(jnp.array([0.1])), Qf=jnp.diag(jnp.array([100.0, 10.0])), N=N
     )
     constraints = ConstraintList(n=n, m=m, N=N)
     constraints.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))

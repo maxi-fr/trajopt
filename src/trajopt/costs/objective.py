@@ -153,6 +153,19 @@ class Objective(eqx.Module):
             self.terminal_cost, QuadraticCostFunction
         )
 
+    @property
+    def carries_reference(self) -> bool:
+        """Whether the linear and constant terms are already aimed at a build-time reference.
+
+        True for a `TrackingObjective` or anything passed through `update_reference`, and False
+        for the shape-only `LQRObjective`, whose q, r and c start at zero. Reads concrete values,
+        so it belongs to eager problem setup rather than to a traced solver core.
+        """
+        if not self.is_quadratic:
+            return False
+        terms = (self.q, self.r, self.c, self.q_f, self.c_f)
+        return any(bool(jnp.any(term)) for term in terms)
+
     def cost(self, traj: Trajectory) -> jax.Array:
         """Total cost sum_k l_k over the trajectory, as a scalar, in one batched pass."""
         stage_c = self.stage_cost.stage_costs(traj.X[:-1], traj.U, traj.t[:-1])
@@ -233,18 +246,16 @@ class Objective(eqx.Module):
         return self.stage_cost.unstacked(k)
 
 
-def LQRObjective(  # noqa: N802, PLR0913, PLR0917
-    Q: jax.Array,
-    R: jax.Array,
-    Qf: jax.Array,
-    xf: jax.Array,
-    N: int,
-    uf: jax.Array | None = None,
-) -> Objective:
-    """Construct an LQR tracking objective with stacked-constant parameters over horizon N.
+def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective:  # noqa: N802
+    """Construct an LQR objective carrying shape only, with stacked-constant weights over horizon N.
 
-    Formula:
-    (x_N - xf)^T Qf (x_N - xf) + sum_{k=0}^{N-2} [ (x_k - xf)^T Q (x_k - xf) + (u_k - uf)^T R (u_k - uf) ]
+    Formula, once a reference window (X_ref, U_ref) has been applied by `Objective.with_reference`:
+    (x_N - x_ref_N)^T Qf (x_N - x_ref_N)
+    + sum_{k=0}^{N-2} [ (x_k - x_ref_k)^T Q (x_k - x_ref_k) + (u_k - u_ref_k)^T R (u_k - u_ref_k) ]
+
+    The target is no longer baked in at construction: the linear and constant terms start at zero,
+    which regulates to the origin, and the goal arrives as traced data through
+    `BoundaryConditions` (pass `xf` or `reference` to `MPCState.initial`).
 
     Weights are held diagonally only if all three are diagonal vectors; otherwise all three are
     embedded as dense matrices.
@@ -257,25 +268,16 @@ def LQRObjective(  # noqa: N802, PLR0913, PLR0917
         Control weights of shape (m,) if diagonal or (m, m) if dense.
     Qf : jax.Array
         Terminal state weights of shape (n,) if diagonal or (n, n) if dense.
-    xf : jax.Array
-        Goal state of shape (n,).
     N : int
         Horizon length in knot points.
-    uf : jax.Array | None, optional
-        Goal control of shape (m,). Defaults to zeros.
     """
-    xf_arr = jnp.asarray(xf)
     cost_cls, (Q_arr, R_arr, Qf_arr) = promote_weights(Q, R, Qf)
     m = int(R_arr.shape[-1])
-    uf_arr = jnp.zeros(m, dtype=xf_arr.dtype) if uf is None else jnp.asarray(uf, dtype=xf_arr.dtype)
-
-    stage_cost = cost_cls.tracking(
-        jnp.repeat(Q_arr[None], N - 1, axis=0),
-        jnp.repeat(R_arr[None], N - 1, axis=0),
-        xf_arr,
-        uf_arr,
+    stage_cost = cost_cls(
+        Q=jnp.repeat(Q_arr[None], N - 1, axis=0),
+        R=jnp.repeat(R_arr[None], N - 1, axis=0),
     )
-    terminal_cost = cost_cls.terminal_tracking(Qf_arr, xf_arr, m)
+    terminal_cost = cost_cls(Q=Qf_arr, terminal=True, m=m)
     return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
 
 

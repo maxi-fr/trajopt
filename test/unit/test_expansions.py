@@ -193,7 +193,7 @@ def test_dynamics_expansion_discrete_finite_differences() -> None:
 
 def test_dynamics_expansion_problem_wrapper() -> None:
     model = Pendulum()
-    obj = LQRObjective(jnp.ones(2), jnp.ones(1), jnp.ones(2), jnp.zeros(2), 6)
+    obj = LQRObjective(jnp.ones(2), jnp.ones(1), jnp.ones(2), 6)
     problem = Problem(model=model, obj=obj, integrator=Euler())
 
     traj = Trajectory(
@@ -216,13 +216,9 @@ def test_cost_expansion_diagonal_lqr() -> None:
     xf = jnp.array([1.0, -0.5, 2.0])
     uf = jnp.array([0.1, -0.2])
 
-    obj = LQRObjective(
-        Q=Q_diag,
-        R=R_diag,
-        Qf=Qf_diag,
-        xf=xf,
-        N=N,
-        uf=uf,
+    obj = LQRObjective(Q=Q_diag, R=R_diag, Qf=Qf_diag, N=N).with_reference(
+        jnp.broadcast_to(xf, (N, n)),
+        jnp.broadcast_to(uf, (N - 1, m)),
     )
 
     rng = np.random.default_rng(7)
@@ -523,7 +519,7 @@ def test_error_coordinates_with_mock_attitude_jacobian() -> None:
         np.testing.assert_allclose(exp_dyn.B[k], expected_B_bar, rtol=1e-12, atol=1e-12)
 
     # 2. Cost expansion in error coordinates
-    obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), jnp.zeros(n), N)
+    obj = LQRObjective(jnp.ones(n), jnp.ones(m), jnp.ones(n), N)
     problem = Problem(model=model, obj=obj, N=N)
     exp_cost = problem.cost_expansion(traj)
 

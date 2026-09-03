@@ -134,7 +134,7 @@ def _(
     R = jnp.diag(jnp.array([0.05])) * dt
     Qf = jnp.diag(jnp.array([50.0, 200.0, 10.0, 20.0]))
 
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
 
     # Constraints: Actuator limits & Cart track safety envelope
     u_max = 20.0  # Force limits [-20 N, +20 N]
@@ -170,8 +170,8 @@ def _(
     )
 
     # Initialize MPC state container
-    state_init = MPCState.initial(prob, x0=x0, dt=dt)
-    return dmodel, dt, model, n_steps, prob, state_init, u_max, x0, x_track_max
+    state_init = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
+    return dmodel, dt, model, n_steps, prob, state_init, u_max, x0, x_track_max, xf
 
 
 @app.cell(hide_code=True)
@@ -191,7 +191,7 @@ def _(mo):
 
 
 @app.cell
-def _(ALTRO, Ipopt, MPCState, dt, prob, state_init, time, x0):
+def _(ALTRO, Ipopt, MPCState, dt, prob, state_init, time, x0, xf):
     altro_solver = ALTRO()
     ipopt_solver = Ipopt()
 
@@ -210,7 +210,7 @@ def _(ALTRO, Ipopt, MPCState, dt, prob, state_init, time, x0):
 
     # The same ALTRO solve seeded with Ipopt's trajectory. This seeded state is what the
     # closed loop below starts from; every later step warm-starts off the previous plan.
-    state_seeded = MPCState.initial(prob, x0=x0, dt=dt, initial_z=res_ipopt_init.Z)
+    state_seeded = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_z=res_ipopt_init.Z)
     t0_seeded = time.perf_counter()
     res_altro_seeded = prob.solve(state_seeded, solver=altro_solver)
     altro_seeded_ms = (time.perf_counter() - t0_seeded) * 1000.0

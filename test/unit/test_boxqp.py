@@ -24,6 +24,8 @@ from trajopt.solvers.ilqr import DynamicRegularization, backward_pass
 from trajopt.solvers.options import SolverOptions, TerminationStatus
 from trajopt.trajectory import Trajectory
 
+XF = jnp.array([0.0, np.pi, 0.0, 0.0])
+
 
 def _lqr_expansion(N: int, ne: int, m: int, *, seed: int = 0) -> Expansion:
     """Build a time-varying, regulation-about-origin (q=r=0) LQ expansion for testing.
@@ -71,13 +73,12 @@ def _cartpole_problem(u_bnd: float = 6.0) -> tuple[Problem, jnp.ndarray, float]:
     R = 1e-1 * np.ones(m) * dt
     Qf = 1e2 * np.ones(n)
     x0 = jnp.zeros(n)
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
-    clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
+    clist.add_constraint(GoalConstraint(n=n, xf=XF.tolist()), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
     return prob, x0, dt
@@ -91,9 +92,8 @@ def _control_only_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, flo
     R = 1e-1 * np.ones(m) * dt
     Qf = 1e2 * np.ones(n)
     x0 = jnp.zeros(n)
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
@@ -287,7 +287,7 @@ def test_boxqp_control_only_solves_within_bounds_even_early_not_only_at_converge
     """A control-bounded cartpole solved by BoxQP keeps every rolled-out control inside bounds, even far from convergence."""
     u_bnd = 3.0
     prob, x0, dt = _control_only_problem(u_bnd=u_bnd)
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
 
     for n_iters in (1, 2, 5, 300):
         options = SolverOptions(iterations=n_iters, iterations_outer=1)
@@ -299,15 +299,14 @@ def test_boxqp_with_goal_constraint_converges_and_respects_bounds() -> None:
     """Control bounds route to box-QP while the goal constraint still goes through the AL outer loop."""
     u_bnd = 6.0
     prob, x0, dt = _cartpole_problem(u_bnd=u_bnd)
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     result = BoxQP(options=options).solve(prob, state)
 
     assert result.success
     assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
-    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(xf), atol=1e-3)
+    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(XF), atol=1e-3)
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= u_bnd + 1e-6))
 
 
@@ -319,7 +318,7 @@ def test_boxqp_and_al_reach_comparable_final_cost() -> None:
     final base (non-AL-augmented) trajectory costs should agree closely once both have converged.
     """
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     al_result = AL(options=options).solve(prob, state)

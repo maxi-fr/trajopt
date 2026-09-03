@@ -140,7 +140,7 @@ xf = jnp.array([np.pi, 0.0])
 Q = jnp.diag(jnp.array([10.0, 1.0]))
 R = jnp.diag(jnp.array([0.1]))
 Qf = jnp.diag(jnp.array([100.0, 10.0]))
-obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)  # shape only; the goal arrives with the MPCState
 
 # 3. Add constraints (torque limits and terminal goal)
 constraints = ConstraintList(n=n, m=m, N=N)

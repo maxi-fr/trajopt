@@ -150,13 +150,12 @@ def test_rollout_closed_loop_first_failure_across_knots_wins() -> None:
 
 _Q = jnp.asarray([1.0])
 _R = jnp.asarray([1.0])
-_XF = jnp.asarray([0.0])
 
 
 def _lqr_setup(x0: float, N: int) -> tuple[_LinearDiscreteModel, Trajectory, Objective]:
     model = _LinearDiscreteModel(Ad=1.0, Bd=1.0)
     nominal = _trajectory([x0] * N, [0.0] * (N - 1))
-    obj = LQRObjective(_Q, _R, _Q, _XF, N)
+    obj = LQRObjective(_Q, _R, _Q, N)
     return model, nominal, obj
 
 

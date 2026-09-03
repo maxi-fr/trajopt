@@ -23,8 +23,8 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
 
 
-def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
-    """Cartpole swing-up with a symmetric control bound and a terminal goal constraint."""
+def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float, jnp.ndarray]:
+    """Cartpole swing-up with a symmetric control bound and a terminal goal constraint, plus its goal."""
     n, m, N, tf = 4, 1, 101, 5.0
     dt = tf / (N - 1)
     Q = 1e-2 * np.ones(n) * dt
@@ -33,28 +33,28 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     x0 = jnp.zeros(n)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
-    return prob, x0, dt
+    return prob, x0, dt, xf
 
 
-def _lq_problem() -> tuple[Problem, jnp.ndarray, float]:
-    """A small unconstrained pendulum swing-up problem, for the iLQR-shortcut path."""
+def _lq_problem() -> tuple[Problem, jnp.ndarray, float, jnp.ndarray]:
+    """A small unconstrained pendulum swing-up problem, for the iLQR-shortcut path, plus its goal."""
     model = Pendulum()
     N = 21
     Q = jnp.diag(jnp.array([1.0, 0.1]))
     R = jnp.eye(1) * 0.01
     Qf = jnp.diag(jnp.array([10.0, 1.0]))
     xf = jnp.array([jnp.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
     x0 = jnp.array([0.0, 0.0])
-    return prob, x0, 0.05
+    return prob, x0, 0.05, xf
 
 
 def test_altro_satisfies_solver_protocol() -> None:
@@ -64,8 +64,8 @@ def test_altro_satisfies_solver_protocol() -> None:
 
 def test_altro_result_satisfies_solver_result_protocol() -> None:
     """ALTROResult structurally satisfies the SolverResult protocol."""
-    prob, x0, dt = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _lq_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     result = ALTRO().solve(prob, state)
     assert isinstance(result, ALTROResult)
     assert isinstance(result, SolverResult)
@@ -86,8 +86,8 @@ def test_altro_unconstrained_takes_ilqr_shortcut_without_al_or_pn_state(monkeypa
     monkeypatch.setattr(altro_module, "al_solve", fail_al_solve)
     monkeypatch.setattr(altro_module, "pn_solve", fail_pn_solve)
 
-    prob, x0, dt = _lq_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _lq_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     result = ALTRO().solve(prob, state)
 
     assert result.success
@@ -98,13 +98,13 @@ def test_altro_unconstrained_takes_ilqr_shortcut_without_al_or_pn_state(monkeypa
 
 def test_is_unconstrained_true_for_bare_problem() -> None:
     """A Problem built with no constraints and no box bounds is structurally unconstrained."""
-    prob, _x0, _dt = _lq_problem()
+    prob, _x0, _dt, _xf = _lq_problem()
     assert prob.constraints.is_unconstrained()
 
 
 def test_is_unconstrained_false_with_control_bound() -> None:
     """A Problem with a ControlBound is not structurally unconstrained."""
-    prob, _x0, _dt = _cartpole_problem()
+    prob, _x0, _dt, _xf = _cartpole_problem()
     assert not prob.constraints.is_unconstrained()
 
 
@@ -139,9 +139,8 @@ def test_altro_cartpole_reaches_tight_violation_via_pn() -> None:
     (1e-3); the real `constraint_tolerance` default (1e-6) is tighter, so PN must actually run and
     do the polishing for this to pass.
     """
-    prob, x0, dt = _cartpole_problem()
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _cartpole_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     result = ALTRO(options=options).solve(prob, state)
@@ -165,8 +164,8 @@ def test_altro_negative_projected_newton_tolerance_works_end_to_end_via_kickout(
     constraint_tolerance without PN's help, so it is `al_iterations < iterations_outer` -- not
     `ran_pn` -- that proves the kickout path actually fired.
     """
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _cartpole_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30, projected_newton_tolerance=-1.0)
 
     result = ALTRO(options=options).solve(prob, state)
@@ -187,8 +186,7 @@ def test_altro_backup_check_does_not_upgrade_max_iterations_outer(monkeypatch: p
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt = _cartpole_problem()
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
+    prob, x0, dt, xf = _cartpole_problem()
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -232,7 +230,7 @@ def test_altro_pn_does_not_run_on_max_iterations_outer_without_force_pn(monkeypa
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem()
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -273,7 +271,7 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem()
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -316,8 +314,8 @@ def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    prob, x0, dt, xf = _cartpole_problem()
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
     altro = ALTRO(options=SolverOptions(iterations=50, iterations_outer=5))
 
     _ = altro.solve(prob, state)
@@ -332,7 +330,7 @@ def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem
 
 def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:
     """altro_solve runs unchanged under jax.jit, and vmaps over a batch of initial states."""
-    prob, x0, dt = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem()
     N, m = prob.N, prob.model.m
     options = SolverOptions(iterations=300, iterations_outer=30)
     al0 = ALConstraints.build(prob.constraints, penalty_initial=options.penalty_initial)

@@ -164,7 +164,7 @@ def _bound_active_double_integrator() -> tuple[Problem, MPCState]:
 
     x0 = jnp.array([1.0, -0.8, 0.0, 0.0])
     xf = jnp.zeros(n)
-    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m) * 0.1, Qf=jnp.eye(n) * 10.0, xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m) * 0.1, Qf=jnp.eye(n) * 10.0, N=N)
 
     cl = ConstraintList(n, m, N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-1.4, -1.4], u_max=[1.4, 1.4]), range(N - 1))
@@ -268,20 +268,21 @@ def test_dual_warm_start_cuts_iterations(name, solver_cls, opts, warm_startable)
         assert res_both.iterations == res_primal.iterations
 
 
-def _pendulum_swingup_problem() -> tuple[Problem, jax.Array, float]:
-    """Build a bounded Pendulum swing-up, whose RK4 dynamics are genuinely nonlinear."""
+def _pendulum_swingup_problem() -> tuple[Problem, jax.Array, float, jax.Array]:
+    """Build a bounded Pendulum swing-up, whose RK4 dynamics are genuinely nonlinear, plus its goal."""
     model = DiscretizedDynamics(Pendulum(), RK4())
     n, m, N, dt = 2, 1, 21, 0.05
     obj = LQRObjective(
-        Q=jnp.diag(jnp.array([10.0, 1.0])),
-        R=jnp.diag(jnp.array([0.1])),
-        Qf=jnp.diag(jnp.array([100.0, 10.0])),
-        xf=jnp.array([np.pi, 0.0]),
-        N=N,
+        Q=jnp.diag(jnp.array([10.0, 1.0])), R=jnp.diag(jnp.array([0.1])), Qf=jnp.diag(jnp.array([100.0, 10.0])), N=N
     )
     cl = ConstraintList(n, m, N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))
-    return Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4()), jnp.array([0.1, 0.0]), dt
+    return (
+        Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4()),
+        jnp.array([0.1, 0.0]),
+        dt,
+        jnp.array([np.pi, 0.0]),
+    )
 
 
 # Eight re-expansions per backend, and the two parameters together are 60 seconds.
@@ -297,8 +298,8 @@ def _pendulum_swingup_problem() -> tuple[Problem, jax.Array, float]:
 )
 def test_operating_point_drives_a_qp_adapter_onto_the_nonlinear_solution(solver_cls, result_type, qp_options) -> None:
     """Assert re-expanding about the previous solution converges the linearized solve onto Ipopt's."""
-    problem, x0, dt = _pendulum_swingup_problem()
-    state = MPCState.initial(problem, x0=x0, dt=dt)
+    problem, x0, dt, xf = _pendulum_swingup_problem()
+    state = MPCState.initial(problem, x0=x0, dt=dt, xf=xf)
     ref = Ipopt(options={"print_level": 0, "tol": 1e-8}).solve(problem, state)
 
     # Expanded about the origin the QP is a poor model of the pendulum, and says so: the

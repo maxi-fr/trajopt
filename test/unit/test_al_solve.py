@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from trajopt.solvers.ilqr import SolveKD
 
 
+XF = jnp.array([0.0, np.pi, 0.0, 0.0])
+
+
 def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     """Cartpole swing-up with a symmetric control bound and a terminal goal constraint."""
     n, m, N, tf = 4, 1, 101, 5.0
@@ -29,13 +32,12 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     R = 1e-1 * np.ones(m) * dt
     Qf = 1e2 * np.ones(n)
     x0 = jnp.zeros(n)
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
-    clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
+    clist.add_constraint(GoalConstraint(n=n, xf=XF.tolist()), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
     return prob, x0, dt
@@ -49,7 +51,7 @@ def test_al_satisfies_solver_protocol() -> None:
 def test_al_result_satisfies_solver_result_protocol() -> None:
     """ALResult structurally satisfies the SolverResult protocol."""
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     result = AL(options=SolverOptions(iterations=300)).solve(prob, state)
     assert isinstance(result, ALResult)
     assert isinstance(result, SolverResult)
@@ -58,8 +60,7 @@ def test_al_result_satisfies_solver_result_protocol() -> None:
 def test_al_cartpole_converges_under_constraint_tolerance() -> None:
     """A bounded, goal-constrained cartpole swing-up drives max_violation under tolerance."""
     prob, x0, dt = _cartpole_problem()
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     result = AL(options=options).solve(prob, state)
@@ -67,7 +68,7 @@ def test_al_cartpole_converges_under_constraint_tolerance() -> None:
     assert result.success
     assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
     assert result.constraint_violation < options.constraint_tolerance
-    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(xf), atol=1e-4)
+    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(XF), atol=1e-4)
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-4))
 
 
@@ -82,8 +83,7 @@ def test_altro_substitutes_for_al_on_the_same_scenario() -> None:
     from trajopt.solvers.altro import ALTRO
 
     prob, x0, dt = _cartpole_problem()
-    xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     result = ALTRO(options=options).solve(prob, state)
@@ -91,7 +91,7 @@ def test_altro_substitutes_for_al_on_the_same_scenario() -> None:
     assert result.success
     assert result.status == int(TerminationStatus.SOLVE_SUCCEEDED)
     assert result.constraint_violation < options.constraint_tolerance
-    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(xf), atol=1e-4)
+    np.testing.assert_allclose(np.asarray(result.trajectory.X[-1]), np.asarray(XF), atol=1e-4)
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-4))
 
 
@@ -109,7 +109,7 @@ def test_al_solve_options_stay_untraced_and_hashable(monkeypatch: pytest.MonkeyP
     import trajopt.solvers.al as al_module
 
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     real_ilqr_solve = al_module.ilqr_solve
@@ -158,21 +158,23 @@ def test_al_max_iterations_outer_maps_to_infeasible_status() -> None:
     for a genuinely constrained problem.
     """
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=1)
 
     result = AL(options=options).solve(prob, state)
     assert result.status == int(TerminationStatus.MAX_ITERATIONS_OUTER)
     assert result.solver_status == "infeasible"
 
-    new_state = prob.solve(MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None), solver=AL(options=options))
+    new_state = prob.solve(
+        MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None), solver=AL(options=options)
+    )
     assert new_state.status == "infeasible"
 
 
 def test_al_populates_mpc_state_al_for_warm_starting() -> None:
     """prob.solve(state, solver=AL()) returns an MPCState whose `al` field carries the final duals."""
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     new_state = prob.solve(state, solver=AL(options=options))
@@ -188,11 +190,13 @@ def test_al_warm_start_converges_in_fewer_outer_iterations_than_cold() -> None:
     prob, x0, dt = _cartpole_problem()
     options = SolverOptions(iterations=300, iterations_outer=30, reset_duals=False, reset_penalties=False)
 
-    cold_state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    cold_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     cold_result = AL(options=options).solve(prob, cold_state)
     assert cold_result.success
 
-    warm_state = prob.solve(MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None), solver=AL(options=options))
+    warm_state = prob.solve(
+        MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None), solver=AL(options=options)
+    )
     warm_result = AL(options=options).solve(prob, warm_state)
 
     assert warm_result.success
@@ -312,7 +316,7 @@ def test_al_solve_breaks_on_ordinal_inner_status_without_updating_duals() -> Non
     or run a dual/penalty update for the (failed) first outer iteration.
     """
     prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=1, iterations_outer=30)
 
     result = AL(options=options).solve(prob, state)
@@ -353,7 +357,7 @@ def test_evaluate_al_convergence_max_iters_uses_this_iterations_inner_count() ->
 def test_al_stats_history_length_matches_iterations(u_bnd: float) -> None:
     """The trimmed ALStats history in .info["stats"] has exactly `iterations` entries, no trailing zeros."""
     prob, x0, dt = _cartpole_problem(u_bnd=u_bnd)
-    state = MPCState.initial(prob, x0=x0, dt=dt, initial_trajectory=None)
+    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     options = SolverOptions(iterations=300, iterations_outer=30)
 
     result = AL(options=options).solve(prob, state)

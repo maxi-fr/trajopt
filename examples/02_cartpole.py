@@ -9,7 +9,6 @@ def _():
     import time
 
     import jax.numpy as jnp
-    import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib import patches
@@ -72,7 +71,7 @@ def _(Cartpole):
 
 
 @app.cell
-def _(LQRObjective, N, jnp, xf):
+def _(LQRObjective, N, jnp):
     # Stage cost matrices
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
     R = jnp.diag(jnp.array([0.01]))
@@ -80,7 +79,7 @@ def _(LQRObjective, N, jnp, xf):
     # Terminal cost matrix
     Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
 
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
     return (obj,)
 
 

@@ -223,7 +223,7 @@ def test_lqr_objective_stacked_and_cost_evaluation() -> None:
     xf = jnp.array([1.0, 0.0, -1.0])
     uf = jnp.array([0.5, -0.5])
 
-    obj = LQRObjective(Q, R, Qf, xf, N, uf=uf)
+    obj = LQRObjective(Q, R, Qf, N).with_reference(jnp.broadcast_to(xf, (N, n)), jnp.broadcast_to(uf, (N - 1, m)))
     assert len(obj) == N
     assert obj.N == N
     assert obj.n == n
@@ -275,7 +275,7 @@ def test_mixed_diagonal_and_dense_weights() -> None:
     Qf = jnp.array([5.0, 6.0])
     xf = jnp.array([0.5, -0.5])
 
-    obj = LQRObjective(Q, R, Qf, xf, N)
+    obj = LQRObjective(Q, R, Qf, N).with_reference(jnp.broadcast_to(xf, (N, n)), jnp.zeros((N - 1, m)))
     assert not obj.is_diag
     assert obj.Q.shape == (N - 1, n, n)
     assert obj.R.shape == (N - 1, m, m)
@@ -367,9 +367,7 @@ def test_objective_indexing_and_properties() -> None:
     Q = jnp.array([1.0, 2.0])
     R = jnp.array([3.0])
     Qf = jnp.array([10.0, 20.0])
-    xf = jnp.array([0.0, 0.0])
-
-    obj = LQRObjective(Q, R, Qf, xf, N)
+    obj = LQRObjective(Q, R, Qf, N)
     assert len(obj) == N
 
     # Stage knot points

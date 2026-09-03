@@ -25,7 +25,7 @@ from trajopt.models.cartpole import Cartpole
 from trajopt.models.dubins import DubinsCar
 from trajopt.models.pendulum import Pendulum
 from trajopt.models.quadrotor import Quadrotor
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, retarget_to_goal
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt
 
@@ -49,7 +49,7 @@ def test_cartpole_with_state_limits_casadi_parity() -> None:
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
     R = jnp.diag(jnp.array([0.01]))
     Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
 
     x_min = [-2.0, -np.inf, -np.inf, -np.inf]
     x_max = [2.0, np.inf, np.inf, np.inf]
@@ -107,7 +107,7 @@ def test_dubins_car_with_corridor_and_obstacles_casadi_parity() -> None:
     Q = jnp.diag(jnp.array([1.0, 1.0, 0.1]))
     R = jnp.diag(jnp.array([0.1, 0.1]))
     Qf = jnp.diag(jnp.array([100.0, 100.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
 
     x_min = [-1.0, -1.0, -np.inf]
     x_max = [3.0, 3.0, np.inf]
@@ -177,7 +177,7 @@ def test_dual_multipliers_parity_under_identical_solver_settings() -> None:
     Q = jnp.diag(jnp.array([1.0, 1.0, 0.1]))
     R = jnp.diag(jnp.array([0.1, 0.1]))
     Qf = jnp.diag(jnp.array([100.0, 100.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(GoalConstraint(n=n, xf=xf), N - 1)
@@ -216,7 +216,7 @@ def test_setup_assertion_detects_mismatch() -> None:
     Q = jnp.eye(3)
     R = jnp.eye(2)
     Qf = jnp.eye(3)
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
     cl = ConstraintList(n=n, m=m, N=N)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
 
@@ -251,7 +251,7 @@ def test_automated_builder_matches_standalone_builders() -> None:
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
     R = jnp.diag(jnp.array([0.01]))
     Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
@@ -295,7 +295,7 @@ def test_pendulum_casadi_parity() -> None:
     Q = jnp.diag(jnp.array([10.0, 1.0]))
     R = jnp.diag(jnp.array([0.1]))
     Qf = jnp.diag(jnp.array([100.0, 100.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = retarget_to_goal(LQRObjective(Q=Q, R=R, Qf=Qf, N=N), jnp.asarray(xf))
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-5.0], u_max=[5.0]), range(N - 1))

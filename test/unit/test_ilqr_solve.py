@@ -56,8 +56,7 @@ def _lq_problem(seed: int = 0) -> tuple[Problem, jax.Array]:
     Q = np.eye(n)
     R = np.eye(m)
     Qf = 5.0 * np.eye(n)
-    xf = jnp.zeros(n)
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=xf, N=N)
+    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
     x0 = jnp.asarray(rng.normal(size=n))
@@ -290,11 +289,11 @@ def test_ilqr_pendulum_swingup_converges() -> None:
     R = jnp.eye(1) * 0.01
     Qf = jnp.diag(jnp.array([100.0, 10.0]))
     xf = jnp.array([jnp.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
-    state = MPCState.initial(prob, x0=x0, dt=0.05)
+    state = MPCState.initial(prob, x0=x0, dt=0.05, xf=xf)
 
     result = ILQR(options=SolverOptions(iterations=300)).solve(prob, state)
     assert result.success

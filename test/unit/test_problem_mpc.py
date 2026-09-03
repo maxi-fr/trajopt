@@ -36,7 +36,7 @@ def test_problem_structure_mpcstate_split() -> None:
     R = jnp.eye(1)
     xf = jnp.array([np.pi, 0.0])
     N = 10
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     cl = ConstraintList(n=2, m=1, N=N)
     cl.add_constraint(GoalConstraint(n=2, xf=xf), N - 1)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
@@ -77,7 +77,7 @@ def test_mpcstate_per_step_operations_return_new_values() -> None:
     R = jnp.eye(1)
     xf = jnp.array([np.pi, 0.0])
     N = 5
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.array([0.0, 0.0])
@@ -124,7 +124,7 @@ def test_goal_state_single_source_of_truth() -> None:
     Q = jnp.eye(n)
     R = jnp.eye(m)
     xf_initial = jnp.array([np.pi, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf_initial, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(GoalConstraint(n=n, xf=xf_initial), N - 1)
     prob = Problem(model=model, obj=obj, constraints=cl, N=N, integrator=RK4())
@@ -161,7 +161,7 @@ def test_zero_recompile_across_100_mpc_iterations() -> None:
     Q = jnp.eye(n)
     R = jnp.eye(m)
     xf_init = jnp.array([0.0, np.pi, 0.0, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf_init, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.zeros(n)
@@ -236,7 +236,7 @@ def test_model_parameters_traced_zero_recompile() -> None:
     Q = jnp.eye(n)
     R = jnp.eye(m)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob1 = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     state = MPCState.initial(prob1, x0=jnp.zeros(n), t0=0.0, xf=xf)
@@ -278,7 +278,7 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
     R = jnp.diag(jnp.array([0.01]))
     Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
@@ -325,7 +325,7 @@ def test_closed_loop_cartpole_mpc() -> None:
     Q = jnp.diag(jnp.array([5.0, 20.0, 1.0, 2.0]))
     R = jnp.diag(jnp.array([0.05]))
     Qf = jnp.diag(jnp.array([50.0, 200.0, 10.0, 20.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
 
     cl = ConstraintList(n=n, m=m, N=N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-20.0], u_max=[20.0]), range(N - 1))
@@ -360,7 +360,7 @@ def test_rollout_problem_state() -> None:
     Q = jnp.eye(n)
     R = jnp.eye(m)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0])
-    obj = LQRObjective(Q=Q, R=R, Qf=Q, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Q, N=N)
     prob = Problem(model=model, obj=obj, N=N, integrator=RK4())
 
     x0 = jnp.array([0.1, 0.2, 0.0, 0.0])
@@ -402,7 +402,7 @@ def _tracking_problem() -> tuple[Problem, Trajectory]:
 
 
 def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
-    """Assert a run-time xf moves an LQRObjective exactly as rebuilding it at the new goal would."""
+    """Assert a run-time xf moves a shape-only LQRObjective exactly as baking that goal in would."""
     model = Cartpole()
     N = 8
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
@@ -411,8 +411,12 @@ def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
     xf_build = jnp.array([0.0, np.pi, 0.0, 0.0])
     xf_new = jnp.array([0.3, 2.0, -0.1, 0.4])
 
-    prob = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf_build, N=N), N=N, integrator=RK4())
-    prob_rebuilt = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf_new, N=N), N=N, integrator=RK4())
+    prob = Problem(model=model, obj=LQRObjective(Q=Q, R=R, Qf=Qf, N=N), N=N, integrator=RK4())
+    obj_rebuilt = LQRObjective(Q=Q, R=R, Qf=Qf, N=N).with_reference(
+        jnp.broadcast_to(xf_new, (N, model.n)),
+        jnp.zeros((N - 1, model.m)),
+    )
+    prob_rebuilt = Problem(model=model, obj=obj_rebuilt, N=N, integrator=RK4())
 
     state = MPCState.initial(prob, x0=jnp.array([0.1, 0.2, 0.0, 0.0]), dt=0.05, xf=xf_build)
     Z = state.Z + 0.05 * jnp.arange(len(state.Z), dtype=state.Z.dtype)
@@ -472,3 +476,17 @@ def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
     assert state.xf is None
     with pytest.raises(ValueError, match="built without a goal"):
         state.with_goal(x0)
+
+
+def test_constant_goal_rejected_against_an_objective_that_already_tracks() -> None:
+    """Assert xf is refused on a TrackingObjective, whose per-knot reference it would flatten.
+
+    A constant goal window overwrites q, r and c at every knot, so it silently replaces the
+    tracked trajectory rather than adding to it. The window form is the way to move that target.
+    """
+    prob, ref = _tracking_problem()
+
+    with pytest.raises(ValueError, match="already tracks a build-time reference"):
+        MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, xf=jnp.array([2.0, 0.0, 0.0]))
+
+    MPCState.initial(prob, x0=jnp.zeros(3), dt=0.1, reference=ref)

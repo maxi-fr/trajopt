@@ -130,7 +130,7 @@ def cartpole_swingup_benchmark(  # noqa: PLR0913 -- benchmark problem factory pa
     Q = jnp.diag(jnp.array([1.0, 10.0, 0.1, 0.1]))
     R = jnp.diag(jnp.array([0.01]))
     Qf = jnp.diag(jnp.array([100.0, 1000.0, 10.0, 10.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf_arr, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
 
     x_min = [-x_pos_bound, -np.inf, -np.inf, -np.inf]
     x_max = [x_pos_bound, np.inf, np.inf, np.inf]

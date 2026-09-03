@@ -24,7 +24,11 @@ TRACK = 0.8
 
 
 def _build():
-    """Cartpole balancing problem of examples/05: bounded force, bounded track, LQR to upright."""
+    """Cartpole balancing problem of examples/05: bounded force, bounded track, LQR to upright.
+
+    Returns the problem, its discretized model, the initial state, and the upright goal, which is
+    now run-time data the MPCState carries rather than a target baked into the objective.
+    """
     n, m = 4, 1
     x0 = jnp.array([0.0, np.pi - 0.25, 0.1, -0.2], dtype=jnp.float64)
     xf = jnp.array([0.0, np.pi, 0.0, 0.0], dtype=jnp.float64)
@@ -33,7 +37,6 @@ def _build():
         Q=jnp.diag(jnp.array([5.0, 20.0, 1.0, 2.0])) * DT,
         R=jnp.diag(jnp.array([0.05])) * DT,
         Qf=jnp.diag(jnp.array([50.0, 200.0, 10.0, 20.0])),
-        xf=xf,
         N=N,
     )
 
@@ -52,10 +55,10 @@ def _build():
     model = Cartpole(mc=1.0, mp=0.2, l=0.5, g=9.81)
     integrator = RK4()
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=integrator)
-    return prob, model.discretize(integrator), x0
+    return prob, model.discretize(integrator), x0, xf
 
 
-def _record_ipopt_seed(prob, x0):
+def _record_ipopt_seed(prob, x0, xf):
     """Solve the first horizon with Ipopt, returning the Z that puts ALTRO on the balancing branch.
 
     Only the one-off golden regeneration calls this; the comparison path replays the Z stored in
@@ -64,14 +67,14 @@ def _record_ipopt_seed(prob, x0):
     pytest.importorskip("cyipopt", reason="regenerating the golden needs the Ipopt seed")
     from trajopt.transcription.ipopt import Ipopt
 
-    state = MPCState.initial(prob, x0=x0, dt=DT)
+    state = MPCState.initial(prob, x0=x0, dt=DT, xf=xf)
     return np.asarray(prob.solve(state, solver=Ipopt()).Z)
 
 
 def _run_closed_loop(z_seed):
     """Run the receding-horizon loop from the seeded plan, returning closed-loop states and controls."""
-    prob, dmodel, x0 = _build()
-    state = MPCState.initial(prob, x0=x0, dt=DT, initial_z=jnp.asarray(z_seed))
+    prob, dmodel, x0, xf = _build()
+    state = MPCState.initial(prob, x0=x0, dt=DT, xf=xf, initial_z=jnp.asarray(z_seed))
     solver = ALTRO()
 
     x_curr, t_curr = x0, 0.0
@@ -104,8 +107,8 @@ def closed_loop():
         X, U = _run_closed_loop(ref["Z_seed"])
         return X, U, ref
 
-    prob, _, x0 = _build()
-    z_seed = _record_ipopt_seed(prob, x0)
+    prob, _, x0, xf = _build()
+    z_seed = _record_ipopt_seed(prob, x0, xf)
     X, U = _run_closed_loop(z_seed)
     GOLDEN.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(GOLDEN, X=X, U=U, Z_seed=z_seed)

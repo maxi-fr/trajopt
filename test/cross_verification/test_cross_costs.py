@@ -221,13 +221,9 @@ def test_cross_lqr_objective_and_cost(jl_to: Any) -> None:
     xf_np = np.array([1.0, -0.5, 2.0])
     uf_np = np.array([0.2, -0.3])
 
-    obj_py = LQRObjective(
-        Q=jnp.array(Q_diag),
-        R=jnp.array(R_diag),
-        Qf=jnp.array(Qf_diag),
-        xf=jnp.array(xf_np),
-        N=N,
-        uf=jnp.array(uf_np),
+    obj_py = LQRObjective(Q=jnp.array(Q_diag), R=jnp.array(R_diag), Qf=jnp.array(Qf_diag), N=N).with_reference(
+        jnp.broadcast_to(jnp.array(xf_np), (N, n)),
+        jnp.broadcast_to(jnp.array(uf_np), (N - 1, m)),
     )
 
     jl_create_lqr = jl.seval("""

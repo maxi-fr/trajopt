@@ -8,7 +8,7 @@ from trajopt.constraints import ConstraintList, ControlBound, GoalConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models import Cartpole
-from trajopt.problem import MPCState, Problem
+from trajopt.problem import MPCState, Problem, retarget_to_goal
 from trajopt.solvers.al import AL
 from trajopt.solvers.options import SolverOptions, TerminationStatus
 from trajopt.solvers.pn import pn_solve
@@ -98,7 +98,7 @@ def _cartpole_setup() -> tuple[int, int, int, float, np.ndarray, np.ndarray, np.
 def _python_problem() -> tuple[Problem, float, np.ndarray]:
     n, m, N, dt, Q, R, Qf, u_bnd, xf = _cartpole_setup()
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=jnp.asarray(xf), N=N)
+    obj = retarget_to_goal(LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N), jnp.asarray(xf))
 
     clist = ConstraintList(n=n, m=m, N=N)
     clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))

@@ -17,7 +17,7 @@ GOAL = jnp.array([np.pi, 0.0], dtype=jnp.float64)
 
 def _build() -> Problem:
     """Unconstrained pendulum swing-up problem with a quadratic objective the run-time goal retargets."""
-    obj = LQRObjective(Q=jnp.eye(2) * DT, R=jnp.eye(1) * DT, Qf=jnp.eye(2) * 10.0, xf=GOAL, N=N)
+    obj = LQRObjective(Q=jnp.eye(2) * DT, R=jnp.eye(1) * DT, Qf=jnp.eye(2) * 10.0, N=N)
     return Problem(model=Pendulum(), obj=obj, constraints=None, N=N, integrator=RK4())
 
 

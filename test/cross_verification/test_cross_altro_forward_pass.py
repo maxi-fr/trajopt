@@ -7,6 +7,7 @@ import pytest
 
 from trajopt.costs.objective import LQRObjective, Objective
 from trajopt.models import Cartpole, Pendulum
+from trajopt.problem import retarget_to_goal
 from trajopt.solvers.ilqr import (
     DynamicRegularization,
     backward_pass,
@@ -157,7 +158,7 @@ def _pendulum_setup() -> _BenchmarkSetup:
     x0 = np.zeros(n)
     xf = np.array([np.pi, 0.0])
     model = Pendulum()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=jnp.asarray(xf), N=N)
+    obj = retarget_to_goal(LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N), jnp.asarray(xf))
     U0 = np.full((N - 1, m), 0.1)
     nominal = model.rollout(
         Trajectory(
@@ -182,7 +183,7 @@ def _cartpole_setup() -> _BenchmarkSetup:
     x0 = np.zeros(n)
     xf = np.array([0.0, np.pi, 0.0, 0.0])
     model = Cartpole()
-    obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), xf=jnp.asarray(xf), N=N)
+    obj = retarget_to_goal(LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N), jnp.asarray(xf))
     U0 = np.full((N - 1, m), 0.01)
     nominal = model.rollout(
         Trajectory(

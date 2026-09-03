@@ -275,7 +275,9 @@ class MPCState(eqx.Module):
         xf : jax.Array | Sequence[float] | None, optional
             Run-time goal state of shape (n,), held constant over the horizon as the reference
             window a quadratic objective is retargeted onto and any GoalConstraint reads.
-            Defaults to None, leaving both at their build-time target.
+            Defaults to None, which leaves a shape-only `LQRObjective` regulating to the origin
+            and any GoalConstraint at its build-time xf. Rejected when the objective already
+            tracks a reference, which a constant goal would flatten.
         reference : Trajectory | None, optional
             Full reference window of N knot points, used in place of a constant goal when the
             target varies over the horizon. Its last state serves as the run-time goal. Defaults
@@ -295,8 +297,8 @@ class MPCState(eqx.Module):
         Raises
         ------
         ValueError
-            If a target is given but nothing in the problem reads it, or if both xf and
-            reference are given.
+            If a target is given but nothing in the problem reads it, if both xf and reference
+            are given, or if xf is given against an objective that already tracks a reference.
         """
         N = int(problem.N)
         n = int(problem.model.n)
@@ -308,6 +310,14 @@ class MPCState(eqx.Module):
 
         if xf is not None and reference is not None:
             msg = "Pass either xf (a constant goal) or reference (a window), not both."
+            raise ValueError(msg)
+        if xf is not None and problem.obj.carries_reference:
+            msg = (
+                "This objective already tracks a build-time reference, so a constant goal xf would "
+                "silently overwrite it at every knot point. Pass reference=Trajectory(...) with the "
+                "window you want tracked, or build the objective with LQRObjective, which carries "
+                "shape only."
+            )
             raise ValueError(msg)
         if (xf is not None or reference is not None) and not (
             problem.obj.is_quadratic or problem.constraints.has_goal_constraint()

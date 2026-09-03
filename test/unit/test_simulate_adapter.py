@@ -31,7 +31,7 @@ def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, MPCS
     Q = jnp.diag(jnp.array([10.0, 1.0]))
     R = jnp.diag(jnp.array([0.1]))
     Qf = jnp.diag(jnp.array([50.0, 5.0]))
-    obj = LQRObjective(Q=Q, R=R, Qf=Qf, xf=xf, N=N)
+    obj = LQRObjective(Q=Q, R=R, Qf=Qf, N=N)
 
     constraints = ConstraintList(n=2, m=1, N=N)
     constraints.add_constraint(ControlBound(n=2, m=1, u_min=[-5.0], u_max=[5.0]), range(N - 1))
