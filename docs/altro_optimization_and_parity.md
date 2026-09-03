@@ -1,4 +1,4 @@
-﻿# ALTRO Solver Optimization, Parity, and Benchmark Diagnosis
+# ALTRO Solver Optimization, Parity, and Benchmark Diagnosis
 
 This document provides the complete diagnostic findings, profiling results, theoretical analysis, and implementation roadmap for optimizing the native JAX ALTRO solver (`src/trajopt/solvers/`) and resolving performance regressions against Ipopt and the Julia reference (`Altro.jl`).
 
@@ -12,7 +12,7 @@ Benchmarking was conducted on the three reference problems in `src/trajopt/bench
 
 | Problem | Horizon & Structure | Ipopt Runtime | ALTRO Runtime | ALTRO Status & Convergence |
 |---|---|---|---|---|
-| **Dubins Corridor** | $N=25, dt=0.1$, bounds on $y, v, \omega$ | **550.5 ms** (23 iters) | **24.3 ms** (`PN=False`)<br>**100.8 ms** (`PN=True`) | **22x faster than Ipopt** on AL alone. Projected Newton adds ~76 ms of dense KKT overhead. |
+| **Dubins Corridor** | $N=25, dt=0.1$, bounds on $y, v, \omega$ | **550.5 ms** (23 iters) | **24.3 ms** (`PN=False`) / **100.8 ms** (`PN=True`) | **22x faster than Ipopt** on AL alone. Projected Newton adds ~76 ms of dense KKT overhead. |
 | **Cartpole Swingup** | $N=25, dt=0.05$, bounds on $\|u\| \le 20$, $\|x_0\| \le 0.4$ | **552.9 ms** (47 iters) | 452.1 ms | **FAILED (`MAXIMUM_COST`)**: Cart moves left to $-1.31$m; penalty $\mu$ scales to $10^8$; $0.5 \mu c^2 > 10^8$ triggers `max_cost_value` abort. |
 | **Quadrotor Obstacle** | $N=25, dt=0.05$, $SO(3)$ attitude, spherical keep-out | **1107.8 ms** (49 iters) | 958.3 ms | **FAILED (`NO_PROGRESS`)**: Inner iLQR stalls on non-convex obstacle curvature; outer AL immediately aborts on outer iter 1. |
 
@@ -216,9 +216,9 @@ Instead of comparing monolithic 50-iteration trajectory solves, write targeted u
 
 ## 5. Summary of Implementation Checklist
 
-1. [ ] **`evaluate_al_residuals`**: Add to `al.py` and replace in `cost()`, `_al_step`, and `altro_solve`.
-2. [ ] **`multiplier_projection = False`**: Update default in `options.py`.
-3. [ ] **Conditional PN**: Wrap `pn_solve` in `jax.lax.cond(run_pn, ...)` in `altro.py`.
-4. [ ] **Soft Inner Exits in AL**: Update `_al_step` in `al.py` to allow `NO_PROGRESS` and `MAX_ITERATIONS` to proceed to outer updates.
-5. [ ] **Unit-Level Cross-Tests**: Add unit test cases for AL state machine transitions and residual evaluation in `test/cross_verification/`.
-6. [ ] **Benchmark Re-evaluation**: Run `scripts/benchmark_altro_vs_ipopt.py` and verify speedups across Dubins, Cartpole, and Quadrotor.
+1. [x] **`evaluate_al_residuals`**: Add to `al.py` and replace in `cost()`, `_al_step`, and `altro_solve`.
+2. [x] **`multiplier_projection = False`**: Update default in `options.py`.
+3. [x] **Conditional PN**: Wrap `pn_solve` in `jax.lax.cond(run_pn, ...)` in `altro.py`.
+4. [x] **Soft Inner Exits in AL**: Update `_al_step` in `al.py` to allow `NO_PROGRESS` and `MAX_ITERATIONS` to proceed to outer updates.
+5. [x] **Unit-Level Cross-Tests**: Add unit test cases for AL state machine transitions and residual evaluation in `test/cross_verification/`.
+6. [x] **Benchmark Re-evaluation**: Run `scripts/benchmark_altro_vs_ipopt.py` and verify speedups across Dubins, Cartpole, and Quadrotor.

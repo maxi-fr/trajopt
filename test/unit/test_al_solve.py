@@ -277,12 +277,11 @@ def test_evaluate_al_convergence_kickout_disabled_does_not_stop() -> None:
 
 
 def test_al_solve_breaks_on_ordinal_inner_status_without_updating_duals() -> None:
-    """finding C: an inner solve that exhausts options.iterations (status > SOLVE_SUCCEEDED) breaks the outer loop.
+    """Soft inner stalls (MAX_ITERATIONS) record iteration stats and exit when options.iterations is reached.
 
-    With options.iterations=1, the nonlinear cartpole swing-up cannot converge on its first iLQR
-    iteration, so the inner solve exits MAX_ITERATIONS (ordinal 3, greater than SOLVE_SUCCEEDED's
-    2). The outer loop must propagate that status directly and must not have recorded any stats
-    or run a dual/penalty update for the (failed) first outer iteration.
+    With options.iterations=1, the nonlinear cartpole swing-up inner solve exits MAX_ITERATIONS.
+    Under Phase 2 soft inner exits, MAX_ITERATIONS records the outer iteration stats (iterations=1)
+    and exits via _evaluate_al_convergence without running a dual/penalty update.
     """
     prob, x0, _dt = _cartpole_problem()
     options = SolverOptions(iterations=1, iterations_outer=30)
@@ -292,7 +291,7 @@ def test_al_solve_breaks_on_ordinal_inner_status_without_updating_duals() -> Non
     assert isinstance(result, ALResult)
     assert not result.success
     assert result.status == int(TerminationStatus.MAX_ITERATIONS)
-    assert result.iterations == 0
+    assert result.iterations == 1
     assert result.al is not None
     assert bool(jnp.all(result.al.lam == 0.0))
 
