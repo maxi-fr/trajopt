@@ -13,14 +13,14 @@ from trajopt.solvers.al import (
     ALConstraints,
     ALStats,
     al_solve,
-    evaluate_al_constraints,
+    evaluate_al_residuals,
     max_violation,
 )
 from trajopt.solvers.al import _trim_al_stats as trim_al_stats
 from trajopt.solvers.ilqr import _jit_ilqr_solve, build_warm_start
 from trajopt.solvers.ilqr import _trim_stats as trim_ilqr_stats
 from trajopt.solvers.options import SolverOptions, TerminationStatus, to_solver_status
-from trajopt.solvers.pn import PNStats, pn_solve
+from trajopt.solvers.pn import PNLayout, PNStats, pn_solve
 from trajopt.solvers.pn import _trim_pn_stats as trim_pn_stats
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _trajectory_to_z, parse_solver_initial_state
@@ -171,24 +171,49 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
 
     n_iter = al_stats.iterations
     cache_idx = jnp.clip(n_iter - 1, 0, al_stats.c_max.shape[0] - 1)
-    C_al, _Jx_al, _Ju_al = evaluate_al_constraints(al_final, problem.constraints, problem.model, al_traj)
+    C_al = evaluate_al_residuals(al_final, problem.constraints, al_traj)
     recomputed_c_max = max_violation(al_final, C_al)
     c_max = jnp.where(n_iter > 1, al_stats.c_max[cache_idx], recomputed_c_max)
+
+    layout = PNLayout.build(problem)
+    empty_stats = PNStats.create(options, layout.Nd)
+    empty_duals = jnp.zeros(layout.Nd, dtype=al_traj.X.dtype)
+
+    if not options.projected_newton and not options.force_pn:
+        upgrade = al_status_ok & (recomputed_c_max < options.constraint_tolerance)
+        final_status = jnp.where(upgrade, success_ord, al_status)
+        return ALTROSolveResult(
+            trajectory=al_traj,
+            status=final_status,
+            al=al_final,
+            al_stats=al_stats,
+            pn_stats=empty_stats,
+            pn_duals=empty_duals,
+            ran_pn=jnp.asarray(False),  # noqa: FBT003 -- traced scalar boolean initialization
+            c_max=recomputed_c_max,
+        )
 
     force_pn = jnp.asarray(options.force_pn)
     outer_gate = al_status_ok | force_pn
     inner_condition = (
-        jnp.asarray(options.projected_newton)
-        & (c_max > options.constraint_tolerance)
+        (c_max > options.constraint_tolerance)
         & (al_status_ok | (al_status == jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER)))
     ) | force_pn
     run_pn = outer_gate & inner_condition
 
-    pn_traj, pn_stats, pn_duals, _pn_status = pn_solve(problem, al_traj, x0, options)
+    def _do_pn() -> tuple[Trajectory, PNStats, jax.Array, jax.Array]:
+        return pn_solve(problem, al_traj, x0, options)
 
-    final_traj = jax.tree.map(lambda p, a: jnp.where(run_pn, p, a), pn_traj, al_traj)
+    def _skip_pn() -> tuple[Trajectory, PNStats, jax.Array, jax.Array]:
+        return al_traj, empty_stats, empty_duals, al_status
 
-    C_backup, _Jx_bk, _Ju_bk = evaluate_al_constraints(al_final, problem.constraints, problem.model, final_traj)
+    final_traj, pn_stats, pn_duals, _pn_status = jax.lax.cond(
+        run_pn,
+        _do_pn,
+        _skip_pn,
+    )
+
+    C_backup = evaluate_al_residuals(al_final, problem.constraints, final_traj)
     c_max2 = max_violation(al_final, C_backup)
     upgrade = al_status_ok & (c_max2 < options.constraint_tolerance)
     final_status = jnp.where(upgrade, success_ord, al_status)

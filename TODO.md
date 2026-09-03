@@ -21,5 +21,6 @@
 * OSQP deprecation warning
 
 * ALTRO profiling and optimization
+  * Note: Wire BoxQP (`solve_kd_builder`, `u_bounds`) into `ALTRO.solve` as an optional performance mode for control-bounded problems (potential optimization; diverges from `Altro.jl` which handles all bounds via AL penalties)
 
 * SingleShooting: support StateBound as constraint rows (xL <= X(u) <= xU) instead of rejecting it, since box bounds are hoisted into primal bounds before single shooting ever sees them

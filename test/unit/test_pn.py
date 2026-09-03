@@ -219,18 +219,16 @@ def test_rho_primal_regularizes_hessian_and_rho_chol_rho_dual_do_not_exist(
 
 
 @pytest.mark.slow
-def test_multiplier_projection_is_gated_and_defaults_true(
+def test_multiplier_projection_is_gated_and_defaults_false(
     al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
 ) -> None:
-    """`options.multiplier_projection` defaults True and actually gates the projection call."""
-    assert SolverOptions().multiplier_projection is True
+    """`options.multiplier_projection` defaults False and actually gates the projection call."""
+    assert SolverOptions().multiplier_projection is False
 
     prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
 
-    _traj_on, _stats_on, duals_on, _status_on = pn_solve(prob, warm_traj, x0, SolverOptions())
-    _traj_off, _stats_off, duals_off, _status_off = pn_solve(
-        prob, warm_traj, x0, SolverOptions(multiplier_projection=False)
-    )
+    _traj_on, _stats_on, duals_on, _status_on = pn_solve(prob, warm_traj, x0, SolverOptions(multiplier_projection=True))
+    _traj_off, _stats_off, duals_off, _status_off = pn_solve(prob, warm_traj, x0, SolverOptions())
 
     assert bool(jnp.any(duals_on != 0.0))
     assert bool(jnp.all(duals_off == 0.0))

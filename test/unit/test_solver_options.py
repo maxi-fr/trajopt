@@ -63,7 +63,7 @@ _EXPECTED_DEFAULTS = {
     "n_steps": 2,
     "projected_newton_tolerance": 1e-3,
     "active_set_tolerance_pn": 1e-3,
-    "multiplier_projection": True,
+    "multiplier_projection": False,
     "rho_primal": 1.0e-8,
     "r_threshold": 1.1,
     "projected_newton": True,
