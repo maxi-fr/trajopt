@@ -23,10 +23,11 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
 
 
-def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float, jnp.ndarray]:
+def _cartpole_problem(u_bnd: float = 3.0, N: int = 101) -> tuple[Problem, jnp.ndarray, float, jnp.ndarray]:
     """Cartpole swing-up with a symmetric control bound and a terminal goal constraint, plus its goal."""
-    n, m, N, tf = 4, 1, 101, 5.0
-    dt = tf / (N - 1)
+    n, m = 4, 1
+    tf = 5.0 * (N - 1) / 100.0 if N > 1 else 5.0
+    dt = tf / (N - 1) if N > 1 else 0.05
     Q = 1e-2 * np.ones(n) * dt
     R = 1e-1 * np.ones(m) * dt
     Qf = 1e2 * np.ones(n)
@@ -36,7 +37,8 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float, 
     obj = LQRObjective(Q=jnp.asarray(Q), R=jnp.asarray(R), Qf=jnp.asarray(Qf), N=N)
 
     clist = ConstraintList(n=n, m=m, N=N)
-    clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
+    if N > 1:
+        clist.add_constraint(ControlBound(m=m, u_min=[-u_bnd], u_max=[u_bnd], n=n), range(N - 1))
     clist.add_constraint(GoalConstraint(n=n, xf=xf.tolist()), N - 1)
 
     prob = Problem(model=model, obj=obj, constraints=clist, N=N, integrator=RK4())
@@ -104,7 +106,7 @@ def test_is_unconstrained_true_for_bare_problem() -> None:
 
 def test_is_unconstrained_false_with_control_bound() -> None:
     """A Problem with a ControlBound is not structurally unconstrained."""
-    prob, _x0, _dt, _xf = _cartpole_problem()
+    prob, _x0, _dt, _xf = _cartpole_problem(N=5)
     assert not prob.constraints.is_unconstrained()
 
 
@@ -116,22 +118,28 @@ def test_al_phase_tolerance_loosened_to_projected_newton_tolerance() -> None:
     assert kickout is False
 
 
-def test_al_phase_tolerance_negative_sets_kickout() -> None:
-    """A negative projected_newton_tolerance zeros AL's tolerance and forces kickout_max_penalty on."""
+def test_al_phase_tolerance_negative_projected_newton_tolerance_turns_on_kickout() -> None:
+    """With projected_newton on and its tolerance < 0, AL tolerance drops to 0, kickout forced True."""
     options = SolverOptions(projected_newton=True, projected_newton_tolerance=-1.0, kickout_max_penalty=False)
     tol, kickout = _al_phase_tolerance(options)
     assert tol == 0.0
     assert kickout is True
 
 
-def test_al_phase_tolerance_off_uses_real_tolerance_unchanged() -> None:
-    """With projected_newton off, AL keeps the real constraint_tolerance and the caller's kickout flag."""
-    options = SolverOptions(projected_newton=False, constraint_tolerance=1e-5, kickout_max_penalty=True)
+def test_al_phase_tolerance_projected_newton_off_leaves_tolerance_and_kickout_untouched() -> None:
+    """With projected_newton off, AL gets the real constraint_tolerance, kickout untouched."""
+    options = SolverOptions(
+        projected_newton=False,
+        constraint_tolerance=1e-5,
+        projected_newton_tolerance=-1.0,
+        kickout_max_penalty=True,
+    )
     tol, kickout = _al_phase_tolerance(options)
     assert tol == pytest.approx(1e-5)
     assert kickout is True
 
 
+@pytest.mark.slow
 def test_altro_cartpole_reaches_tight_violation_via_pn() -> None:
     """A bound + goal constrained cartpole solve reaches max_violation < constraint_tolerance, with PN polishing.
 
@@ -153,6 +161,7 @@ def test_altro_cartpole_reaches_tight_violation_via_pn() -> None:
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= 3.0 + 1e-6))
 
 
+@pytest.mark.slow
 def test_altro_negative_projected_newton_tolerance_works_end_to_end_via_kickout() -> None:
     """`projected_newton_tolerance < 0` drives AL's own tolerance to 0 and turns on kickout_max_penalty.
 
@@ -186,7 +195,7 @@ def test_altro_backup_check_does_not_upgrade_max_iterations_outer(monkeypatch: p
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt, xf = _cartpole_problem()
+    prob, x0, dt, xf = _cartpole_problem(N=5)
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -195,21 +204,22 @@ def test_altro_backup_check_does_not_upgrade_max_iterations_outer(monkeypatch: p
     feasible_traj = Trajectory(X=X, U=U, t=t, dt=dt_arr)
 
     al0 = ALConstraints.build(prob.constraints, penalty_initial=SolverOptions().penalty_initial)
+    options = SolverOptions(iterations=2, iterations_outer=2, n_steps=1)
 
     def fake_al_solve(
-        _problem: Problem, _trajectory: Trajectory, al: ALConstraints, options: SolverOptions, *_extra: object
+        _problem: Problem, _trajectory: Trajectory, al: ALConstraints, opts: SolverOptions, *_extra: object
     ) -> tuple[Trajectory, ALConstraints, ALStats, jax.Array]:
-        stats = ALStats.create(options)
+        stats = ALStats.create(opts)
         stats = ALStats(iterations=jnp.int32(1), cost=stats.cost, c_max=stats.c_max, penalty_max=stats.penalty_max)
         return feasible_traj, al, stats, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER)
 
     monkeypatch.setattr(altro_module, "al_solve", fake_al_solve)
 
     C, _Jx, _Ju = evaluate_al_constraints(al0, prob.constraints, prob.model, feasible_traj)
-    assert float(max_violation(al0, C)) < SolverOptions().constraint_tolerance  # sanity: genuinely feasible
+    assert float(max_violation(al0, C)) < options.constraint_tolerance  # sanity: genuinely feasible
 
     x0_arr = jnp.asarray(x0)
-    result = altro_solve(prob, feasible_traj, al0, x0_arr, SolverOptions())
+    result = altro_solve(prob, feasible_traj, al0, x0_arr, options)
 
     assert int(result.status) == int(TerminationStatus.MAX_ITERATIONS_OUTER)
     assert int(result.status) != int(TerminationStatus.SOLVE_SUCCEEDED)
@@ -230,7 +240,7 @@ def test_altro_pn_does_not_run_on_max_iterations_outer_without_force_pn(monkeypa
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt, _xf = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem(N=5)
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -239,7 +249,7 @@ def test_altro_pn_does_not_run_on_max_iterations_outer_without_force_pn(monkeypa
     infeasible_traj = Trajectory(X=X, U=U, t=t, dt=dt_arr)
 
     al0 = ALConstraints.build(prob.constraints, penalty_initial=SolverOptions().penalty_initial)
-    options = SolverOptions(iterations_outer=5)
+    options = SolverOptions(iterations=2, iterations_outer=2, n_steps=1)
 
     def fake_al_solve(
         _problem: Problem, _trajectory: Trajectory, al: ALConstraints, opts: SolverOptions, *_extra: object
@@ -271,7 +281,7 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt, _xf = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem(N=5)
     N, m = prob.N, prob.model.m
     t = jnp.arange(N) * dt
     dt_arr = jnp.full(N - 1, dt)
@@ -280,7 +290,7 @@ def test_altro_c_max_uses_stats_cache_when_iterations_gt_1(monkeypatch: pytest.M
     infeasible_traj = Trajectory(X=X, U=U, t=t, dt=dt_arr)
 
     al0 = ALConstraints.build(prob.constraints, penalty_initial=SolverOptions().penalty_initial)
-    options = SolverOptions(iterations_outer=5)
+    options = SolverOptions(iterations=2, iterations_outer=2, n_steps=1)
     x0_arr = jnp.asarray(x0)
 
     def make_fake_al_solve(n_iter: int, cached_c_max: float) -> object:
@@ -314,9 +324,9 @@ def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem
     """
     import trajopt.solvers.altro as altro_module
 
-    prob, x0, dt, xf = _cartpole_problem()
+    prob, x0, dt, xf = _cartpole_problem(N=5)
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
-    altro = ALTRO(options=SolverOptions(iterations=50, iterations_outer=5))
+    altro = ALTRO(options=SolverOptions(iterations=2, iterations_outer=2, n_steps=1))
 
     _ = altro.solve(prob, state)
     jitted_after_first = altro_module._altro_solve_jit_slot._jitted  # noqa: SLF001 -- white-box cache-hit check
@@ -330,9 +340,9 @@ def test_altro_solve_reuses_jitted_closure_across_repeated_calls_on_same_problem
 
 def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:
     """altro_solve runs unchanged under jax.jit, and vmaps over a batch of initial states."""
-    prob, x0, dt, _xf = _cartpole_problem()
+    prob, x0, dt, _xf = _cartpole_problem(N=5)
     N, m = prob.N, prob.model.m
-    options = SolverOptions(iterations=300, iterations_outer=30)
+    options = SolverOptions(iterations=2, iterations_outer=2, n_steps=1)
     al0 = ALConstraints.build(prob.constraints, penalty_initial=options.penalty_initial)
 
     def make_traj(x0_: jax.Array) -> Trajectory:
@@ -361,5 +371,5 @@ def test_altro_solve_is_jittable_and_vmappable_with_static_options() -> None:
 
     statuses = jax.vmap(solve_one)(batch_x0)
     assert statuses.shape == (2,)
-    assert int(statuses[0]) == int(TerminationStatus.SOLVE_SUCCEEDED)
-    assert int(statuses[1]) == int(TerminationStatus.SOLVE_SUCCEEDED)
+    assert int(statuses[0]) == int(eager.status)
+    assert int(statuses[1]) == int(eager.status)

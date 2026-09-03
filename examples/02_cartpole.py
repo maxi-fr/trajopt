@@ -127,7 +127,7 @@ def _(ALTRO, prob, state, time):
 
     t_start_altro = time.perf_counter()
     altro_res = altro_solver.solve(prob, state)
-    altro_solve_time = time.perf_counter() - t_start_altro
+    time.perf_counter() - t_start_altro
     return (altro_res,)
 
 
@@ -137,7 +137,7 @@ def _(Ipopt, prob, state, time):
 
     t_start_ipopt = time.perf_counter()
     ipopt_res = ipopt_solver.solve(prob, state)
-    ipopt_solve_time = time.perf_counter() - t_start_ipopt
+    time.perf_counter() - t_start_ipopt
     return (ipopt_res,)
 
 

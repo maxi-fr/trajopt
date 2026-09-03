@@ -8,7 +8,6 @@ app = marimo.App(width="medium")
 def _():
     import time
 
-    import jax
     import jax.numpy as jnp
     import marimo as mo
     import matplotlib.pyplot as plt

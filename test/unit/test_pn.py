@@ -7,7 +7,7 @@ from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.cartpole import Cartpole
 from trajopt.problem import MPCState, Problem
-from trajopt.solvers.al import AL
+from trajopt.solvers.al import AL, ALResult
 from trajopt.solvers.options import SolverOptions
 from trajopt.solvers.pn import (
     PN,
@@ -48,12 +48,14 @@ def _cartpole_problem(u_bnd: float = 3.0) -> tuple[Problem, jnp.ndarray, float]:
     return prob, x0, dt
 
 
-def _al_warm_start(prob: Problem, x0: jnp.ndarray, dt: float) -> tuple[jnp.ndarray, Trajectory]:
-    """Run AL to convergence and return `(x0, trajectory)` as a realistic PN warm start."""
+@pytest.fixture(scope="module")
+def al_warm_start_data() -> tuple[Problem, jnp.ndarray, float, Trajectory, ALResult]:
+    """Precompute AL warm start for cartpole once per test module."""
+    prob, x0, dt = _cartpole_problem()
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
     al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
     assert al_result.success
-    return x0, al_result.trajectory
+    return prob, x0, dt, al_result.trajectory, al_result
 
 
 def test_pn_layout_is_a_distinct_second_row_ordering() -> None:
@@ -68,10 +70,11 @@ def test_pn_layout_is_a_distinct_second_row_ordering() -> None:
     assert "second row-ordering convention" in (pn_module.__doc__ or "")
 
 
-def test_pn_kkt_shapes_are_static_across_active_sets() -> None:
+def test_pn_kkt_shapes_are_static_across_active_sets(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """The dense KKT system is assembled at the same full size regardless of which rows are active."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
     options = SolverOptions()
 
@@ -85,10 +88,12 @@ def test_pn_kkt_shapes_are_static_across_active_sets() -> None:
     assert bool(jnp.any(ev_feasible.active != ev_perturbed.active))
 
 
-def test_pn_reduces_violation_by_three_orders_within_n_steps() -> None:
+@pytest.mark.slow
+def test_pn_reduces_violation_by_three_orders_within_n_steps(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """A trajectory with a known (small) violation is projected to feasibility within n_steps."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
     options = SolverOptions(multiplier_projection=False)
 
@@ -105,10 +110,12 @@ def test_pn_reduces_violation_by_three_orders_within_n_steps() -> None:
     assert status in (2, 4)  # SOLVE_SUCCEEDED or MAX_ITERATIONS_OUTER, both fine as long as viol dropped
 
 
-def test_pn_outer_loop_permits_three_solves_at_default_n_steps() -> None:
+@pytest.mark.slow
+def test_pn_outer_loop_permits_three_solves_at_default_n_steps(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """Finding M: `count <= n_steps` runs the body while count is 0, 1, 2 -- three solves at n_steps=2."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     options = SolverOptions(multiplier_projection=False, constraint_tolerance=0.0, n_steps=2)
 
     _final_traj, stats, _duals, _status = pn_solve(prob, warm_traj, x0, options)
@@ -133,10 +140,11 @@ def test_pn_refine_exits_on_convergence_rate() -> None:
     assert bool(converged)
 
 
-def test_pn_inner_linesearch_halves_alpha_and_does_not_update_active_set() -> None:
+def test_pn_inner_linesearch_halves_alpha_and_does_not_update_active_set(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """The inner line search only ever tries alpha = 1, 1/2, 1/4, ... and freezes the active set it was given."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
     options = SolverOptions()
 
@@ -155,10 +163,11 @@ def test_pn_inner_linesearch_halves_alpha_and_does_not_update_active_set() -> No
     assert bool(jnp.any(jnp.all(jnp.isclose(candidates, z_ls[None, :]), axis=1)))
 
 
-def test_pn_inner_linesearch_rejects_step_that_never_reduces_violation() -> None:
+def test_pn_inner_linesearch_rejects_step_that_never_reduces_violation(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """An all-zero step never reduces violation (viol strictly decreases is required), so the search exhausts."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
     options = SolverOptions()
 
@@ -174,10 +183,11 @@ def test_pn_inner_linesearch_rejects_step_that_never_reduces_violation() -> None
     assert float(v_ls) == pytest.approx(float(v0))
 
 
-def test_pn_refine_reuses_the_same_step_across_rounds() -> None:
+def test_pn_refine_reuses_the_same_step_across_rounds(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """`_pn_refine` keeps reapplying the single KKT step `p` solved once at the top of the outer iteration."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
     options = SolverOptions()
 
@@ -192,10 +202,11 @@ def test_pn_refine_reuses_the_same_step_across_rounds() -> None:
     assert z_refined.shape == z0.shape
 
 
-def test_rho_primal_regularizes_hessian_and_rho_chol_rho_dual_do_not_exist() -> None:
+def test_rho_primal_regularizes_hessian_and_rho_chol_rho_dual_do_not_exist(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """`rho_primal` shifts the KKT Hessian block's diagonal; `rho_chol`/`rho_dual` are not options (finding F)."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
 
     ev = _pn_evaluate(prob, layout, SolverOptions(), x0, warm_traj, warm_traj.X, warm_traj.U)
@@ -207,12 +218,14 @@ def test_rho_primal_regularizes_hessian_and_rho_chol_rho_dual_do_not_exist() -> 
     assert not hasattr(SolverOptions(), "rho_dual")
 
 
-def test_multiplier_projection_is_gated_and_defaults_true() -> None:
+@pytest.mark.slow
+def test_multiplier_projection_is_gated_and_defaults_true(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """`options.multiplier_projection` defaults True and actually gates the projection call."""
     assert SolverOptions().multiplier_projection is True
 
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
 
     _traj_on, _stats_on, duals_on, _status_on = pn_solve(prob, warm_traj, x0, SolverOptions())
     _traj_off, _stats_off, duals_off, _status_off = pn_solve(
@@ -223,10 +236,11 @@ def test_multiplier_projection_is_gated_and_defaults_true() -> None:
     assert bool(jnp.all(duals_off == 0.0))
 
 
-def test_multiplier_projection_matches_the_normal_equations_least_squares_estimate() -> None:
+def test_multiplier_projection_matches_the_normal_equations_least_squares_estimate(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """`multiplier_projection` solves `(D_active D_active^T) y = -D_active g`, the KKT stationarity least-squares estimate."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
     layout = PNLayout.build(prob)
 
     ev = _pn_evaluate(prob, layout, SolverOptions(), x0, warm_traj, warm_traj.X, warm_traj.U)
@@ -262,27 +276,28 @@ def test_pn_satisfies_solver_protocol() -> None:
     assert isinstance(PN(), Solver)
 
 
-def test_pn_result_satisfies_solver_result_protocol() -> None:
+def test_pn_result_satisfies_solver_result_protocol(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """PNResult structurally satisfies the SolverResult protocol."""
-    prob, x0, dt = _cartpole_problem()
-    _x0, warm_traj = _al_warm_start(prob, x0, dt)
+    prob, x0, dt, warm_traj, _al_res = al_warm_start_data
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=warm_traj)
 
-    result = PN(options=SolverOptions()).solve(prob, state)
+    result = PN(options=SolverOptions(n_steps=1)).solve(prob, state)
 
     assert isinstance(result, PNResult)
     assert isinstance(result, SolverResult)
     assert result.constraint_violation < SolverOptions().constraint_tolerance * 10
 
 
-def test_pn_cartpole_polishes_al_output_and_cost_barely_moves() -> None:
+@pytest.mark.slow
+def test_pn_cartpole_polishes_al_output_and_cost_barely_moves(
+    al_warm_start_data: tuple[Problem, jnp.ndarray, float, Trajectory, ALResult],
+) -> None:
     """End to end: PN polishes an AL-converged cartpole trajectory to a tighter violation, cost nearly unchanged."""
-    prob, x0, dt = _cartpole_problem()
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
-    al_result = AL(options=SolverOptions(iterations=300, iterations_outer=30)).solve(prob, state)
-    assert al_result.success
+    prob, x0, dt, warm_traj, al_result = al_warm_start_data
 
-    pn_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=al_result.trajectory)
+    pn_state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=warm_traj)
     pn_result = PN(options=SolverOptions()).solve(prob, pn_state)
 
     assert pn_result.constraint_violation <= al_result.constraint_violation

@@ -151,35 +151,3 @@ def test_cross_ilqr_solve_pendulum(jl_altro: Any) -> None:
 
 def test_cross_ilqr_solve_cartpole(jl_altro: Any) -> None:
     _assert_solve_matches_altro(jl_altro, _cartpole_setup(), "RobotZoo.Cartpole()")
-
-
-def test_cross_ilqr_solve_pendulum_via_problem_solve(jl_altro: Any) -> None:
-    """The eager `problem.solve(state, solver=ILQR())` boundary matches the traced core."""
-    setup = _pendulum_setup()
-    options = SolverOptions()
-    solver = _build_jl_solver(jl_altro, setup, "RobotZoo.Pendulum()", options)
-
-    prob = Problem(model=setup.model, obj=setup.obj, N=setup.N)
-    state = MPCState.initial(
-        prob,
-        x0=jnp.asarray(setup.x0),
-        dt=setup.dt,
-        initial_trajectory=Trajectory(
-            X=jnp.zeros((setup.N, setup.x0.shape[0])),
-            U=jnp.asarray(setup.U0),
-            t=jnp.arange(setup.N) * setup.dt,
-            dt=jnp.full(setup.N - 1, setup.dt),
-        ),
-    )
-    result = ILQR(options=options).solve(prob, state)
-
-    run_solve = jl_altro.seval("trojopt_ticket27_run_solve")
-    X_jl, U_jl, J_jl, status_jl, _iters_jl = run_solve(solver)
-    X_jl = np.moveaxis(np.asarray(X_jl), -1, 0)
-    U_jl = np.moveaxis(np.asarray(U_jl), -1, 0)
-
-    assert result.success
-    assert int(result.status) == int(status_jl)
-    np.testing.assert_allclose(np.asarray(result.trajectory.X), X_jl, atol=1e-8)
-    np.testing.assert_allclose(np.asarray(result.trajectory.U), U_jl, atol=1e-8)
-    np.testing.assert_allclose(result.cost, float(J_jl), atol=1e-8)

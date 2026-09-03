@@ -96,8 +96,11 @@ def test_conic_hessian_matches_finite_difference() -> None:
         C, _, _ = evaluate_al_constraints(al, constraints, model=None, traj=traj_pert)
         return conic_al_cost(al, C, constraints)
 
-    exact_hess = jax.hessian(penalty_at_knot_x)(traj.X[knot])
-    exact_grad = jax.grad(penalty_at_knot_x)(traj.X[knot])
+    @jax.jit
+    def exact_grad_and_hess(x_k: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return jax.grad(penalty_at_knot_x)(x_k), jax.hessian(penalty_at_knot_x)(x_k)
+
+    exact_grad, exact_hess = exact_grad_and_hess(traj.X[knot])
 
     C, Jx, Ju = evaluate_al_constraints(al, constraints, model=None, traj=traj)
     grad_x, _, Hxx, _, _ = conic_al_grad_hess(al, C, Jx, Ju, constraints)
@@ -190,19 +193,19 @@ def test_use_conic_cost_switch_on_warm_started_duals_raises_unless_reset() -> No
     prob, x0, dt, xf = _small_goal_only_problem()
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
 
-    non_conic_result = AL(options=SolverOptions(iterations=20, iterations_outer=3, use_conic_cost=False)).solve(
+    non_conic_result = AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=False)).solve(
         prob, state
     )
     warm_state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=non_conic_result.trajectory)
     state_with_duals = dataclasses.replace(warm_state, al=non_conic_result.al)
 
     with pytest.raises(ValueError, match="use_conic_cost"):
-        AL(options=SolverOptions(iterations=20, iterations_outer=3, use_conic_cost=True, reset_duals=False)).solve(
+        AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=False)).solve(
             prob, state_with_duals
         )
 
     # reset_duals=True discards the mismatched duals instead of raising.
-    result = AL(options=SolverOptions(iterations=20, iterations_outer=3, use_conic_cost=True, reset_duals=True)).solve(
+    result = AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=True, reset_duals=True)).solve(
         prob, state_with_duals
     )
     assert result.al is not None

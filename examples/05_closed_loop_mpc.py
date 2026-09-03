@@ -171,7 +171,18 @@ def _(
 
     # Initialize MPC state container
     state_init = MPCState.initial(prob, x0=x0, dt=dt, xf=xf)
-    return dmodel, dt, model, n_steps, prob, state_init, u_max, x0, x_track_max, xf
+    return (
+        dmodel,
+        dt,
+        model,
+        n_steps,
+        prob,
+        state_init,
+        u_max,
+        x0,
+        x_track_max,
+        xf,
+    )
 
 
 @app.cell(hide_code=True)

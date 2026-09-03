@@ -283,6 +283,7 @@ def test_extract_uniform_control_bounds_raises_on_per_knot_variation() -> None:
         extract_uniform_control_bounds(built)
 
 
+@pytest.mark.slow
 def test_boxqp_control_only_solves_within_bounds_even_early_not_only_at_convergence() -> None:
     """A control-bounded cartpole solved by BoxQP keeps every rolled-out control inside bounds, even far from convergence."""
     u_bnd = 3.0
@@ -295,6 +296,7 @@ def test_boxqp_control_only_solves_within_bounds_even_early_not_only_at_converge
         assert bool(jnp.all(jnp.abs(result.trajectory.U) <= u_bnd + 1e-6)), f"violated at iterations={n_iters}"
 
 
+@pytest.mark.slow
 def test_boxqp_with_goal_constraint_converges_and_respects_bounds() -> None:
     """Control bounds route to box-QP while the goal constraint still goes through the AL outer loop."""
     u_bnd = 6.0
@@ -310,6 +312,7 @@ def test_boxqp_with_goal_constraint_converges_and_respects_bounds() -> None:
     assert bool(jnp.all(jnp.abs(result.trajectory.U) <= u_bnd + 1e-6))
 
 
+@pytest.mark.slow
 def test_boxqp_and_al_reach_comparable_final_cost() -> None:
     """Documentation test: the same bound-and-goal-constrained cartpole via AL (ticket 29) and box-QP (ticket 30).
 

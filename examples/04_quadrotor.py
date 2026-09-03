@@ -108,7 +108,7 @@ def _(Quadrotor, RK4, jnp):
     # Time discretization and horizon length
     N = 25  # number of knot points
     dt = 0.05  # timestep in seconds (total horizon tf = 1.20 s)
-    tf = (N - 1) * dt
+    (N - 1) * dt
 
     # Boundary conditions: Start at origin (0,0,0) and fly to (3,3,3)
     x0 = jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
