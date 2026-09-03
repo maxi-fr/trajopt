@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
@@ -82,19 +83,97 @@ class WarmStart(eqx.Module):
         return eqx.tree_at(lambda w: w.Z, self, _trajectory_to_z(X_new, U_new))
 
     def shift(self, problem: "Problem") -> "WarmStart":
-        """Advance this warm start one knot: `Z` shifts and holds its last point, the duals do not move.
+        """Advance this warm start one knot: every primal and dual quantity shifts with the horizon.
 
-        The duals are deliberately passed through unshifted. That is a known bug -- after a step
-        `lam`, `mu` and `al` are misaligned by one knot against the trajectory they were computed
-        for -- preserved verbatim from the shift this replaced so that no numbers moved with the
-        refactor. Fixing it belongs to its own change, and this method is the one place to fix it.
+        Knot k of the new horizon is knot k + 1 of the old one, so each quantity drops its first
+        knot and holds its last, mirroring `Z`. Holding is the right vacancy fill for a multiplier
+        as well as for a state: the knot that enters the horizon repeats the old final knot's
+        state, control and constraint rows, so the old final multiplier is the best available
+        estimate, and holding preserves the sign a `NegativeOrthant` row's multiplier must keep.
+
+        Only rows with no counterpart at all are zeroed instead: `lam`'s terminal knot block,
+        whose rows come from a different (terminal) evaluator than any stage knot's, and any
+        stage knot block that would have to source from that terminal block or from a knot of a
+        different row count -- see `_lam_shift_index`. `lam`'s initial-condition block does not move -- it belongs to the x0 pin,
+        which stays at the head of the horizon. `al` is masked back to the new horizon's own
+        `row_mask` after the shift: its `lam` falls back to zero where the source row is not a
+        real row, while its `mu` falls back to the destination knot's own penalty, because a
+        penalty is outer-loop schedule state rather than a multiplier and a real row must never be
+        left at zero penalty.
         """
         X, U = self.unpack(problem)
         Z = _trajectory_to_z(
             jnp.concatenate([X[1:], X[-1:]], axis=0),
             jnp.concatenate([U[1:], U[-1:]], axis=0),
         )
-        return eqx.tree_at(lambda w: w.Z, self, Z)
+        return WarmStart(Z=Z, lam=self._shifted_lam(problem), mu=self._shifted_mu(problem), al=_shifted_al(self.al))
+
+    def _shifted_lam(self, problem: "Problem") -> jax.Array:
+        """Transcription duals of shape (P,) advanced one knot, gathered through `_lam_shift_index`."""
+        index = _lam_shift_index(problem)
+        return jnp.where(index >= 0, self.lam[index], 0.0)
+
+    def _shifted_mu(self, problem: "Problem") -> jax.Array:
+        """Primal-bound duals of shape (len(Z),) advanced one knot exactly as `Z` is."""
+        mu_X, mu_U = _z_to_trajectory(self.mu, int(problem.N), int(problem.model.n), int(problem.model.m))
+        return _trajectory_to_z(
+            jnp.concatenate([mu_X[1:], mu_X[-1:]], axis=0),
+            jnp.concatenate([mu_U[1:], mu_U[-1:]], axis=0),
+        )
+
+
+def _lam_shift_index(problem: "Problem") -> jax.Array:
+    """Gather index of shape (P,) mapping the shifted transcription duals onto the old ones.
+
+    Entry i is the old row that new row i takes its multiplier from, or -1 where the new row has
+    no counterpart. `constraints_and_jac` lays the rows out as `[x0 pin (n) | defect_k (n), knot
+    rows k (p_k) for k < N - 1 | knot rows N - 1]`, a knot contributing no block when p_k is 0.
+    The pin maps to itself, defect and stage-knot blocks map one knot forward, and the last
+    defect holds its own multiplier (the knot entering the horizon repeats the old final one).
+    Rows with no counterpart map to -1: the terminal block, whose rows come from a different
+    evaluator than any stage knot's; the last stage block, whose source would be that terminal
+    block; and any stage block whose width differs from its source's.
+    """
+    n = int(problem.model.n)
+    N = int(problem.N)
+    p = tuple(problem.constraints.p)
+
+    offsets, off = [], n
+    for k in range(N):
+        defect = None if k == N - 1 else off
+        off += 0 if defect is None else n
+        block = (off, off + p[k])
+        off = block[1]
+        offsets.append((defect, block))
+
+    index = np.full(off, -1, dtype=np.int32)
+    index[:n] = np.arange(n)
+    for k in range(N - 1):
+        defect, block = offsets[k]
+        src_defect, src_block = offsets[k + 1]
+        if defect is not None:
+            src = defect if src_defect is None else src_defect
+            index[defect : defect + n] = np.arange(src, src + n)
+        if k + 1 < N - 1 and block[1] - block[0] == src_block[1] - src_block[0]:
+            index[block[0] : block[1]] = np.arange(src_block[0], src_block[1])
+    return jnp.asarray(index)
+
+
+def _shifted_al(al: "ALConstraints | None") -> "ALConstraints | None":
+    """Advance padded AL duals and penalties one knot, remasked onto the new horizon's real rows."""
+    if al is None:
+        return None
+
+    def shift(a: jax.Array) -> jax.Array:
+        """Drop the first knot of a (N, p_max) array and hold its last."""
+        return jnp.concatenate([a[1:], a[-1:]], axis=0)
+
+    live = al.row_mask & shift(al.row_mask)
+    return eqx.tree_at(
+        lambda a: (a.lam, a.mu),
+        al,
+        (jnp.where(live, shift(al.lam), 0.0), jnp.where(live, shift(al.mu), al.mu)),
+    )
 
 
 class Program:
