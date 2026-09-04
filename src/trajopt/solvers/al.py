@@ -763,6 +763,13 @@ def _evaluate_al_convergence(
     an earlier one's `status`, so converging on the same outer iteration that also exhausts
     `iterations_outer` reports `MAX_ITERATIONS_OUTER`, not `SOLVE_SUCCEEDED`.
 
+    One targeted divergence from that port, taken only when `options.reset_penalties` is False:
+    `converged_violation` additionally requires `iter_num > 1`, so an inherited penalty cannot end
+    the outer loop before a single dual update has run. `options` is static and untraced, so this
+    is a Python branch at trace time; under default options the expression is bit-identical to
+    Altro's, which is what keeps the Julia parity test and the recorded MPC golden valid.
+    `kickout`, `max_iters_hit` and `max_outer_hit` are untouched either way.
+
     `kickout_max_penalty` (finding B) is Altro's own broken branch, ported as clearly intended:
     `mu_max >= options.penalty_max` ends the loop ("converged") without writing `status` at all,
     so `status` can still be `UNSOLVED` when kickout is the only thing that fired. That is a
@@ -783,7 +790,8 @@ def _evaluate_al_convergence(
         Completed outer iteration count (1-indexed) including this iteration.
     options : SolverOptions
         Supplies `constraint_tolerance`, `kickout_max_penalty`, `penalty_max`, `iterations`,
-        `iterations_outer`.
+        `iterations_outer`, and `reset_penalties`, which decides at trace time whether
+        `converged_violation` needs a dual update behind it.
 
     Returns
     -------
@@ -794,6 +802,12 @@ def _evaluate_al_convergence(
     status = jnp.int32(TerminationStatus.UNSOLVED)
 
     converged_violation = c_max < options.constraint_tolerance
+    if not options.reset_penalties:
+        # Inherited penalties can be large enough that the very first inner solve is already
+        # feasible; exiting there skips the dual and penalty updates and freezes both for the rest
+        # of the receding-horizon run. Requiring one dual update first costs nothing under default
+        # options, where this branch is not taken at all and the expression is Altro's.
+        converged_violation = converged_violation & (iter_num > 1)
     status = jnp.where(converged_violation, jnp.int32(TerminationStatus.SOLVE_SUCCEEDED), status)
 
     kickout = jnp.asarray(options.kickout_max_penalty) & (mu_max >= options.penalty_max)
@@ -1091,9 +1105,7 @@ class AL:
         else:
             init_al = fresh_al
 
-        final_traj, final_al, stats, status_int = _jit_al_solve(
-            program, init_traj, init_al, options, bc=bc
-        )
+        final_traj, final_al, stats, status_int = _jit_al_solve(program, init_traj, init_al, options, bc=bc)
 
         status = TerminationStatus(int(status_int))
         n_iter = int(stats.iterations)
