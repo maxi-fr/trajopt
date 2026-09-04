@@ -5,12 +5,10 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-import scipy.sparse as sp
 
 from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant
 
 if TYPE_CHECKING:
-    from trajopt.constraints.base import Constraint
     from trajopt.constraints.constraint_list import BuiltKnotConstraint
     from trajopt.problem import BoundaryConditions, Problem
     from trajopt.program import WarmStart
@@ -329,90 +327,3 @@ def operating_point_z(problem: Problem, operating_point: Trajectory | jax.Array 
         msg = f"Operating point has shape {z_op.shape}, expected ({nz},) for N={N}, n={n}, m={m}."
         raise ValueError(msg)
     return z_op
-
-
-def extract_quadratic_cost(  # noqa: PLR0913 -- Cost extraction helper takes 7 parameters
-    problem: Problem,
-    N: int,
-    n: int,
-    m: int,
-    nz: int,
-    *,
-    t0_arr: jax.Array,
-    dt_arr: jax.Array,
-    z_op: jax.Array,
-) -> tuple[sp.csc_matrix, np.ndarray]:
-    """Extract upper-triangular Hessian P_triu and linear term q of the expansion about z_op.
-
-    `problem`'s objective is expanded as given, so a caller aiming it at a run-time reference
-    window retargets the problem first.
-    """
-    from trajopt.transcription.sparsity import hessian_sparsity_pattern  # noqa: PLC0415 -- avoid circular import
-    from trajopt.transcription.transcription import (  # noqa: PLC0415 -- avoid circular import
-        eval_grad_f,
-        eval_h,
-    )
-
-    g_jax = eval_grad_f(problem, z_op, t0=t0_arr, dt=dt_arr)
-
-    h_rows, h_cols = hessian_sparsity_pattern(N, n, m)
-    h_vals_jax = eval_h(problem, z_op, t0=t0_arr, dt=dt_arr)
-    h_vals = np.asarray(h_vals_jax, dtype=np.float64)
-
-    H_full = sp.coo_matrix((h_vals, (h_rows, h_cols)), shape=(nz, nz), dtype=np.float64).tocsc()
-    P_triu = sp.triu(H_full, format="csc")
-
-    # 0.5 (z - z_op)' H (z - z_op) + g'(z - z_op) in z, dropping the constant
-    q_vec = np.asarray(g_jax, dtype=np.float64) - H_full @ np.asarray(z_op, dtype=np.float64)
-    return P_triu, q_vec
-
-
-def build_linear_constraint_block(  # noqa: PLR0913 -- Constraint block builder takes 7 arguments
-    con: Constraint,
-    n: int,
-    m: int,
-    *,
-    tk: jax.Array,
-    is_term: bool,
-    xf_val: jax.Array | None,
-    z_op_k: jax.Array,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute the Jacobian block and affine offset of a constraint linearized about z_op_k.
-
-    Parameters
-    ----------
-    z_op_k : jax.Array
-        Knot slice of the operating point, of shape (n + m,) at a stage knot and (n,) at the
-        terminal knot, about which the constraint is expanded.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        Jacobian block J of shape (p, n + m) or (p, n), and the affine offset
-        c(z_op) - J z_op of shape (p,), so that c(z) is approximated by J z + offset.
-    """
-    from trajopt.constraints.linear import GoalConstraint  # noqa: PLC0415 -- type check for goal constraint
-
-    x_op = z_op_k[:n]
-    if is_term:
-        jx, _ = con.jacobian(x_op, None, tk)
-        val_op = (
-            con.evaluate(x_op, None, tk, xf=xf_val)
-            if isinstance(con, GoalConstraint) and xf_val is not None
-            else con.evaluate(x_op, None, tk)
-        )
-        A_c_block = np.asarray(jx, dtype=np.float64)
-    else:
-        u_op = z_op_k[n : n + m]
-        jx, ju = con.jacobian(x_op, u_op, tk)
-        val_op = (
-            con.evaluate(x_op, u_op, tk, xf=xf_val)
-            if isinstance(con, GoalConstraint) and xf_val is not None
-            else con.evaluate(x_op, u_op, tk)
-        )
-        A_c_block = np.hstack([np.asarray(jx, dtype=np.float64), np.asarray(ju, dtype=np.float64)])
-
-    offset = np.asarray(val_op, dtype=np.float64) - A_c_block @ np.asarray(
-        z_op_k[: A_c_block.shape[1]], dtype=np.float64
-    )
-    return A_c_block, offset

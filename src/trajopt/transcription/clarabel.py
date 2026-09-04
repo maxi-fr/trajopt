@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
@@ -9,21 +9,17 @@ import numpy as np
 import scipy.sparse as sp
 
 from trajopt.cones import NegativeOrthant, PositiveOrthant, SecondOrderCone, ZeroCone
-from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
-from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
-    build_linear_constraint_block,
     compute_constraint_violation,
-    extract_quadratic_cost,
     operating_point_z,
     parse_solver_initial_state,
     primal_bounds,
 )
-from trajopt.transcription.result import blocked_to_canonical
+from trajopt.transcription.subproblem import QuadraticSubproblem, quadratic_subproblem
 from trajopt.transcription.transcription import (
     eval_f,
 )
@@ -81,140 +77,43 @@ def _make_cone(name: str, dim: int) -> object:
     return cone_cls(dim)
 
 
-def _extract_conic_dynamics(  # noqa: PLR0913 -- Conic dynamics extraction helper takes 8 parameters
-    discrete_model: DiscreteDynamics,
-    N: int,
-    n: int,
-    m: int,
-    nz: int,
-    *,
-    x0_arr: jax.Array,
-    t_stage: jax.Array,
-    dt_arr: jax.Array,
-    X_op: jax.Array,
-    U_op: jax.Array,
-) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
-    """Assemble initial condition and dynamics defect rows with ZeroCones for Clarabel."""
+def _conic_rows(qp: QuadraticSubproblem) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
+    """Re-express the subproblem's linearized rows as Clarabel's ``A z + s = b, s in K``.
+
+    Every Cone but the second-order one is a box on ``A z``, so its row block goes over with at
+    most a sign flip. A `SecondOrderCone` block is the exception: Clarabel wants the scalar bound
+    first and the vector after, while the transcription emits the vector first, so that block is
+    permuted as well as negated.
+    """
     A_rows: list[sp.spmatrix] = []
     b_vals: list[np.ndarray] = []
     cones: list[object] = []
 
-    # Initial condition: x_0 = x0_arr => I x_0 + s = x0_arr, s in ZeroConeT(n)
-    A_init = sp.lil_matrix((n, nz), dtype=np.float64)
-    A_init[:, :n] = np.eye(n)
-    A_rows.append(A_init.tocsr())
-    x0_np = np.asarray(x0_arr, dtype=np.float64)
-    b_vals.append(x0_np)
-    cones.append(_make_cone("ZeroConeT", n))
+    for block in qp.blocks:
+        rows = qp.A[block.start : block.stop]
+        affine = qp.affine[block.start : block.stop]
+        dim_c = block.stop - block.start
 
-    for k in range(N - 1):
-        tk = t_stage[k]
-        dtk = dt_arr[k]
-        x_op = X_op[k]
-        u_op = U_op[k]
-        Ak = np.asarray(discrete_model.state_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
-        Bk = np.asarray(discrete_model.control_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
-        f_op = np.asarray(discrete_model.discrete_dynamics(x_op, u_op, tk, dtk), dtype=np.float64)
-        # f(x, u) ~ f(x_op, u_op) + A (x - x_op) + B (u - u_op), collected into the constant
-        dk = f_op - Ak @ np.asarray(x_op, dtype=np.float64) - Bk @ np.asarray(u_op, dtype=np.float64)
-
-        A_dyn_k = sp.lil_matrix((n, nz), dtype=np.float64)
-        col_x_k = k * (n + m)
-        col_u_k = col_x_k + n
-        col_x_next = (k + 1) * (n + m)
-        A_dyn_k[:, col_x_k : col_x_k + n] = -Ak
-        A_dyn_k[:, col_u_k : col_u_k + m] = -Bk
-        A_dyn_k[:, col_x_next : col_x_next + n] = np.eye(n)
-        A_rows.append(A_dyn_k.tocsr())
-        b_vals.append(dk)
-        cones.append(_make_cone("ZeroConeT", n))
-
-    return A_rows, b_vals, cones
-
-
-def _extract_conic_stage_constraints(  # noqa: PLR0913 -- Stage constraint extraction helper takes 8 arguments
-    knot_evaluators: Sequence[Any],
-    N: int,
-    n: int,
-    m: int,
-    nz: int,
-    *,
-    t_stage: jax.Array,
-    t_term: jax.Array,
-    xf_val: jax.Array | None,
-    z_op: jax.Array,
-) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
-    """Assemble stage, terminal, and second-order cone constraints for Clarabel."""
-    A_rows: list[sp.spmatrix] = []
-    b_vals: list[np.ndarray] = []
-    cones: list[object] = []
-
-    for k in range(N):
-        if k >= len(knot_evaluators):
-            continue
-        ev = knot_evaluators[k]
-        tk = t_stage[k] if k < N - 1 else t_term
-        col_k = k * (n + m)
-        is_term = k == N - 1
-        z_op_k = z_op[col_k : col_k + (n if is_term else n + m)]
-
-        for con in ev.constraints:
-            if isinstance(con, (BoundConstraint, ControlBound, StateBound)):
-                continue
-
-            dim_c = int(con.p)
-            if dim_c == 0:
-                continue
-
-            A_c_block, val0_np = build_linear_constraint_block(
-                con,
-                n,
-                m,
-                tk=tk,
-                is_term=is_term,
-                xf_val=xf_val,
-                z_op_k=z_op_k,
-            )
-
-            if isinstance(con.cone, SecondOrderCone):
-                dim_y = dim_c - 1
-                A_soc = sp.lil_matrix((dim_c, nz), dtype=np.float64)
-                # s_0 = b_0 - A_soc[0] * z = s(z)
-                A_soc[0, col_k : col_k + A_c_block.shape[1]] = -A_c_block[-1]
-                # s_{1:D} = b_{1:D} - A_soc[1:D] * z = v(z)
-                A_soc[1:dim_c, col_k : col_k + A_c_block.shape[1]] = -A_c_block[:dim_y]
-
-                b_soc = np.zeros(dim_c, dtype=np.float64)
-                b_soc[0] = float(val0_np[-1])
-                b_soc[1:dim_c] = val0_np[:dim_y]
-
-                A_rows.append(A_soc.tocsr())
-                b_vals.append(b_soc)
-                cones.append(_make_cone("SecondOrderConeT", dim_c))
-            elif isinstance(con.cone, ZeroCone):
-                A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
-                A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
-                A_rows.append(A_con.tocsr())
-                b_vals.append(-val0_np)
-                cones.append(_make_cone("ZeroConeT", dim_c))
-            elif isinstance(con.cone, PositiveOrthant):
-                A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
-                A_con[:, col_k : col_k + A_c_block.shape[1]] = -A_c_block
-                A_rows.append(A_con.tocsr())
-                b_vals.append(val0_np)
-                cones.append(_make_cone("NonnegativeConeT", dim_c))
-            elif isinstance(con.cone, NegativeOrthant):
-                A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
-                A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
-                A_rows.append(A_con.tocsr())
-                b_vals.append(-val0_np)
-                cones.append(_make_cone("NonnegativeConeT", dim_c))
-            else:
-                msg = (
-                    f"Clarabel adapter does not support cone {type(con.cone).__name__} "
-                    f"on constraint {type(con).__name__}."
-                )
-                raise TypeError(msg)
+        if isinstance(block.cone, SecondOrderCone):
+            order = np.concatenate([[dim_c - 1], np.arange(dim_c - 1)])
+            A_rows.append(-rows[order])
+            b_vals.append(affine[order])
+            cones.append(_make_cone("SecondOrderConeT", dim_c))
+        elif isinstance(block.cone, ZeroCone):
+            A_rows.append(rows)
+            b_vals.append(-affine)
+            cones.append(_make_cone("ZeroConeT", dim_c))
+        elif isinstance(block.cone, PositiveOrthant):
+            A_rows.append(-rows)
+            b_vals.append(affine)
+            cones.append(_make_cone("NonnegativeConeT", dim_c))
+        elif isinstance(block.cone, NegativeOrthant):
+            A_rows.append(rows)
+            b_vals.append(-affine)
+            cones.append(_make_cone("NonnegativeConeT", dim_c))
+        else:
+            msg = f"Clarabel adapter does not support cone {type(block.cone).__name__}."
+            raise TypeError(msg)
 
     return A_rows, b_vals, cones
 
@@ -251,22 +150,27 @@ def _extract_conic_bounds(
     return A_rows, b_vals, cones
 
 
-def _normalise_duals(problem: Problem, z_dual: np.ndarray, nz: int) -> tuple[np.ndarray, np.ndarray]:
+def _normalise_duals(
+    problem: Problem,
+    z_dual: np.ndarray,
+    nz: int,
+    n_con_rows: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """Split Clarabel's cone duals into canonical constraint duals and signed bound duals.
 
-    Clarabel keeps every cone dual non-negative and posts the two sides of a box as separate
-    NonnegativeCone blocks, upper first. Recombining them as ``upper - lower`` recovers the
-    signed convention the other backends report.
+    The subproblem's rows already come in canonical order, so the leading `n_con_rows` duals are
+    `lam` as it stands. Clarabel keeps every cone dual non-negative and posts the two sides of a
+    box as separate NonnegativeCone blocks, upper first, so recombining those as ``upper - lower``
+    recovers the signed convention the other backends report.
     """
-    canonical_rows = blocked_to_canonical(problem)
-    lam = z_dual[canonical_rows]
+    lam = z_dual[:n_con_rows]
 
     zL, zU = primal_bounds(problem)
     ub_indices = np.where(np.isfinite(zU))[0]
     lb_indices = np.where(np.isfinite(zL))[0]
 
     mu = np.zeros(nz, dtype=np.float64)
-    bound_base = len(canonical_rows)
+    bound_base = n_con_rows
     mu[ub_indices] += z_dual[bound_base : bound_base + len(ub_indices)]
     bound_base += len(ub_indices)
     mu[lb_indices] -= z_dual[bound_base : bound_base + len(lb_indices)]
@@ -339,55 +243,17 @@ class Clarabel:
         x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(problem, bc, ws)
         problem = retarget_problem(problem, bc)
 
-        t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
-        t_term = t0_arr + jnp.sum(dt_arr)
-
         z_op = operating_point_z(problem, self.operating_point)
-        X_op, U_op = _z_to_trajectory(z_op, N, n, m)
+        qp = quadratic_subproblem(problem, z_op, bc)
+        P_triu, q_vec = qp.P, qp.q
 
-        P_triu, q_vec = extract_quadratic_cost(
-            problem,
-            N,
-            n,
-            m,
-            nz,
-            t0_arr=t0_arr,
-            dt_arr=dt_arr,
-            z_op=z_op,
-        )
-
-        discrete_model = problem.model
-        A_dyn, b_dyn, cones_dyn = _extract_conic_dynamics(
-            discrete_model,
-            N,
-            n,
-            m,
-            nz,
-            x0_arr=x0_arr,
-            t_stage=t_stage,
-            dt_arr=dt_arr,
-            X_op=X_op,
-            U_op=U_op,
-        )
-
-        knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
-        A_con, b_con, cones_con = _extract_conic_stage_constraints(
-            knot_evaluators,
-            N,
-            n,
-            m,
-            nz,
-            t_stage=t_stage,
-            t_term=t_term,
-            xf_val=xf_val,
-            z_op=z_op,
-        )
-
+        A_con, b_con, cones_con = _conic_rows(qp)
         A_bounds, b_bounds, cones_bounds = _extract_conic_bounds(problem, nz)
 
-        A_mat = sp.vstack([*A_dyn, *A_con, *A_bounds]).tocsc()
-        b_vec = np.concatenate([*b_dyn, *b_con, *b_bounds])
-        cones = [*cones_dyn, *cones_con, *cones_bounds]
+        n_con_rows = qp.A.shape[0]
+        A_mat = sp.vstack([*A_con, *A_bounds]).tocsc()
+        b_vec = np.concatenate([*b_con, *b_bounds])
+        cones = [*cones_con, *cones_bounds]
 
         settings = settings_cls()
         settings.verbose = False
@@ -422,7 +288,7 @@ class Clarabel:
             dt=dt_arr,
         )
 
-        lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz)
+        lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz, n_con_rows)
 
         info_dict = {
             "status": status_str,

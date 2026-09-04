@@ -121,41 +121,6 @@ def constraint_row_count(problem: Problem) -> int:
     return n + (N - 1) * n + int(sum(problem.constraints.p))
 
 
-def blocked_to_canonical(problem: Problem) -> np.ndarray:
-    """Return row indices mapping a blocked dual vector into canonical order.
-
-    The canonical order is the one `eval_g` emits: the initial condition, then each knot's
-    dynamics defect followed by that knot's constraint rows. OSQP and Clarabel instead stack
-    every dynamics row first and every constraint row after, so their duals need permuting.
-
-    Returns
-    -------
-    np.ndarray
-        Index array `idx` of shape ``(P,)`` such that ``dual_blocked[idx]`` is in canonical
-        order, where `dual_blocked` holds the ``n + (N - 1) * n`` dynamics rows followed by
-        the knot constraint rows in knot order.
-    """
-    n = int(problem.model.n)
-    N = int(problem.N)
-    knot_p = list(problem.constraints.p)
-
-    con_base = n + (N - 1) * n
-    con_offset = con_base
-    idx: list[int] = list(range(n))  # initial condition
-
-    for k in range(N - 1):
-        dyn_start = n + k * n
-        idx.extend(range(dyn_start, dyn_start + n))
-        p_k = knot_p[k] if k < len(knot_p) else 0
-        idx.extend(range(con_offset, con_offset + p_k))
-        con_offset += p_k
-
-    p_term = knot_p[N - 1] if len(knot_p) > N - 1 else 0
-    idx.extend(range(con_offset, con_offset + p_term))
-
-    return np.asarray(idx, dtype=int)
-
-
 def split_bound_duals(mu: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Split signed bound duals into the non-negative (lower, upper) pair solvers expect.
 

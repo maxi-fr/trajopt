@@ -9,21 +9,17 @@ import numpy as np
 import scipy.sparse as sp
 
 from trajopt.cones import NegativeOrthant, SecondOrderCone, ZeroCone
-from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
-from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _z_to_trajectory,
-    build_linear_constraint_block,
     compute_constraint_violation,
-    extract_quadratic_cost,
     operating_point_z,
     parse_solver_initial_state,
-    primal_bounds,
 )
-from trajopt.transcription.result import blocked_to_canonical, warm_start_duals
+from trajopt.transcription.result import warm_start_duals
+from trajopt.transcription.subproblem import ConstraintBlock, quadratic_subproblem
 from trajopt.transcription.transcription import (
     eval_f,
 )
@@ -74,134 +70,26 @@ class OSQPResult(NamedTuple):
     mu: np.ndarray = _EMPTY
 
 
-def _extract_qp_dynamics(  # noqa: PLR0913 -- Dynamics extraction helper takes 8 parameters
-    discrete_model: DiscreteDynamics,
-    N: int,
-    n: int,
-    m: int,
-    nz: int,
-    *,
-    x0_arr: jax.Array,
-    t_stage: jax.Array,
-    dt_arr: jax.Array,
-    X_op: jax.Array,
-    U_op: jax.Array,
-) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
-    """Assemble initial condition and linear dynamics defect rows for OSQP."""
-    A_rows: list[sp.spmatrix] = []
-    l_vals: list[np.ndarray] = []
-    u_vals: list[np.ndarray] = []
-
-    # Initial condition: x_0 = x0_arr
-    A_init = sp.lil_matrix((n, nz), dtype=np.float64)
-    A_init[:, :n] = np.eye(n)
-    A_rows.append(A_init.tocsr())
-    x0_np = np.asarray(x0_arr, dtype=np.float64)
-    l_vals.append(x0_np)
-    u_vals.append(x0_np)
-
-    for k in range(N - 1):
-        tk = t_stage[k]
-        dtk = dt_arr[k]
-        x_op = X_op[k]
-        u_op = U_op[k]
-        Ak = np.asarray(discrete_model.state_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
-        Bk = np.asarray(discrete_model.control_jacobian(x_op, u_op, tk, dtk), dtype=np.float64)
-        f_op = np.asarray(discrete_model.discrete_dynamics(x_op, u_op, tk, dtk), dtype=np.float64)
-        # f(x, u) ~ f(x_op, u_op) + A (x - x_op) + B (u - u_op), collected into the constant
-        dk = f_op - Ak @ np.asarray(x_op, dtype=np.float64) - Bk @ np.asarray(u_op, dtype=np.float64)
-
-        A_dyn_k = sp.lil_matrix((n, nz), dtype=np.float64)
-        col_x_k = k * (n + m)
-        col_u_k = col_x_k + n
-        col_x_next = (k + 1) * (n + m)
-        A_dyn_k[:, col_x_k : col_x_k + n] = -Ak
-        A_dyn_k[:, col_u_k : col_u_k + m] = -Bk
-        A_dyn_k[:, col_x_next : col_x_next + n] = np.eye(n)
-        A_rows.append(A_dyn_k.tocsr())
-        l_vals.append(dk)
-        u_vals.append(dk)
-
-    return A_rows, l_vals, u_vals
-
-
-def _extract_qp_stage_constraints(  # noqa: PLR0913 -- Stage constraint extraction helper takes 8 arguments
-    knot_evaluators: Sequence[Any],
-    N: int,
-    n: int,
-    m: int,
-    nz: int,
-    *,
-    t_stage: jax.Array,
-    t_term: jax.Array,
-    xf_val: jax.Array | None,
-    z_op: jax.Array,
-) -> tuple[list[sp.spmatrix], list[np.ndarray], list[np.ndarray]]:
-    """Assemble stage and terminal linear constraint rows for OSQP."""
-    A_rows: list[sp.spmatrix] = []
-    l_vals: list[np.ndarray] = []
-    u_vals: list[np.ndarray] = []
-
-    for k in range(N):
-        if k >= len(knot_evaluators):
-            continue
-        ev = knot_evaluators[k]
-        tk = t_stage[k] if k < N - 1 else t_term
-        col_k = k * (n + m)
-        is_term = k == N - 1
-        z_op_k = z_op[col_k : col_k + (n if is_term else n + m)]
-
-        for con in ev.constraints:
-            if isinstance(con, (BoundConstraint, ControlBound, StateBound)):
-                continue
-
-            if isinstance(con.cone, SecondOrderCone):
-                msg = (
-                    "OSQP does not support SecondOrderCone constraints. "
-                    "Use Clarabel for second-order cone constraints or Ipopt for nonlinear formulations."
-                )
-                raise TypeError(msg)
-
-            dim_c = int(con.p)
-            if dim_c == 0:
-                continue
-
-            A_c_block, val0_np = build_linear_constraint_block(
-                con,
-                n,
-                m,
-                tk=tk,
-                is_term=is_term,
-                xf_val=xf_val,
-                z_op_k=z_op_k,
+def _reject_unsupported_cones(blocks: Sequence[ConstraintBlock]) -> None:
+    """Reject the Cones OSQP's box form cannot express, before the QP is handed over."""
+    for block in blocks:
+        if isinstance(block.cone, SecondOrderCone):
+            msg = (
+                "OSQP does not support SecondOrderCone constraints. "
+                "Use Clarabel for second-order cone constraints or Ipopt for nonlinear formulations."
             )
-            A_con = sp.lil_matrix((dim_c, nz), dtype=np.float64)
-            A_con[:, col_k : col_k + A_c_block.shape[1]] = A_c_block
-            A_rows.append(A_con.tocsr())
-
-            if isinstance(con.cone, ZeroCone):
-                l_vals.append(-val0_np)
-                u_vals.append(-val0_np)
-            elif isinstance(con.cone, NegativeOrthant):
-                l_vals.append(np.full(dim_c, -np.inf, dtype=np.float64))
-                u_vals.append(-val0_np)
-            else:
-                msg = (
-                    f"OSQP adapter does not support cone {type(con.cone).__name__} on constraint {type(con).__name__}."
-                )
-                raise TypeError(msg)
-
-    return A_rows, l_vals, u_vals
+            raise TypeError(msg)
+        if not isinstance(block.cone, (ZeroCone, NegativeOrthant)):
+            msg = f"OSQP adapter does not support cone {type(block.cone).__name__}."
+            raise TypeError(msg)
 
 
-def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the warm start, and the row map
+def _warm_start(
     solver: Any,  # noqa: ANN401 -- osqp.OSQP is an untyped C-extension
     problem: Problem,
     ws: WarmStart,
     *,
     z0: jax.Array | None,
-    canonical_rows: np.ndarray,
-    n_rows: int,
 ) -> None:
     """Seed OSQP with the previous primal and, when the WarmStart carries them, dual iterates."""
     if z0 is not None:
@@ -211,10 +99,7 @@ def _warm_start(  # noqa: PLR0913 -- seeding takes the solver, the problem, the 
     if lam0 is None or mu0 is None:
         return
 
-    y0 = np.empty(n_rows, dtype=np.float64)
-    y0[canonical_rows] = lam0
-    y0[len(canonical_rows) :] = mu0
-    solver.warm_start(y=y0)
+    solver.warm_start(y=np.concatenate([lam0, mu0]))
 
 
 @dataclass(frozen=True)
@@ -250,7 +135,7 @@ class OSQP:
     operating_point: Trajectory | jax.Array | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
 
-    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> OSQPResult:  # noqa: PLR0915 -- one straight-line transcribe, solve and unpack
+    def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> OSQPResult:
         """Solve the transcribed optimal control problem using OSQP, warning that it is one linearization.
 
         The warning is unconditional rather than gated on the problem being nonlinear: every
@@ -282,57 +167,16 @@ class OSQP:
         x0_arr, t0_arr, dt_arr, xf_val, z0 = parse_solver_initial_state(problem, bc, ws)
         problem = retarget_problem(problem, bc)
 
-        t_stage = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr[:-1])])
-        t_term = t0_arr + jnp.sum(dt_arr)
-
         z_op = operating_point_z(problem, self.operating_point)
-        X_op, U_op = _z_to_trajectory(z_op, N, n, m)
+        qp = quadratic_subproblem(problem, z_op, bc)
+        _reject_unsupported_cones(qp.blocks)
 
-        P_triu, q_vec = extract_quadratic_cost(
-            problem,
-            N,
-            n,
-            m,
-            nz,
-            t0_arr=t0_arr,
-            dt_arr=dt_arr,
-            z_op=z_op,
-        )
-
-        discrete_model = problem.model
-        A_dyn, l_dyn, u_dyn = _extract_qp_dynamics(
-            discrete_model,
-            N,
-            n,
-            m,
-            nz,
-            x0_arr=x0_arr,
-            t_stage=t_stage,
-            dt_arr=dt_arr,
-            X_op=X_op,
-            U_op=U_op,
-        )
-
-        knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
-        A_con, l_con, u_con = _extract_qp_stage_constraints(
-            knot_evaluators,
-            N,
-            n,
-            m,
-            nz,
-            t_stage=t_stage,
-            t_term=t_term,
-            xf_val=xf_val,
-            z_op=z_op,
-        )
-
-        zL, zU = primal_bounds(problem)
-        A_bounds = sp.eye(nz, format="csr", dtype=np.float64)
-
-        A_mat = sp.vstack([*A_dyn, *A_con, A_bounds]).tocsc()
-        canonical_rows = blocked_to_canonical(problem)
-        l_vec = np.concatenate([*l_dyn, *l_con, zL])
-        u_vec = np.concatenate([*u_dyn, *u_con, zU])
+        # Bounds ride as identity rows, so every dual OSQP returns is either a lam or a mu.
+        n_con_rows = qp.A.shape[0]
+        A_mat = sp.vstack([qp.A, sp.eye(nz, format="csr", dtype=np.float64)]).tocsc()
+        P_triu, q_vec = qp.P, qp.q
+        l_vec = np.concatenate([qp.row_lower, qp.z_lower])
+        u_vec = np.concatenate([qp.row_upper, qp.z_upper])
 
         solver = osqp.OSQP()
         solver_opts: dict[str, Any] = {"verbose": False}
@@ -340,7 +184,7 @@ class OSQP:
             solver_opts.update(self.options)
 
         solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
-        _warm_start(solver, problem, ws, z0=z0, canonical_rows=canonical_rows, n_rows=A_mat.shape[0])
+        _warm_start(solver, problem, ws, z0=z0)
 
         res = solver.solve()
 
@@ -365,8 +209,8 @@ class OSQP:
         )
 
         y_out = np.asarray(res.y, dtype=np.float64) if res.y is not None else np.zeros(A_mat.shape[0])
-        lam_out = y_out[canonical_rows]
-        mu_out = y_out[len(canonical_rows) :]
+        lam_out = y_out[:n_con_rows]
+        mu_out = y_out[n_con_rows:]
 
         info_dict = {
             "status": status_msg,
