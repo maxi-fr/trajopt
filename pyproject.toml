@@ -16,6 +16,7 @@ dependencies = [
     "jax>=0.4.25",
     "jaxlib>=0.4.25",
     "numpy>=1.24.0",
+    "qdldl>=0.1.9.post1",
     "scipy>=1.10.0",
 ]
 

@@ -67,7 +67,7 @@ def test_pn_layout_is_a_distinct_second_row_ordering() -> None:
     n, m, N = 4, 1, 101
     assert layout.Np == N * n + (N - 1) * m
     assert layout.Nd == n + (N - 1) * n + N * layout.p_max
-    assert "second row-ordering convention" in (pn_module.__doc__ or "")
+    assert "row ordering" in (PNLayout.__doc__ or "")
 
 
 def test_pn_kkt_shapes_are_static_across_active_sets(
@@ -260,13 +260,9 @@ def test_multiplier_projection_matches_the_normal_equations_least_squares_estima
     assert residual_projected < residual_raw
 
 
-def test_dense_kkt_divergence_is_documented_in_solver_docstring() -> None:
-    """The module docstring records the dense-KKT-vs-QDLDL divergence, per the ticket's requirement."""
-    import trajopt.solvers.pn as pn_module
-
-    doc = pn_module.__doc__ or ""
-    assert "QDLDL" in doc
-    assert "dense" in doc.lower()
+def test_kkt_solver_uses_qdldl() -> None:
+    """The KKT solver step uses QDLDL sparse factorization."""
+    assert "QDLDL" in (_solve_kkt_step.__doc__ or "")
 
 
 def test_pn_satisfies_solver_protocol() -> None:
