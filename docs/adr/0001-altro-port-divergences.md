@@ -95,12 +95,16 @@ warm-start guard here at all.
 
 ### Projected Newton: dense KKT, not QDLDL
 
+*(Note: Superseded by ADR 0007: `_solve_kkt_step` now calls QDLDL on the host through
+`jax.pure_callback`, which drops the masking scheme described here and is not bit-identical to the
+dense solve it replaces.)*
+
 Altro's PN factors its sparse KKT matrix with QDLDL; the active set changes shape between
 iterations, and a sparse factorization's fill-in pattern would change with it. JAX requires static
-shapes under tracing, so `src/trajopt/solvers/pn.py` assembles a dense masked KKT matrix and
-solves it with `jnp.linalg.solve`. Numerically equivalent to Altro's sparse solve at the problem
-sizes this port targets; the cost is doing dense linear algebra on what upstream treats as a
-sparse system.
+shapes under tracing, so `src/trajopt/solvers/pn.py` originally assembled a dense masked KKT matrix
+and solved it with `jnp.linalg.solve`. That was numerically equivalent to Altro's sparse solve at
+the problem sizes this port targets; the cost was doing dense linear algebra on what upstream
+treats as a sparse system.
 
 ### Projected Newton: `multiplier_projection` is a genuine port, a superset of upstream
 

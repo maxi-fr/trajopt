@@ -48,8 +48,10 @@ Three fixes, each with its own test.
 - **`_evaluate_al_convergence` requires one dual update before it may exit on feasibility.**
   Under `reset_penalties=False` only, `converged_violation` is additionally gated on
   `iter_num > 1`. This is a scoped divergence from the Altro.jl port, invisible under default
-  options where the branch is never taken and the expression is Altro's verbatim -- so the
-  cross-verification against the live Julia solver still matches on the whole history.
+  options where the branch is never taken. Note that ADR 0007 has since put two *unscoped*
+  divergences into the same function, so "invisible under default options" is a claim about this
+  gate alone, not about `_evaluate_al_convergence` as a whole, and the cross-verification against
+  the live Julia solver is per-formula and per-transition rather than a whole-history replay.
 - **`(reset_duals=False, reset_penalties=True)` is rejected at the call site.** `AL.solve`,
   `Altro.solve` and `BoxQP.solve` raise `ValueError` rather than producing the NaN above.
   Carrying a multiplier without its penalty is not a configuration worth supporting.
@@ -65,6 +67,14 @@ Three fixes, each with its own test.
   that, not success.
 - `reset_duals=False` remains unusable in practice. The default `(True, True)` is the only
   supported receding-horizon configuration, and nothing in the repo relies on the others.
+- ADR 0007's per-row penalty cap does not change this, and on this problem does not fire at all.
+  Gated on the active set, the cap can only bind on a row that is actually in the augmented cost,
+  and such a row has its residual driven towards zero, at which point
+  $2 \cdot \text{max\_cost\_value} / c^2$ is no cap. Re-measured on the kicked cartpole with the cap
+  disabled, the `(False, False)` run is bit-identical: final pole angle error 3.46 rad either way,
+  against 0.16 rad on the supported default. The cap is the one mechanism in the codebase that can
+  pull a carried `mu` *down*, so it looks like a candidate for option 2 below. It is not one. Option
+  2 remains open and unimplemented.
 
 ## What is deliberately not decided
 
