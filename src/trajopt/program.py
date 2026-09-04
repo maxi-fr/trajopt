@@ -188,10 +188,10 @@ def _shifted_al(al: "ALConstraints | None") -> "ALConstraints | None":
 class Program:
     """One solver's compiled, allocated form of a `Problem`: its jitted cores and its live handles.
 
-    A Problem says what the problem *is* -- model, objective shape, constraints, horizon -- and is
+    A Problem says what the problem *is* -- model, Objective shape, Constraints, Horizon -- and is
     immutable and structural. A Program is what a particular solver had to build in order to run
-    that Problem: the `jax.jit` closures specialized to it for the native stagewise backends, and
-    the live C handles an eager backend keeps so it can update a factorization instead of setting
+    that Problem: the `jax.jit` closures specialized to it for the Native Solvers, and
+    the live C handles an eager Backend keeps so it can update a factorization instead of setting
     one up again. It is mutable, eager-side, per-solver, and
     deliberately not a pytree: `vmap` over a Program is given up on purpose.
 
@@ -207,7 +207,7 @@ class Program:
         The structural problem this program is specialized to. Held by reference; the cores close
         over it, so it must not be swapped.
     solver : Solver
-        The backend this program belongs to, and the source of its static configuration.
+        The Backend this program belongs to, and the source of its static configuration.
     """
 
     __slots__ = ("_cores", "handles", "problem", "solver")

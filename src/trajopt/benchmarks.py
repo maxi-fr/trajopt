@@ -460,12 +460,14 @@ def measure_solver_runtime(
 
     t_start = time.perf_counter()
     res = program.solve(bc, ws)
+    jax.block_until_ready(getattr(res, "Z", res))
     t_first = time.perf_counter() - t_start
 
     durations: list[float] = []
     for _ in range(n_repeats):
         t_start = time.perf_counter()
         res = program.solve(bc, ws)
+        jax.block_until_ready(getattr(res, "Z", res))
         durations.append(time.perf_counter() - t_start)
 
     return res, SolveTiming(

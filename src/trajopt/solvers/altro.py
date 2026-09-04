@@ -230,12 +230,13 @@ def altro_solve(  # noqa: PLR0913, PLR0917 -- ticket 30's solve_kd_builder/u_bou
     )
 
 
-def _jit_altro_solve(  # noqa: PLR0913, PLR0917 -- the traced core's own five arguments plus bc
+def _jit_altro_solve(  # noqa: PLR0913 -- the traced core's own five arguments plus bc
     program: Program,
     trajectory: Trajectory,
     al0: ALConstraints,
     x0: jax.Array,
     options: SolverOptions,
+    *,
     bc: BoundaryConditions | None = None,
 ) -> ALTROSolveResult:
     """Run `program`'s `altro_solve` core, called from `ALTRO.solve()`'s constrained branch.
@@ -387,7 +388,7 @@ class ALTRO:
 
         x0_arr, _t0_arr, _dt_arr, _xf_val, _z0 = parse_solver_initial_state(problem, bc, ws)
 
-        result = _jit_altro_solve(program, init_traj, init_al, x0_arr, options, bc)
+        result = _jit_altro_solve(program, init_traj, init_al, x0_arr, options, bc=bc)
 
         status = TerminationStatus(int(result.status))
         n_iter_al = int(result.al_stats.iterations)

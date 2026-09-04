@@ -1,31 +1,3 @@
-"""Projected Newton polish phase (Altro's `ProjectedNewtonSolver`, `src/direct/`).
-
-**Finding L -- a different formulation, not "one more phase".** The AL-iLQR phase (`al.py`,
-`ilqr.py`) is single shooting: controls are the only decision variables and the dynamics hold by
-construction because the trajectory is rolled out. Projected Newton is multiple shooting: states
-and controls are stacked into one primal vector, the dynamics become explicit equality
-constraints, and one KKT system covers the whole horizon at once. So this module assembles its
-own primal and dual layout (`PNLayout` below), a second row-ordering convention entirely
-independent of `transcription/layout.py`'s canonical NLP row order -- nothing here is called `Z`
-or `lam` bare; the primal is always `z_pn` and the dual/residual is always `d_pn`.
-
-**Dense KKT, a declared divergence from Altro.** Altro builds a sparse upper-triangular KKT
-matrix and factors it with QDLDL; the active set changes shape between iterations, and a sparse
-pattern that changes shape cannot be a static `jax` shape. This port assembles the KKT system
-dense at the full `(Np + Nd, Np + Nd)` size every time, with inactive dual rows/columns masked to
-an identity block (zero row, 1 on the diagonal) so inactive multipliers solve to zero and the
-factorization stays well posed regardless of which rows are active. For the small, fixed `n`/`m`
-this port targets, a dense `jnp.linalg.solve` is numerically equivalent to Altro's sparse QDLDL
-solve and drastically simpler to trace.
-
-**`multiplier_projection` is dead code upstream** (`pn_solve.jl`, Altro issue #35): the
-implementation is commented out and the call site hardcodes `res = Inf`. This port implements it
-for real, gated behind `options.multiplier_projection` (default `False`),
-which makes this a superset of upstream. There is nothing on the Julia side to compare the
-projection's numerical output against, so any cross-parity test must run with the option off on
-both sides.
-"""
-
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 

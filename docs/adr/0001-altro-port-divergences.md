@@ -104,13 +104,14 @@ sparse system.
 
 ### Projected Newton: `multiplier_projection` is a genuine port, a superset of upstream
 
+*(Note: Superseded in part by ADR 0007: `options.multiplier_projection` default was changed from `True` to `False` to eliminate redundant Gram matrix assembly and dense solve overhead, matching shipped Julia behavior).*
+
 Altro's `multiplier_projection!` (`pn_solve.jl`) is commented-out dead code -- upstream issue #35
 -- and its call site hardcodes the result to `res = Inf`, so it never actually executes upstream.
 `src/trajopt/solvers/pn.py`'s `multiplier_projection` is implemented for real, gated behind
-`options.multiplier_projection` (default `True`, matching Altro's own default value for an option
-whose corresponding code never runs). This port therefore has behaviour Altro's shipped code does
-not; parity tests against Altro must set `multiplier_projection=False` on both sides, since
-upstream cannot exercise the `True` path at all.
+`options.multiplier_projection` (originally default `True`, now default `False` per ADR 0007).
+This port therefore has behaviour Altro's shipped code does not; parity tests against Altro must
+keep `multiplier_projection=False` on both sides, since upstream cannot exercise the `True` path at all.
 
 ### Projected Newton: `x0` is an explicit parameter, not `trajectory.X[0]`
 
@@ -129,15 +130,13 @@ Finding F: both are on Altro's dead-option list, never read by `altro_jl/src/`. 
 
 ### The ALTRO driver always runs PN's traced core
 
-`altro_solve` (`src/trajopt/solvers/altro.py`) always calls `pn_solve` and selects between AL's
-and PN's trajectories with `jnp.where(run_pn, pn_traj, al_traj)` rather than `lax.cond`, matching
-this codebase's established style for traced branches elsewhere (e.g. `al.py`'s `inner_failed`
-handling). This keeps the whole driver `jax.jit`/`jax.vmap`-able end to end -- a `lax.cond` with a
-traced predicate still requires both branches to trace with matching output structure, and
-`jnp.where` on the whole pytree is the simpler way to express "run both, pick one" once both sides
-are already being traced. The cost is wasted computation whenever PN would not have been needed
-(`run_pn` false): PN's projection still runs and its result is simply discarded. Never a
-behavioural difference, only a compute cost.
+*(Note: Superseded by ADR 0007: `altro_solve` now bypasses PN when disabled and wraps `pn_solve` in `jax.lax.cond(run_pn, ...)` inside the trace, avoiding dense KKT assembly and factorization whenever AL has already converged to tolerance).*
+
+`altro_solve` (`src/trajopt/solvers/altro.py`) originally called `pn_solve` unconditionally and
+selected between AL's and PN's trajectories with `jnp.where(run_pn, pn_traj, al_traj)` rather than
+`lax.cond`, matching this codebase's established style for traced branches elsewhere (e.g. `al.py`'s
+`inner_failed` handling). As recorded in ADR 0007, this has been refined to `jax.lax.cond` to avoid
+wasting dense KKT compute when PN is unnecessary.
 
 ### The PN gate is a two-level check, and a `MAX_ITERATIONS_OUTER` exit is never upgraded
 

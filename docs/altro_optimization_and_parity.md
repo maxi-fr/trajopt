@@ -126,6 +126,7 @@ Instead of comparing monolithic 50-iteration trajectory solves, write targeted u
           C = C.at[jnp.asarray(g.knots), :p_g].set(g.evaluate(X, U, T))
       return C
 
+
   def _evaluate_bound_residuals(constraints, X, U):
       m = U.shape[1]
       x_upper, x_lower = constraints.x_upper, constraints.x_lower
@@ -139,6 +140,7 @@ Instead of comparing monolithic 50-iteration trajectory solves, write targeted u
       u_lower_safe = jnp.where(jnp.isfinite(u_lower_pad), u_lower_pad, 0.0)
 
       return jnp.concatenate([X - x_upper_safe, x_lower_safe - X, U_pad - u_upper_safe, u_lower_safe - U_pad], axis=-1)
+
 
   def evaluate_al_residuals(al, constraints, traj):
       C_cons = _evaluate_constraint_residuals(constraints, traj.X, traj.U, traj.t, al.p_cons_max)

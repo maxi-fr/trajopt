@@ -776,9 +776,9 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
         feedback term is not, so this is a deliberate practical safeguard beyond the box-DDP
         paper's strict local guarantee). Defaults to None, meaning no clip.
     bc : BoundaryConditions | None, optional
-        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        Traced boundary conditions; their reference window retargets `problem`'s Objective here,
         inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
-        objective keeps the target it was built with.
+        Objective keeps the target it was built with.
 
     Returns
     -------
@@ -813,9 +813,9 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
 
 
 def build_warm_start(problem: Problem, bc: BoundaryConditions, ws: WarmStart) -> Trajectory:
-    """Build the eager warm-start trajectory from `ws`, on the absolute time grid starting at `bc.t0`.
+    """Build the eager warm-start Trajectory from `ws`, on the absolute time grid starting at `bc.t0`.
 
-    Shared by every native solver's `.solve()`: each parses `ws.Z` into `(X, U)` and lays it on
+    Shared by every Native Solver's `.solve()`: each parses `ws.Z` into `(X, U)` and lays it on
     the problem's time grid. The run-time target is not folded in here; it stays in `bc` and is
     passed to the jitted core as a traced argument, so a goal that moves between MPC steps changes
     traced values rather than the compilation key.
@@ -823,16 +823,16 @@ def build_warm_start(problem: Problem, bc: BoundaryConditions, ws: WarmStart) ->
     Parameters
     ----------
     problem : Problem
-        Problem to warm-start, supplying the horizon, dimensions and step durations.
+        Problem to warm-start, supplying the Horizon, dimensions and step durations.
     bc : BoundaryConditions
         Traced boundary data supplying the initial timestamp.
     ws : WarmStart
-        Warm start supplying the flat primal `Z`.
+        Warm start supplying the Primal Vector `Z`.
 
     Returns
     -------
     Trajectory
-        The warm-start trajectory of N knot points built from `ws.Z`.
+        The warm-start Trajectory of N Knot Points built from `ws.Z`.
     """
     N = int(problem.N)
     n = int(problem.model.n)
