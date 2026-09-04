@@ -77,6 +77,11 @@ def _make_cone(name: str, dim: int) -> object:
     return cone_cls(dim)
 
 
+def _soc_order(dim: int) -> np.ndarray:
+    """Row permutation taking a `SecondOrderCone` block from canonical order to Clarabel's."""
+    return np.concatenate([[dim - 1], np.arange(dim - 1)])
+
+
 def _conic_rows(qp: QuadraticSubproblem) -> tuple[list[sp.spmatrix], list[np.ndarray], list[object]]:
     """Re-express the subproblem's linearized rows as Clarabel's ``A z + s = b, s in K``.
 
@@ -95,7 +100,7 @@ def _conic_rows(qp: QuadraticSubproblem) -> tuple[list[sp.spmatrix], list[np.nda
         dim_c = block.stop - block.start
 
         if isinstance(block.cone, SecondOrderCone):
-            order = np.concatenate([[dim_c - 1], np.arange(dim_c - 1)])
+            order = _soc_order(dim_c)
             A_rows.append(-rows[order])
             b_vals.append(affine[order])
             cones.append(_make_cone("SecondOrderConeT", dim_c))
@@ -154,16 +159,23 @@ def _normalise_duals(
     problem: Problem,
     z_dual: np.ndarray,
     nz: int,
-    n_con_rows: int,
+    qp: QuadraticSubproblem,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split Clarabel's cone duals into canonical constraint duals and signed bound duals.
 
-    The subproblem's rows already come in canonical order, so the leading `n_con_rows` duals are
-    `lam` as it stands. Clarabel keeps every cone dual non-negative and posts the two sides of a
-    box as separate NonnegativeCone blocks, upper first, so recombining those as ``upper - lower``
+    Every row block but the second-order one went over to Clarabel in canonical order, so its
+    duals come back as `lam` stands. A `SecondOrderCone` block was permuted and negated on the way
+    in by `_conic_rows`, so its duals are un-permuted by the inverse of `_soc_order` and negated
+    back here. Clarabel keeps every cone dual non-negative and posts the two sides of a box as
+    separate NonnegativeCone blocks, upper first, so recombining those as ``upper - lower``
     recovers the signed convention the other backends report.
     """
-    lam = z_dual[:n_con_rows]
+    n_con_rows = qp.A.shape[0]
+    lam = z_dual[:n_con_rows].copy()
+    for block in qp.blocks:
+        if isinstance(block.cone, SecondOrderCone):
+            inverse = np.argsort(_soc_order(block.stop - block.start))
+            lam[block.start : block.stop] = -lam[block.start : block.stop][inverse]
 
     zL, zU = primal_bounds(problem)
     ub_indices = np.where(np.isfinite(zU))[0]
@@ -250,7 +262,6 @@ class Clarabel:
         A_con, b_con, cones_con = _conic_rows(qp)
         A_bounds, b_bounds, cones_bounds = _extract_conic_bounds(problem, nz)
 
-        n_con_rows = qp.A.shape[0]
         A_mat = sp.vstack([*A_con, *A_bounds]).tocsc()
         b_vec = np.concatenate([*b_con, *b_bounds])
         cones = [*cones_con, *cones_bounds]
@@ -288,7 +299,7 @@ class Clarabel:
             dt=dt_arr,
         )
 
-        lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz, n_con_rows)
+        lam_out, mu_out = _normalise_duals(problem, np.asarray(res.z, dtype=np.float64), nz, qp)
 
         info_dict = {
             "status": status_str,
