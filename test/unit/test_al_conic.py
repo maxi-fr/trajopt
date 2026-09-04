@@ -1,4 +1,3 @@
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -193,7 +192,9 @@ def _small_goal_only_problem() -> tuple[Problem, jax.Array, float, jax.Array]:
 def test_use_conic_cost_switch_on_warm_started_duals_raises_unless_reset() -> None:
     """Switching options.use_conic_cost with a prior warm-start al raises (finding E), unless reset_duals discards it."""
     prob, x0, _dt, xf = _small_goal_only_problem()
-    non_conic = MPC(prob, AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=False)), x0=x0, xf=xf)
+    non_conic = MPC(
+        prob, AL(options=SolverOptions(iterations=2, iterations_outer=1, use_conic_cost=False)), x0=x0, xf=xf
+    )
     non_conic.solve()
     warm_ws = non_conic.warm_start
     bc = non_conic.bc

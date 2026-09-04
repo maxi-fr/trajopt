@@ -169,17 +169,7 @@ def _(
         dt=dt,
         integrator=integrator,
     )
-    return (
-        dmodel,
-        dt,
-        model,
-        n_steps,
-        prob,
-        u_max,
-        x0,
-        x_track_max,
-        xf,
-    )
+    return dmodel, dt, model, n_steps, prob, u_max, x0, x_track_max, xf
 
 
 @app.cell(hide_code=True)
@@ -235,10 +225,10 @@ def _(ALTRO, Ipopt, MPC, prob, time, x0, xf):
         cost_altro_seeded,
         cost_ipopt_init,
         ipopt_init_ms,
+        mpc,
         res_altro_init,
         res_altro_seeded,
         res_ipopt_init,
-        mpc,
     )
 
 

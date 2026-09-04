@@ -306,7 +306,7 @@ def _(
         xf=xf,
         initial_trajectory=init_traj,
     )
-    return X_init, altro_mpc, ipopt_mpc, prob
+    return X_init, altro_mpc, ipopt_mpc
 
 
 @app.cell(hide_code=True)

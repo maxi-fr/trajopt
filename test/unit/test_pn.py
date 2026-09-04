@@ -276,9 +276,7 @@ def test_pn_result_satisfies_solver_result_protocol(
 ) -> None:
     """PNResult structurally satisfies the SolverResult protocol."""
     prob, x0, _dt, warm_traj, _al_res = al_warm_start_data
-    result = MPC(
-        prob, PN(options=SolverOptions(n_steps=1)), x0=x0, xf=XF, initial_trajectory=warm_traj
-    ).solve()
+    result = MPC(prob, PN(options=SolverOptions(n_steps=1)), x0=x0, xf=XF, initial_trajectory=warm_traj).solve()
 
     assert isinstance(result, PNResult)
     assert isinstance(result, SolverResult)

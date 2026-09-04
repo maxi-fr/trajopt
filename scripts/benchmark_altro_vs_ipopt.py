@@ -19,12 +19,12 @@ def run_benchmarks() -> None:
 
     for name, factory in problems:
         print(f"\n==================== {name} ====================")
-        prob, state, _ = factory()
+        prob, bc, ws, _ = factory()
         solvers = {
             "IPOPT": Ipopt(options={"print_level": 0, "tol": 1e-4, "max_iter": 500}),
             "ALTRO": ALTRO(options=SolverOptions()),
         }
-        comparison = compare_solvers(prob, state, solvers, n_repeats=5)
+        comparison = compare_solvers(prob, bc, ws, solvers, n_repeats=5)
         print(comparison.format_table())
 
         res_altro = comparison.rows[1].result

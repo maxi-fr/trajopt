@@ -67,9 +67,7 @@ def test_clarabel_soc_vs_ipopt_quadratic_norm_parity() -> None:
     prob_ipopt = Problem(model=model, obj=obj, constraints=clist_ipopt, N=N, dt=dt)
 
     x0 = jnp.array([3.0, 2.0, -1.0, 0.5])
-    res_clarabel = MPC(
-        prob_clarabel, Clarabel(options={"tol_gap_abs": 1e-8, "tol_gap_rel": 1e-8}), x0=x0
-    ).solve()
+    res_clarabel = MPC(prob_clarabel, Clarabel(options={"tol_gap_abs": 1e-8, "tol_gap_rel": 1e-8}), x0=x0).solve()
     res_ipopt = MPC(prob_ipopt, Ipopt(options={"tol": 1e-8, "print_level": 0}), x0=x0).solve()
 
     assert res_clarabel.success is True
@@ -207,9 +205,7 @@ def test_backends_agree_on_the_duals_of_a_shared_optimum() -> None:
     """Verify all three adapters report the same duals, in the same rows, with the same signs."""
     prob, bc, ws = _bound_active_double_integrator()
 
-    results = {
-        name: Program(prob, solver_cls(options=opts)).solve(bc, ws) for name, solver_cls, _, opts in _BACKENDS
-    }
+    results = {name: Program(prob, solver_cls(options=opts)).solve(bc, ws) for name, solver_cls, _, opts in _BACKENDS}
     for name, res in results.items():
         assert res.success is True, f"{name} failed: {res.message}"
 
@@ -326,9 +322,7 @@ def test_operating_point_does_not_move_the_solution_of_an_affine_problem(solver_
     term = QuadraticCost(Q=Q * 20.0, R=jnp.zeros((m, m)), r=jnp.zeros(m), c=0.0)
     cl = ConstraintList(n, m, N)
     cl.add_constraint(ControlBound(n=n, m=m, u_min=[-1.0, -1.0], u_max=[1.0, 1.0]), range(N - 1))
-    problem = Problem(
-        model=model, obj=Objective(stage_cost=cost, terminal_cost=term, N=N), constraints=cl, N=N, dt=dt
-    )
+    problem = Problem(model=model, obj=Objective(stage_cost=cost, terminal_cost=term, N=N), constraints=cl, N=N, dt=dt)
     x0 = jnp.array([2.0, -1.0, 0.0, 0.0])
     driver = MPC(problem, Clarabel(), x0=x0)
     bc, ws = driver.bc, driver.warm_start

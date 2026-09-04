@@ -209,9 +209,7 @@ def _(
     )
 
     # A driver per solver, each tracking the nominal reference and warm-started from it
-    altro_mpc = MPC(
-        problem, ALTRO(), x0=x0, reference=ref_trajectory, initial_trajectory=ref_trajectory
-    )
+    altro_mpc = MPC(problem, ALTRO(), x0=x0, reference=ref_trajectory, initial_trajectory=ref_trajectory)
     ipopt_mpc = MPC(
         problem,
         Ipopt(options={"print_level": 0}),
@@ -219,7 +217,7 @@ def _(
         reference=ref_trajectory,
         initial_trajectory=ref_trajectory,
     )
-    return altro_mpc, ipopt_mpc, omega_max, problem, v_max, y_corridor_bound
+    return altro_mpc, ipopt_mpc, omega_max, v_max, y_corridor_bound
 
 
 @app.cell

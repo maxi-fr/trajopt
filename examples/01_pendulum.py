@@ -157,7 +157,20 @@ def _(ConstraintList, ControlBound, GoalConstraint, N, m, n, xf):
 
 
 @app.cell
-def _(ALTRO, Ipopt, MPC, N, Problem, clist, dt, integrator, model, obj, x0, xf):
+def _(
+    ALTRO,
+    Ipopt,
+    MPC,
+    N,
+    Problem,
+    clist,
+    dt,
+    integrator,
+    model,
+    obj,
+    x0,
+    xf,
+):
     # Assemble the optimal control problem
     prob = Problem(
         model=model,
@@ -171,7 +184,7 @@ def _(ALTRO, Ipopt, MPC, N, Problem, clist, dt, integrator, model, obj, x0, xf):
     # One driver per solver: each owns its compiled Program, its boundary conditions and its warm start
     altro_mpc = MPC(prob, ALTRO(), x0=x0, xf=xf)
     ipopt_mpc = MPC(prob, Ipopt(options={"print_level": 0}), x0=x0, xf=xf)
-    return altro_mpc, ipopt_mpc, prob
+    return altro_mpc, ipopt_mpc
 
 
 @app.cell
