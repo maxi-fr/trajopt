@@ -22,8 +22,10 @@ class BoundaryConditions(eqx.Module):
     steps changes values, not the pytree, and forces no recompile. That is the whole point of the
     type, and the reason the target no longer lives fused into the Objective's linear terms.
 
-    A goal point is just a constant reference window, so one mechanism serves regulation and
-    tracking alike.
+    The window and the goal are separate concepts. `X_ref`/`U_ref` are what the quadratic
+    objective tracks over the horizon; `xf` is the destination terminal constraints bind. They
+    coincide only when the window is a constant goal window, which is why one leaf sufficed until
+    the window was allowed to move.
 
     Parameters
     ----------
@@ -36,21 +38,22 @@ class BoundaryConditions(eqx.Module):
         leave the objective at the reference it was built with.
     U_ref : jax.Array | None
         Reference controls of shape (N - 1, m), paired with X_ref and None exactly when it is.
+    xf : jax.Array | None
+        Terminal goal of shape (n,) that a GoalConstraint binds, or None to leave every goal
+        constraint at the target it was built with.
     """
 
     x0: jax.Array
     t0: jax.Array
     X_ref: jax.Array | None = None
     U_ref: jax.Array | None = None
-
-    @property
-    def xf(self) -> jax.Array | None:
-        """Terminal reference state of shape (n,), the run-time goal constraints read, or None."""
-        return None if self.X_ref is None else self.X_ref[-1]
+    xf: jax.Array | None = None
 
     def retarget(self, obj: Objective) -> Objective:
-        """Objective aimed at this reference window, or `obj` unchanged when there is none."""
-        if self.X_ref is None or self.U_ref is None or not obj.is_quadratic:
+        """Objective aimed at this reference window, regulated to `xf` when there is no window."""
+        if self.X_ref is None or self.U_ref is None:
+            return retarget_to_goal(obj, self.xf)
+        if not obj.is_quadratic:
             return obj
         return obj.with_reference(self.X_ref, self.U_ref)
 

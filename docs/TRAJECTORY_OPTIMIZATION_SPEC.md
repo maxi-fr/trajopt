@@ -679,7 +679,8 @@ makes "change the mass without recompiling" actually true.
 | Field | Kind |
 | :--- | :--- |
 | `x0`, `t0` | leaves |
-| `X_ref`, `U_ref` | leaves (the reference window; a goal is a constant window) |
+| `X_ref`, `U_ref` | leaves (the reference window the objective tracks) |
+| `xf` | leaf (the terminal goal constraints bind; separate from the window) |
 
 Zero static fields, so a boundary update can never key a recompile.
 

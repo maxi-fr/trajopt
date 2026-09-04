@@ -9,24 +9,24 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import Solver, SolverResult
 
 
-def _reference_window(
+def _targets(
     problem: Problem,
     xf: jax.Array | Sequence[float] | None,
     reference: Trajectory | None,
-) -> tuple[jax.Array, jax.Array] | tuple[None, None]:
-    """Build reference states of shape (N, n) and controls of shape (N - 1, m) from a goal or a window.
+) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None]:
+    """Build the tracked window of shape (N, n) and (N - 1, m) plus the terminal goal of shape (n,).
+
+    Goal and window are independent: a window alone tracks and leaves goal constraints at their
+    build-time target, a goal alone is also spread into a constant window so it still regulates
+    the cost, and both together track the window while binding the goal.
 
     Raises
     ------
     ValueError
-        If both a constant goal and a window are given, if a constant goal is aimed at an
-        objective that already tracks a build-time reference (which the goal would flatten), or
-        if a target is given that nothing in the problem reads.
+        If a constant goal is the thing aiming an objective that already tracks a build-time
+        reference (which the goal would flatten), or if a target is given that nothing reads.
     """
-    if xf is not None and reference is not None:
-        msg = "Pass either xf (a constant goal) or reference (a window), not both."
-        raise ValueError(msg)
-    if xf is not None and problem.obj.carries_reference:
+    if xf is not None and reference is None and problem.obj.carries_reference:
         msg = (
             "This objective already tracks a build-time reference, so a constant goal xf would "
             "silently overwrite it at every knot point. Pass reference=Trajectory(...) with the "
@@ -45,15 +45,21 @@ def _reference_window(
         )
         raise ValueError(msg)
 
+    xf_arr = None if xf is None else jnp.asarray(xf, dtype=jnp.float64)
     if reference is not None:
-        return jnp.asarray(reference.X, dtype=jnp.float64), jnp.asarray(reference.U, dtype=jnp.float64)
-    if xf is not None:
+        return (
+            jnp.asarray(reference.X, dtype=jnp.float64),
+            jnp.asarray(reference.U, dtype=jnp.float64),
+            xf_arr,
+        )
+    if xf_arr is not None:
         N, m = int(problem.N), int(problem.model.m)
         return (
-            jnp.repeat(jnp.asarray(xf, dtype=jnp.float64)[None, :], N, axis=0),
+            jnp.repeat(xf_arr[None, :], N, axis=0),
             jnp.zeros((N - 1, m), dtype=jnp.float64),
+            xf_arr,
         )
-    return None, None
+    return None, None, None
 
 
 class MPC:
@@ -70,6 +76,10 @@ class MPC:
     when nothing was pushed. A constant window is shift-invariant, so regulating to a fixed goal
     and tracking a moving one are the same mechanism with nothing special-cased.
 
+    The terminal goal is not part of that window. It rides along in the boundary conditions as its
+    own leaf, so a window that genuinely moves does not drag the destination a terminal constraint
+    binds onto whatever waypoint happens to sit N knots out.
+
     Parameters
     ----------
     problem : Problem
@@ -82,11 +92,12 @@ class MPC:
     t0 : float | jax.Array, optional
         Initial timestamp. Defaults to 0.0.
     xf : jax.Array | Sequence[float] | None, optional
-        Run-time goal of shape (n,), held constant across the horizon as the reference window.
-        Defaults to None, which leaves the objective at the reference it was built with.
+        Run-time terminal goal of shape (n,) that goal constraints bind. On its own it also
+        regulates the cost, spread into a constant reference window. Defaults to None, which
+        leaves goal constraints at the target they were built with.
     reference : Trajectory | None, optional
-        Reference window of N knot points, used in place of a constant goal when the target
-        varies over the horizon. Defaults to None.
+        Reference window of N knot points for the objective to track. May be combined with xf,
+        which then names the destination only and no longer aims the cost. Defaults to None.
     initial_trajectory : Trajectory | None, optional
         Warm-start trajectory guess. Defaults to x0 repeated with zero controls.
     initial_z : jax.Array | None, optional
@@ -111,7 +122,7 @@ class MPC:
 
             solver = Ipopt()
 
-        X_ref, U_ref = _reference_window(problem, xf, reference)
+        X_ref, U_ref, xf_arr = _targets(problem, xf, reference)
         x0_arr = jnp.asarray(x0, dtype=jnp.float64)
 
         self.program = Program(problem, solver)
@@ -120,12 +131,12 @@ class MPC:
             t0=jnp.asarray(t0, dtype=jnp.float64),
             X_ref=X_ref,
             U_ref=U_ref,
+            xf=xf_arr,
         )
         self.result: SolverResult | None = None
-        self._ws = WarmStart.cold(
-            problem, x0_arr, initial_trajectory=initial_trajectory, initial_z=initial_z
-        )
+        self._ws = WarmStart.cold(problem, x0_arr, initial_trajectory=initial_trajectory, initial_z=initial_z)
         self._pending_ref: tuple[jax.Array, jax.Array] | None = None
+        self._goal_aims_cost = xf_arr is not None and reference is None
 
     @property
     def problem(self) -> Problem:
@@ -154,7 +165,7 @@ class MPC:
 
     @property
     def xf(self) -> jax.Array | None:
-        """Run-time goal of shape (n,) -- the last knot of the reference window -- or None."""
+        """Run-time terminal goal of shape (n,) that goal constraints bind, or None."""
         return self.bc.xf
 
     @property
@@ -188,30 +199,40 @@ class MPC:
             t0=jnp.asarray(t, dtype=self.bc.t0.dtype),
             X_ref=self.bc.X_ref,
             U_ref=self.bc.U_ref,
+            xf=self.bc.xf,
         )
         self._ws = self._ws.with_x0(self.problem, x_arr)
 
     def set_goal(self, xf: jax.Array | Sequence[float]) -> None:
-        """Replace the reference window with the constant goal xf of shape (n,).
+        """Move the terminal goal to xf of shape (n,), re-aiming the cost when the goal aims it.
+
+        A driver built from a goal alone has no window of its own, so the goal is also spread back
+        over the horizon as the constant window the cost tracks. One built with its own reference
+        window keeps that window and moves only the destination.
 
         Raises
         ------
         ValueError
-            If this driver was built without a target, since nothing was checked to read one.
+            If this driver was built without a goal, since nothing was checked to read one.
         """
-        if self.bc.X_ref is None:
+        if self.bc.xf is None:
             msg = "This MPC was built without a goal. Pass xf to MPC(...) to make the goal run-time."
             raise ValueError(msg)
-        X_ref = jnp.repeat(jnp.asarray(xf, dtype=self.bc.X_ref.dtype)[None, :], int(self.problem.N), axis=0)
-        self.bc = BoundaryConditions(x0=self.bc.x0, t0=self.bc.t0, X_ref=X_ref, U_ref=self.bc.U_ref)
+        xf_arr = jnp.asarray(xf, dtype=self.bc.xf.dtype)
+        X_ref = jnp.repeat(xf_arr[None, :], int(self.problem.N), axis=0) if self._goal_aims_cost else self.bc.X_ref
+        self.bc = BoundaryConditions(x0=self.bc.x0, t0=self.bc.t0, X_ref=X_ref, U_ref=self.bc.U_ref, xf=xf_arr)
 
     def set_reference(self, window: Trajectory) -> None:
-        """Replace the reference window wholesale with `window`, a Trajectory of N knot points."""
+        """Replace the tracked window wholesale with `window`, a Trajectory of N knot points.
+
+        The terminal goal is untouched: the window says what to follow, xf says where to end.
+        """
         self.bc = BoundaryConditions(
             x0=self.bc.x0,
             t0=self.bc.t0,
             X_ref=jnp.asarray(window.X, dtype=jnp.float64),
             U_ref=jnp.asarray(window.U, dtype=jnp.float64),
+            xf=self.bc.xf,
         )
 
     def push_reference(
@@ -267,6 +288,7 @@ class MPC:
             t0=self.bc.t0 + step,
             X_ref=X_ref,
             U_ref=U_ref,
+            xf=self.bc.xf,
         )
 
     def solve(self) -> SolverResult:

@@ -92,7 +92,7 @@ def test_problem_structure_driver_split() -> None:
 
     # Boundary conditions are all traced leaves, with no static field to retrace on
     leaves, _ = jax.tree.flatten(mpc.bc)
-    assert len(leaves) == 4
+    assert len(leaves) == 5
     assert mpc.states.shape == (N, 2)
     assert mpc.controls.shape == (N - 1, 1)
 
@@ -495,7 +495,7 @@ def test_runtime_goal_retargets_a_goal_regulating_objective() -> None:
 
 
 def test_runtime_reference_window_tracks_while_the_goal_constrains() -> None:
-    """Assert a run-time reference window aims the cost while xf still drives the goal constraint."""
+    """Assert a run-time reference window aims the cost and, alone, leaves the goal constraint be."""
     prob, ref = _tracking_problem()
     mpc = MPC(prob, Ipopt(), x0=jnp.zeros(3), reference=ref, initial_trajectory=ref)
 
@@ -504,14 +504,52 @@ def test_runtime_reference_window_tracks_while_the_goal_constrains() -> None:
     np.testing.assert_allclose(prob.obj.cost(ref), 0.0, atol=1e-12)
     np.testing.assert_allclose(mpc.bc.retarget(prob.obj).cost(ref), 0.0, atol=1e-12)
 
-    # The goal constraint follows the run-time goal, which a pushed point moves.
-    xf_new = jnp.array([1.0, 0.25, 0.0])
-    mpc.push_reference(xf_new)
+    # A window alone names no destination, so the goal constraint keeps the target it was built
+    # with even after a pushed waypoint has moved the window's far end.
+    assert mpc.xf is None
+    mpc.push_reference(jnp.array([1.0, 0.25, 0.0]))
     mpc.shift()
-    assert mpc.xf is not None
-    np.testing.assert_allclose(mpc.xf, xf_new, atol=1e-12)
+    assert mpc.xf is None
     con, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
-    np.testing.assert_allclose(con[-3:], mpc.states[-1] - xf_new, atol=1e-12)
+    np.testing.assert_allclose(con[-3:], mpc.states[-1] - jnp.array([2.0, 0.0, 0.0]), atol=1e-12)
+
+
+def test_moving_window_leaves_the_terminal_goal_where_it_was_set() -> None:
+    """Assert the terminal constraint binds the explicit goal, not the moving window's far end."""
+    prob, ref = _tracking_problem()
+    xf_goal = jnp.array([2.0, 0.5, 0.1])
+    mpc = MPC(prob, Ipopt(), x0=jnp.zeros(3), xf=xf_goal, reference=ref, initial_trajectory=ref)
+
+    # The cost still tracks the window it was given, untouched by the separate goal.
+    X_ref, U_ref = _window(mpc)
+    np.testing.assert_allclose(X_ref, ref.X)
+    np.testing.assert_allclose(U_ref, ref.U)
+    np.testing.assert_allclose(mpc.bc.retarget(prob.obj).cost(ref), 0.0, atol=1e-12)
+
+    # Pushing a waypoint moves the window's far end; the destination does not follow it.
+    waypoint = jnp.array([1.0, 0.25, 0.0])
+    mpc.push_reference(waypoint)
+    mpc.shift()
+    X_ref, _ = _window(mpc)
+    np.testing.assert_allclose(X_ref[-1], waypoint, atol=1e-12)
+    assert mpc.xf is not None
+    np.testing.assert_allclose(mpc.xf, xf_goal, atol=1e-12)
+
+    # The terminal constraint reads the goal, so its defect is against xf and not the waypoint.
+    con, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
+    np.testing.assert_allclose(con[-3:], mpc.states[-1] - xf_goal, atol=1e-12)
+
+    # set_reference replaces the window wholesale and still leaves the destination alone.
+    mpc.set_reference(Trajectory(X=ref.X + 1.0, U=ref.U, t=ref.t, dt=ref.dt))
+    assert mpc.xf is not None
+    np.testing.assert_allclose(mpc.xf, xf_goal, atol=1e-12)
+
+    # set_goal moves the destination without disturbing the tracked window.
+    xf_next = jnp.array([3.0, -0.5, 0.2])
+    mpc.set_goal(xf_next)
+    X_ref, _ = _window(mpc)
+    np.testing.assert_allclose(X_ref, ref.X + 1.0)
+    np.testing.assert_allclose(mpc.xf, xf_next, atol=1e-12)
 
 
 def test_runtime_goal_rejected_when_nothing_reads_it() -> None:
