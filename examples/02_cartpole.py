@@ -122,22 +122,16 @@ def _(MPCState, N, Problem, RK4, cl, dt, model, obj, x0, xf):
 
 
 @app.cell
-def _(ALTRO, prob, state, time):
+def _(ALTRO, prob, state):
     altro_solver = ALTRO()
-
-    t_start_altro = time.perf_counter()
     altro_res = altro_solver.solve(prob, state)
-    time.perf_counter() - t_start_altro
     return (altro_res,)
 
 
 @app.cell
-def _(Ipopt, prob, state, time):
+def _(Ipopt, prob, state):
     ipopt_solver = Ipopt(options={"print_level": 0, "tol": 1e-6, "max_iter": 300})
-
-    t_start_ipopt = time.perf_counter()
     ipopt_res = ipopt_solver.solve(prob, state)
-    time.perf_counter() - t_start_ipopt
     return (ipopt_res,)
 
 

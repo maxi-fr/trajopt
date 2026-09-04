@@ -757,6 +757,7 @@ import pytest
 
 from trajopt.cones import SecondOrderCone
 
+
 @pytest.mark.julia
 def test_soc_projection(jl_to) -> None:
     TO = jl_to.TO

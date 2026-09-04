@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class BoundaryConditions(eqx.Module):
-    """Traced boundary data of one solve: where the trajectory starts, when, and what it aims at.
+    """Traced boundary data of one solve: where the Trajectory starts, when, and what it aims at.
 
     Every field is an array leaf and none is `eqx.field(static=True)`, so an instance can be
     handed to a jitted solver core as an ordinary traced argument: moving the target between MPC
@@ -38,8 +38,8 @@ class BoundaryConditions(eqx.Module):
     t0 : jax.Array
         Initial timestamp of shape ().
     X_ref : jax.Array | None
-        Reference states of shape (N, n) the quadratic objective is retargeted onto, or None to
-        leave the objective at the reference it was built with.
+        Reference states of shape (N, n) the quadratic Objective is retargeted onto, or None to
+        leave the Objective at the reference it was built with.
     U_ref : jax.Array | None
         Reference controls of shape (N - 1, m), paired with X_ref and None exactly when it is.
     """
@@ -62,7 +62,7 @@ class BoundaryConditions(eqx.Module):
 
 
 def retarget_to_goal(obj: Objective, xf: jax.Array | None) -> Objective:
-    """Objective regulated to the run-time goal xf of shape (n,), held constant over the horizon.
+    """Objective regulated to the run-time goal xf of shape (n,), held constant over the Horizon.
 
     A goal point is a constant reference window, so regulation and tracking go through the one
     `with_reference` mechanism. Returns `obj` untouched when there is no goal, or when the cost is
@@ -77,10 +77,10 @@ def retarget_to_goal(obj: Objective, xf: jax.Array | None) -> Objective:
 
 
 def retarget_problem(problem: "Problem", bc: BoundaryConditions | None) -> "Problem":
-    """Problem whose objective is aimed at `bc`'s reference window, unchanged when there is none.
+    """Problem whose Objective is aimed at `bc`'s reference window, unchanged when there is none.
 
     Called at the top of every traced solver core: `bc` arrives as a traced argument, so the
-    rebuilt objective holds tracers and the core compiles once for every target.
+    rebuilt Objective holds tracers and the core compiles once for every target.
     """
     if bc is None:
         return problem
@@ -374,7 +374,7 @@ class MPCState(eqx.Module):
         return dataclasses.replace(self, bc=dataclasses.replace(self.bc, X_ref=X_ref))
 
     def with_reference(self, reference: Trajectory) -> "MPCState":
-        """Return a new MPCState whose reference window is `reference`, a Trajectory of N knot points."""
+        """Return a new MPCState whose reference window is `reference`, a Trajectory of N Knot Points."""
         return dataclasses.replace(
             self,
             bc=dataclasses.replace(
@@ -385,7 +385,7 @@ class MPCState(eqx.Module):
         )
 
     def shift(self, dt: float | jax.Array | None = None) -> "MPCState":
-        """Shift the primal trajectory and timestamps forward by dt for MPC warm-starting, defaulting to self.dt[0]."""
+        """Shift the primal Trajectory and timestamps forward by dt for MPC warm-starting, defaulting to self.dt[0]."""
         X, U = _z_to_trajectory(self.Z, self.N, self.n, self.m)
         new_X = jnp.concatenate([X[1:], X[-1:]], axis=0)
         new_U = jnp.concatenate([U[1:], U[-1:]], axis=0)

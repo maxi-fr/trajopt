@@ -71,7 +71,7 @@ def test_al_transition_soft_stalls_continue_outer_loop() -> None:
             problem=prob,
             options=options,
             new_traj=traj,
-            inner_iterations=jnp.int32(10),
+            inner_iterations=jnp.int32(100),
             inner_status=jnp.int32(stalled_status),
         )
 

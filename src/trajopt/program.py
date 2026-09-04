@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 class Program:
     """One solver's compiled, allocated form of a `Problem`: its jitted cores and its live handles.
 
-    A Problem says what the problem *is* -- model, objective shape, constraints, horizon -- and is
+    A Problem says what the problem *is* -- model, Objective shape, Constraints, Horizon -- and is
     immutable and structural. A Program is what a particular solver had to build in order to run
-    that Problem: the `jax.jit` closures specialized to it for the native stagewise backends, and
-    (once the QP slice lands) the live C handles an eager backend keeps so it can update a
+    that Problem: the `jax.jit` closures specialized to it for the Native Solvers, and
+    (once the QP slice lands) the live C handles an eager Backend keeps so it can update a
     factorization instead of setting one up again. It is mutable, eager-side, per-solver, and
     deliberately not a pytree: `vmap` over a Program is given up on purpose.
 
@@ -31,7 +31,7 @@ class Program:
         The structural problem this program is specialized to. Held by reference; the cores close
         over it, so it must not be swapped.
     solver : Solver
-        The backend this program belongs to, and the source of its static configuration.
+        The Backend this program belongs to, and the source of its static configuration.
     """
 
     __slots__ = ("_cores", "handles", "problem", "solver")
@@ -81,7 +81,7 @@ class Program:
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
     def solve(self, state: "MPCState") -> "SolverResult":
-        """Solve from `state` with this program's solver, returning the backend's raw result."""
+        """Solve from `state` with this program's solver, returning the Backend's raw result."""
         return self.solver.solve(self.problem, state)
 
 
@@ -89,7 +89,7 @@ def program_for(solver: "Solver", problem: "Problem") -> Program:
     """Return `solver`'s Program for `problem`, building one on first use and reusing it thereafter.
 
     The Program lives on the solver instance because a Program is per-solver: one solver object
-    driven over a receding horizon builds its program once and keeps it, which is the reuse the
+    driven over a receding Horizon builds its program once and keeps it, which is the reuse the
     whole refactor exists for. `problem` is compared by identity and held by the Program, so a
     solver pointed at a different Problem object gets a different Program.
     """

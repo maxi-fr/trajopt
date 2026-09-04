@@ -193,7 +193,7 @@ class Objective(eqx.Module):
         """Objective whose linear and constant terms track a reference window, keeping Q, R, H and Q_f.
 
         Rewrites q, r and c the way `tracking` / `terminal_tracking` build them, so a quadratic
-        objective built as pure shape and one built at a fixed target agree exactly. Safe under
+        Objective built as pure shape and one built at a fixed target agree exactly. Safe under
         trace: the window flows into array leaves only, so a target that moves between MPC steps
         changes traced values rather than the pytree, and forces no recompile.
 
@@ -246,8 +246,8 @@ class Objective(eqx.Module):
         return self.stage_cost.unstacked(k)
 
 
-def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective:  # noqa: N802
-    """Construct an LQR objective carrying shape only, with stacked-constant weights over horizon N.
+def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective:  # noqa: N802 -- factory function named to match class-like constructor
+    """Construct an LQR Objective carrying shape only, with stacked-constant weights over Horizon N.
 
     Formula, once a reference window (X_ref, U_ref) has been applied by `Objective.with_reference`:
     (x_N - x_ref_N)^T Qf (x_N - x_ref_N)
@@ -269,7 +269,7 @@ def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective
     Qf : jax.Array
         Terminal state weights of shape (n,) if diagonal or (n, n) if dense.
     N : int
-        Horizon length in knot points.
+        Horizon length in Knot Points.
     """
     cost_cls, (Q_arr, R_arr, Qf_arr) = promote_weights(Q, R, Qf)
     m = int(R_arr.shape[-1])

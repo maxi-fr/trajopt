@@ -214,10 +214,11 @@ def test_evaluate_al_convergence_solve_succeeded_when_not_last_outer_iteration()
     assert bool(done)
 
 
-def test_evaluate_al_convergence_max_iterations_beats_solve_succeeded() -> None:
-    """Last-match-wins also lets MAX_ITERATIONS overwrite an earlier SOLVE_SUCCEEDED match."""
+def test_evaluate_al_convergence_inner_max_iterations_does_not_halt_outer_loop() -> None:
+    """Inner MAX_ITERATIONS is a soft stall: it does not halt outer AL loop when unconverged, nor overwrite SOLVE_SUCCEEDED."""
     options = SolverOptions(constraint_tolerance=1e-6, iterations=3, iterations_outer=30)
 
+    # When violation is converged, inner iterations reaching limit does not overwrite SOLVE_SUCCEEDED:
     status, done = _evaluate_al_convergence(
         c_max=jnp.asarray(1e-8),
         mu_max=jnp.asarray(10.0),
@@ -226,8 +227,19 @@ def test_evaluate_al_convergence_max_iterations_beats_solve_succeeded() -> None:
         options=options,
     )
 
-    assert int(status) == int(TerminationStatus.MAX_ITERATIONS)
+    assert int(status) == int(TerminationStatus.SOLVE_SUCCEEDED)
     assert bool(done)
+
+    # When violation is unconverged, inner iterations reaching limit does not halt the outer loop:
+    status_unconv, done_unconv = _evaluate_al_convergence(
+        c_max=jnp.asarray(1.0),
+        mu_max=jnp.asarray(10.0),
+        inner_iterations=jnp.asarray(3),
+        iter_num=jnp.asarray(2),
+        options=options,
+    )
+    assert int(status_unconv) == int(TerminationStatus.UNSOLVED)
+    assert not bool(done_unconv)
 
 
 def test_evaluate_al_convergence_kickout_max_penalty_stops_without_setting_status() -> None:
@@ -280,45 +292,40 @@ def test_evaluate_al_convergence_kickout_disabled_does_not_stop() -> None:
     assert int(status) == int(TerminationStatus.UNSOLVED)
 
 
-def test_al_solve_breaks_on_ordinal_inner_status_without_updating_duals() -> None:
-    """Soft inner stalls (MAX_ITERATIONS) record iteration stats and exit when options.iterations is reached.
-
-    With options.iterations=1, the nonlinear cartpole swing-up inner solve exits MAX_ITERATIONS.
-    Under Phase 2 soft inner exits, MAX_ITERATIONS records the outer iteration stats (iterations=1)
-    and exits via _evaluate_al_convergence without running a dual/penalty update.
-    """
+def test_al_solve_soft_inner_stall_continues_outer_loop_until_iterations_outer() -> None:
+    """Soft inner stalls (MAX_ITERATIONS) update duals/penalties and continue until iterations_outer."""
     prob, x0, dt = _cartpole_problem()
     state = MPCState.initial(prob, x0=x0, dt=dt, xf=XF, initial_trajectory=None)
-    options = SolverOptions(iterations=1, iterations_outer=30)
+    options = SolverOptions(iterations=1, iterations_outer=5)
 
     result = AL(options=options).solve(prob, state)
 
     assert not result.success
-    assert result.status == int(TerminationStatus.MAX_ITERATIONS)
-    assert result.iterations == 1
+    assert result.status == int(TerminationStatus.MAX_ITERATIONS_OUTER)
+    assert result.iterations == 5
     assert result.al is not None
-    assert bool(jnp.all(result.al.lam == 0.0))
+    assert bool(jnp.any(result.al.mu > 1.0))
 
 
-def test_evaluate_al_convergence_max_iters_uses_this_iterations_inner_count() -> None:
-    """max_iters_hit reads this outer iteration's own (reset) inner iteration count, not a cumulative total."""
-    options = SolverOptions(constraint_tolerance=1e-6, iterations=10, iterations_outer=30)
+def test_evaluate_al_convergence_max_outer_halts_at_outer_limit() -> None:
+    """Outer loop halts with MAX_ITERATIONS_OUTER when iter_num reaches iterations_outer."""
+    options = SolverOptions(constraint_tolerance=1e-6, iterations=10, iterations_outer=5)
 
     status, done = _evaluate_al_convergence(
         c_max=jnp.asarray(1.0),
         mu_max=jnp.asarray(1.0),
         inner_iterations=jnp.asarray(10),
-        iter_num=jnp.asarray(2),
+        iter_num=jnp.asarray(5),
         options=options,
     )
-    assert int(status) == int(TerminationStatus.MAX_ITERATIONS)
+    assert int(status) == int(TerminationStatus.MAX_ITERATIONS_OUTER)
     assert bool(done)
 
     status2, done2 = _evaluate_al_convergence(
         c_max=jnp.asarray(1.0),
         mu_max=jnp.asarray(1.0),
-        inner_iterations=jnp.asarray(9),
-        iter_num=jnp.asarray(2),
+        inner_iterations=jnp.asarray(10),
+        iter_num=jnp.asarray(4),
         options=options,
     )
     assert int(status2) == int(TerminationStatus.UNSOLVED)

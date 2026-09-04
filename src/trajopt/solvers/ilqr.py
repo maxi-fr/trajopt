@@ -776,9 +776,9 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
         feedback term is not, so this is a deliberate practical safeguard beyond the box-DDP
         paper's strict local guarantee). Defaults to None, meaning no clip.
     bc : BoundaryConditions | None, optional
-        Traced boundary conditions; their reference window retargets `problem`'s objective here,
+        Traced boundary conditions; their reference window retargets `problem`'s Objective here,
         inside the trace, so a moving target costs no recompile. Defaults to None, meaning the
-        objective keeps the target it was built with.
+        Objective keeps the target it was built with.
 
     Returns
     -------
@@ -813,9 +813,9 @@ def ilqr_solve(  # noqa: PLR0913 -- ticket 30's solve_kd_builder hook is a 6th, 
 
 
 def build_warm_start(problem: Problem, state: MPCState) -> tuple[Trajectory, BoundaryConditions]:
-    """Build the eager warm-start trajectory and the traced boundary conditions from `state`.
+    """Build the eager warm-start Trajectory and the traced boundary conditions from `state`.
 
-    Shared by every native solver's `.solve()` (ticket 29 wraps ticket 27's `.solve()` boundary):
+    Shared by every Native Solver's `.solve()` (ticket 29 wraps ticket 27's `.solve()` boundary):
     each parses `state.Z` into `(X, U)` and builds the absolute time grid from `state.t0`/
     `state.dt`. The run-time target is no longer folded into a derived `Problem` here; it stays
     in `state.bc` and is passed to the jitted core as a traced argument, so a goal that moves
@@ -824,14 +824,14 @@ def build_warm_start(problem: Problem, state: MPCState) -> tuple[Trajectory, Bou
     Parameters
     ----------
     problem : Problem
-        Problem to warm-start, supplying the horizon and dimensions.
+        Problem to warm-start, supplying the Horizon and dimensions.
     state : MPCState
-        Per-step state supplying the flat primal `Z`, `dt`, and the boundary conditions.
+        Per-step state supplying the Primal Vector `Z`, `dt`, and the boundary conditions.
 
     Returns
     -------
     tuple[Trajectory, BoundaryConditions]
-        The warm-start trajectory built from `state.Z`, and `state.bc`.
+        The warm-start Trajectory built from `state.Z`, and `state.bc`.
     """
     N = int(problem.N)
     n = int(problem.model.n)

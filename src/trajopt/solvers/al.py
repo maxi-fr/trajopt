@@ -651,14 +651,28 @@ def dual_update(
     return eqx.tree_at(lambda a: a.lam, al, new_lam)
 
 
-def penalty_update(al: ALConstraints, options: SolverOptions) -> ALConstraints:
+def penalty_update(
+    al: ALConstraints,
+    options: SolverOptions,
+    C: jax.Array | None = None,
+) -> ALConstraints:
     """Update mu, Altro's `penaltyupdate!`: `mu <- clamp(mu * penalty_scaling, 0, penalty_max)`.
 
-    Applied unconditionally to every real row (no active-set gating); masked rows are left frozen,
-    keeping them inert rather than accumulating scaling that is never read.
+    When constraint residuals `C` are passed, caps each row's penalty so that the quadratic
+    penalty term `0.5 * mu * c^2` does not exceed `options.max_cost_value`, preventing inner
+    iLQR line search from aborting on MAXIMUM_COST. Masked rows remain frozen.
     """
-    scaled = jnp.clip(al.mu * options.penalty_scaling, 0.0, options.penalty_max)
-    new_mu = jnp.where(al.row_mask, scaled, al.mu)
+    scaled = al.mu * options.penalty_scaling
+    if C is not None:
+        c_sq = jnp.square(C)
+        mu_cap = jnp.where(
+            c_sq > 0.0,
+            (2.0 * options.max_cost_value) / jnp.maximum(c_sq, 1e-12),
+            options.penalty_max,
+        )
+        scaled = jnp.minimum(scaled, mu_cap)
+    clamped = jnp.clip(scaled, 0.0, options.penalty_max)
+    new_mu = jnp.where(al.row_mask, clamped, al.mu)
     return eqx.tree_at(lambda a: a.mu, al, new_mu)
 
 
@@ -810,7 +824,7 @@ class ALCarry(NamedTuple):
 def _evaluate_al_convergence(
     c_max: jax.Array,
     mu_max: jax.Array,
-    inner_iterations: jax.Array,
+    inner_iterations: jax.Array,  # noqa: ARG001 -- inner iterations is a soft stall, bounded by iterations_outer
     iter_num: jax.Array,
     options: SolverOptions,
 ) -> tuple[jax.Array, jax.Array]:
@@ -858,13 +872,10 @@ def _evaluate_al_convergence(
     kickout = jnp.asarray(options.kickout_max_penalty) & (mu_max >= options.penalty_max)
     status = jnp.where(penalty_overflow, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER), status)
 
-    max_iters_hit = inner_iterations >= options.iterations
-    status = jnp.where(max_iters_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS), status)
-
     max_outer_hit = iter_num >= options.iterations_outer
     status = jnp.where(max_outer_hit, jnp.int32(TerminationStatus.MAX_ITERATIONS_OUTER), status)
 
-    done = converged_violation | kickout | penalty_overflow | max_iters_hit | max_outer_hit
+    done = converged_violation | kickout | penalty_overflow | max_outer_hit
     return status, done
 
 
@@ -918,7 +929,7 @@ def _al_transition(  # noqa: PLR0913 -- AL transition requires carry, problem, o
     conv_status, conv_done = _evaluate_al_convergence(c_max, mu_max, inner_iterations, iter_num, options)
 
     skip_dual_update = inner_fatal | conv_done
-    al_updated = penalty_update(dual_update(carry.al, C, options, problem.constraints), options)
+    al_updated = penalty_update(dual_update(carry.al, C, options, problem.constraints), options, C=C)
     new_al = jax.tree.map(lambda new, old: jnp.where(skip_dual_update, old, new), al_updated, carry.al)
 
     final_status = jnp.where(inner_fatal, inner_status, conv_status)
