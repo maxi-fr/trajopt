@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from trajopt.cones import NegativeOrthant, SecondOrderCone
 from trajopt.constraints.bounds import ControlBound, StateBound
@@ -114,3 +115,76 @@ def test_osqp_rejects_second_order_cone() -> None:
 
     with pytest.raises(TypeError, match="OSQP does not support SecondOrderCone constraints"):
         MPC(problem, OSQP(), x0=x0).solve()
+
+
+def _regime_problem():
+    """Bounded cartpole problem plus its x0, used to drive the OSQP handle's regime choice."""
+    model = DiscretizedDynamics(Cartpole(), Euler())
+    n, m, N = 4, 1, 8
+
+    cost = QuadraticCost(Q=jnp.eye(n), R=jnp.eye(m), r=jnp.zeros(m), c=0.0)
+    obj = Objective(stage_cost=cost, terminal_cost=cost, N=N)
+    clist = ConstraintList(n, m, N)
+    clist.add_constraint(ControlBound(n=n, m=m, u_min=jnp.array([-5.0]), u_max=jnp.array([5.0])), range(N - 1))
+
+    problem = Problem(model=model, obj=obj, constraints=clist, N=N, dt=0.05)
+    return problem, jnp.array([0.1, 3.0, 0.0, 0.0])
+
+
+def test_osqp_reuses_the_factorization_when_only_the_vectors_move() -> None:
+    """A second solve of the same QP at a new x0 takes the vector regime, not a rebuild."""
+    problem, x0 = _regime_problem()
+    mpc = MPC(problem, OSQP(), x0=x0)
+
+    mpc.solve()
+    assert mpc.program.handles["osqp"].regime == "setup"
+
+    solver_before = mpc.program.handles["osqp"].solver
+    mpc.measure(x0 + 0.05, 0.05)
+    mpc.solve()
+
+    assert mpc.program.handles["osqp"].regime == "vector"
+    assert mpc.program.handles["osqp"].solver is solver_before
+
+
+def test_osqp_refactorizes_when_the_linearization_moves() -> None:
+    """Moving the operating point changes P and A numerically but not structurally: the matrix regime."""
+    problem, x0 = _regime_problem()
+    mpc = MPC(problem, OSQP(), x0=x0)
+    mpc.solve()
+
+    solver_before = mpc.program.handles["osqp"].solver
+    moved = OSQP(operating_point=mpc.Z + 0.3)
+    moved.solve(mpc.program, mpc.bc, mpc.warm_start)
+
+    assert mpc.program.handles["osqp"].regime == "matrix"
+    assert mpc.program.handles["osqp"].solver is solver_before
+
+
+def test_osqp_rebuilds_when_the_options_change() -> None:
+    """Options are baked into the factorization's settings, so changing them forces a full setup."""
+    problem, x0 = _regime_problem()
+    mpc = MPC(problem, OSQP(), x0=x0)
+    mpc.solve()
+
+    solver_before = mpc.program.handles["osqp"].solver
+    OSQP(options={"eps_abs": 1e-7}).solve(mpc.program, mpc.bc, mpc.warm_start)
+
+    assert mpc.program.handles["osqp"].regime == "setup"
+    assert mpc.program.handles["osqp"].solver is not solver_before
+
+
+def test_osqp_rebuilds_when_the_sparsity_pattern_changes() -> None:
+    """A structural change to A is caught by the stored indptr/indices, whatever its numeric values."""
+    problem, x0 = _regime_problem()
+    mpc = MPC(problem, OSQP(), x0=x0)
+    mpc.solve()
+    handle = mpc.program.handles["osqp"]
+
+    P = sp.csc_matrix((handle.P_data, handle.P_indices, handle.P_indptr))
+    A = sp.csc_matrix((handle.A_data, handle.A_indices, handle.A_indptr))
+    assert handle.regime_for(P, A, handle.options) == "vector"
+
+    A_grown = A.copy()
+    A_grown[0, A.shape[1] - 1] = 1.0
+    assert handle.regime_for(P, A_grown.tocsc(), handle.options) == "setup"

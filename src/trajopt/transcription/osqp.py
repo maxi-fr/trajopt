@@ -84,22 +84,158 @@ def _reject_unsupported_cones(blocks: Sequence[ConstraintBlock]) -> None:
             raise TypeError(msg)
 
 
+class BoxQP(NamedTuple):
+    """One step's QP in OSQP's box form, with both matrices already canonicalized to csc.
+
+    Parameters
+    ----------
+    P : sp.csc_matrix
+        Upper triangle of the objective Hessian, of shape ``(nz, nz)``.
+    q : np.ndarray
+        Linear objective term of shape ``(nz,)``.
+    A : sp.csc_matrix
+        Constraint rows stacked over the identity bound rows, of shape ``(n_rows, nz)``.
+    lower, upper : np.ndarray
+        Box on ``A z`` of shape ``(n_rows,)``.
+    """
+
+    P: sp.csc_matrix
+    q: np.ndarray
+    A: sp.csc_matrix
+    lower: np.ndarray
+    upper: np.ndarray
+
+
 def _warm_start(
     solver: Any,  # noqa: ANN401 -- osqp.OSQP is an untyped C-extension
     problem: Problem,
     ws: WarmStart,
+    qp: BoxQP,
     *,
     z0: jax.Array | None,
 ) -> None:
-    """Seed OSQP with the previous primal and, when the WarmStart carries them, dual iterates."""
-    if z0 is not None:
-        solver.warm_start(x=z0)
+    """Seed OSQP with the previous primal and, when the WarmStart carries them, dual iterates.
+
+    Both iterates are always written, falling back to zero, because a handle reused across
+    receding-horizon steps still holds the previous solve's iterates where a fresh `setup` would
+    have started from zero. Writing both puts a reused handle on the same iterates a rebuilt one
+    would start from. OSQP's adapted penalty `rho` still carries over, so a reused handle reaches
+    a different point inside the requested tolerance rather than the identical one.
+    """
+    solver.warm_start(x=np.zeros(qp.A.shape[1]) if z0 is None else np.asarray(z0, dtype=np.float64))
 
     lam0, mu0 = warm_start_duals(problem, ws)
-    if lam0 is None or mu0 is None:
-        return
+    y0 = np.zeros(qp.A.shape[0]) if lam0 is None or mu0 is None else np.concatenate([lam0, mu0])
+    solver.warm_start(y=y0)
 
-    solver.warm_start(y=np.concatenate([lam0, mu0]))
+
+@dataclass
+class OSQPHandle:
+    """A live OSQP solver plus the data its factorization was built from, cached on a `Program`.
+
+    Parameters
+    ----------
+    solver : Any
+        The C solver handle, already set up.
+    options : dict[str, Any]
+        Options the handle was set up with; a change to them invalidates it.
+    shape : tuple[int, int]
+        ``(n_rows, nz)`` of the constraint matrix the handle was set up with.
+    P_indptr, P_indices : np.ndarray
+        Canonical csc sparsity of the objective Hessian's upper triangle.
+    A_indptr, A_indices : np.ndarray
+        Canonical csc sparsity of the stacked constraint matrix.
+    P_data, A_data : np.ndarray
+        Numeric values last pushed into the handle, in that canonical order.
+    regime : str
+        Which of "setup", "matrix" or "vector" the last solve took. Diagnostic only.
+    """
+
+    solver: Any
+    options: dict[str, Any]
+    shape: tuple[int, int]
+    P_indptr: np.ndarray
+    P_indices: np.ndarray
+    A_indptr: np.ndarray
+    A_indices: np.ndarray
+    P_data: np.ndarray
+    A_data: np.ndarray
+    regime: str
+
+    def _same_pattern(self, P: sp.csc_matrix, A: sp.csc_matrix) -> bool:
+        """Whether `P` and `A` have exactly this handle's dimensions and canonical sparsity."""
+        return (
+            A.shape == self.shape
+            and np.array_equal(P.indptr, self.P_indptr)
+            and np.array_equal(P.indices, self.P_indices)
+            and np.array_equal(A.indptr, self.A_indptr)
+            and np.array_equal(A.indices, self.A_indices)
+        )
+
+    def regime_for(self, P: sp.csc_matrix, A: sp.csc_matrix, options: dict[str, Any]) -> str:
+        """Cheapest regime this handle can serve `P`, `A` and `options` in.
+
+        "vector" reuses the factorization outright, "matrix" refactorizes in place, and "setup"
+        means the handle cannot be reused at all. The choice is read off the matrices themselves,
+        never off what the caller claims to have changed, so a caller that quietly perturbs a
+        Hessian cannot get a stale factorization.
+        """
+        if options != self.options or not self._same_pattern(P, A):
+            return "setup"
+        if np.array_equal(P.data, self.P_data) and np.array_equal(A.data, self.A_data):
+            return "vector"
+        return "matrix"
+
+
+def _canonical_csc(matrix: sp.csc_matrix | sp.csr_matrix | sp.coo_matrix) -> sp.csc_matrix:
+    """Return `matrix` as csc with summed duplicates and sorted indices, so two forms compare structurally.
+
+    Explicit zeros are deliberately kept: the QP's matrices are assembled from a fixed structural
+    sparsity pattern, so keeping the stored zeros is what makes the pattern value-independent and
+    the handle reusable across steps.
+    """
+    out = matrix.tocsc(copy=True)
+    out.sum_duplicates()
+    out.sort_indices()
+    return out
+
+
+def _apply(
+    program: Program,
+    qp: BoxQP,
+    options: dict[str, Any],
+    osqp_module: Any,  # noqa: ANN401 -- osqp is an untyped C-extension
+) -> OSQPHandle:
+    """Push this step's QP into the program's cached OSQP handle, rebuilding only as much as changed."""
+    P, A = qp.P, qp.A
+    handle: OSQPHandle | None = program.handles.get("osqp")
+    regime = "setup" if handle is None else handle.regime_for(P, A, options)
+
+    if handle is None or regime == "setup":
+        solver = osqp_module.OSQP()
+        solver.setup(P=P, q=qp.q, A=A, l=qp.lower, u=qp.upper, **options)
+        handle = OSQPHandle(
+            solver=solver,
+            options=options,
+            shape=A.shape,
+            P_indptr=P.indptr.copy(),
+            P_indices=P.indices.copy(),
+            A_indptr=A.indptr.copy(),
+            A_indices=A.indices.copy(),
+            P_data=P.data.copy(),
+            A_data=A.data.copy(),
+            regime="setup",
+        )
+        program.handles["osqp"] = handle
+        return handle
+
+    if regime == "matrix":
+        handle.solver.update(Px=P.data, Ax=A.data)
+        handle.P_data = P.data.copy()
+        handle.A_data = A.data.copy()
+    handle.solver.update(q=qp.q, l=qp.lower, u=qp.upper)
+    handle.regime = regime
+    return handle
 
 
 @dataclass(frozen=True)
@@ -141,6 +277,9 @@ class OSQP:
         The warning is unconditional rather than gated on the problem being nonlinear: every
         caller handing this Backend a `Problem` gets one convex solve about the Operating
         Point, and whether that answers their problem is theirs to judge.
+
+        The C solver lives on the `Program`, so a receding-horizon loop whose QP keeps its
+        sparsity reuses the factorization instead of setting one up again -- see `_apply`.
         """
         problem = program.problem
         warnings.warn(
@@ -173,18 +312,18 @@ class OSQP:
 
         # Bounds ride as identity rows, so every dual OSQP returns is either a lam or a mu.
         n_con_rows = qp.A.shape[0]
-        A_mat = sp.vstack([qp.A, sp.eye(nz, format="csr", dtype=np.float64)]).tocsc()
-        P_triu, q_vec = qp.P, qp.q
+        A_mat = _canonical_csc(sp.vstack([qp.A, sp.eye(nz, format="csr", dtype=np.float64)]))
+        P_triu, q_vec = _canonical_csc(qp.P), qp.q
         l_vec = np.concatenate([qp.row_lower, qp.z_lower])
         u_vec = np.concatenate([qp.row_upper, qp.z_upper])
 
-        solver = osqp.OSQP()
         solver_opts: dict[str, Any] = {"verbose": False}
         if self.options:
             solver_opts.update(self.options)
 
-        solver.setup(P=P_triu, q=q_vec, A=A_mat, l=l_vec, u=u_vec, **solver_opts)
-        _warm_start(solver, problem, ws, z0=z0)
+        box = BoxQP(P=P_triu, q=q_vec, A=A_mat, lower=l_vec, upper=u_vec)
+        solver = _apply(program, box, solver_opts, osqp).solver
+        _warm_start(solver, problem, ws, box, z0=z0)
 
         res = solver.solve()
 
