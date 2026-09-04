@@ -230,7 +230,9 @@ not an inherent consequence of the "thin eager wrapper over a traced core" desig
 (`docs/altro-port/00-overview.md`): the wrapper is still thin -- it still just converts the boundary
 types -- but it now does call `jax.jit` on the traced core internally (`_jit_altro_solve`,
 `src/trajopt/solvers/altro.py`), caching the compiled closure in a `JitCacheSlot`
-(`src/trajopt/solvers/_jit_cache.py`) keyed on `problem` identity and `options`. A repeat `.solve()`
+(`src/trajopt/solvers/_jit_cache.py`) keyed on `problem` identity and `options`. (`JitCacheSlot`
+has since been replaced by the `Program` seam; see ADR 0005. The measurement below stands — only
+the mechanism holding the compiled closure changed.) A repeat `.solve()`
 call on the same solver instance and problem -- the MPC-loop regime this exists for -- now hits that
 cache instead of recompiling or re-dispatching eagerly, dropping the measured time roughly 4.7-5x
 (from ~9.5 s to ~1.9-2.0 s) versus the pre-fix number, and roughly 1.4x below the old hand-jitted,

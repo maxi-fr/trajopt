@@ -182,8 +182,8 @@ class Program:
     A Problem says what the problem *is* -- model, objective shape, constraints, horizon -- and is
     immutable and structural. A Program is what a particular solver had to build in order to run
     that Problem: the `jax.jit` closures specialized to it for the native stagewise backends, and
-    (once the QP slice lands) the live C handles an eager backend keeps so it can update a
-    factorization instead of setting one up again. It is mutable, eager-side, per-solver, and
+    the live C handles an eager backend keeps so it can update a factorization instead of setting
+    one up again. It is mutable, eager-side, per-solver, and
     deliberately not a pytree: `vmap` over a Program is given up on purpose.
 
     A Program is built once and reused across MPC steps. `BoundaryConditions` is a traced argument

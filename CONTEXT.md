@@ -43,6 +43,22 @@ The residual of a dynamics constraint at one Knot Point: the gap between the nex
 the dynamics predict from the current state and control.
 _Avoid_: dynamics error, gap, shooting residual
 
+**Boundary Conditions**:
+The data a solve is aimed at rather than shaped by: the initial state and time, the reference
+window, and the terminal goal. Every field is an array, so the whole object is traced rather than
+compiled against.
+_Avoid_: initial conditions (it carries the target too), state, boundary values
+
+**Program**:
+One solver's compiled and allocated form of a Problem — its jitted cores and its live external
+solver handles. Mutable and eager-side, where a Problem is immutable and structural.
+_Avoid_: cache, context, session, compiled problem
+
+**Quadratic Subproblem**:
+The nonlinear program's derived form at an Operating Point: the objective taken to second order
+and the constraints linearized, expressed over the same Primal Vector.
+_Avoid_: the QP (in prose), local model, approximation
+
 ### Solving
 
 **Backend**:

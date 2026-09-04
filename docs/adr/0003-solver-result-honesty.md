@@ -77,3 +77,32 @@ disagreement between claimed and recomputed violation is visible rather than hid
 - `compare_solvers` does not declare a winner. Whether speed, feasibility, or cost decides is the
   caller's question, and a solver that is fastest because it ignored a constraint is not the
   answer to it.
+
+## Amendment (Program seam, QP-as-derived-form, factorization reuse)
+
+The decisions above stand. Three later changes sharpened what the warnings claim, and one piece of
+the prose above is now stale.
+
+**`problem.solve(state, solver=...)` no longer exists.** `Problem` became purely structural and
+lost `solve` and `cost`; the one-word solver swap that motivated putting warnings in the solvers is
+now `MPC(problem, solver)`. The argument is unchanged — the swap is still a one-word change, and
+the warning must still reach a user who makes it without going through the benchmark harness.
+
+**The OSQP and Clarabel warning is now precise rather than approximate.** When it was written,
+each Backend built its own QP through private extraction helpers, so "a linearization about the
+Operating Point" described something only that Backend could see. The QP is now the NLP's derived
+form, built from the same five callbacks Ipopt is handed, so the warning names an object that is
+defined once and shared. Two agreement tests pin it: the defect rows carry exactly the stagewise
+`(A_k, B_k)`, and on a linear-quadratic problem Ipopt and OSQP reach the same trajectory and the
+closed-form Riccati optimum.
+
+**The warning understates the case for a receding-horizon loop.** It says the Backend solves *one*
+linearization, which reads as one per solve. With `OSQP.operating_point` fixed, a closed loop
+re-solves *the same* linearization at every step — only the boundary box moves. Measured over a
+40-step loop, the factorization-reuse path took the vector-update regime on every step after the
+first and the matrix regime never, which is the same fact from the other side: `P` and `A` were
+literally constant for the whole run.
+
+That is a stronger honesty claim than the original warning makes, and it is not currently said out
+loud anywhere a user will see it. Whether the warning text should say so — or whether a moving
+operating point should be the default — is left open here rather than decided.
