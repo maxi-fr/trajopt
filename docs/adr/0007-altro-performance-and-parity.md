@@ -125,6 +125,23 @@ The residual consequence, kept deliberately: on a converging solve an active row
 zero, so the gated cap is inert in ordinary operation and earns its keep only on transient excursions
 large enough to overflow. That is the intended scope.
 
+Gating costs nothing in speed; it buys speed. Measured on the three benchmark problems, three
+independent processes per variant, 15 timed warm solves each after a discarded compile, median
+seconds:
+
+| Problem | Gated | Ungated |
+| --- | --- | --- |
+| Cartpole swing-up | 0.163 / 0.159 / 0.158 | 0.191 / 0.193 / 0.213 |
+| Dubins corridor | 0.0389 / 0.0380 / 0.0390 | 0.0450 / 0.0444 / 0.0480 |
+| Quadrotor obstacle | 0.690 / 0.710 / 0.682 | 0.722 / 0.720 / 0.712 |
+
+Outer iterations, `TerminationStatus`, final cost, final violation and `penalty_max` are identical
+between the two variants on all three problems. Under `jit` with static shapes the only thing that
+can move wall time is a data-dependent `lax.while_loop` trip count, and the AL phase has three: the
+regularization retry, the line search, and the iLQR iteration loop. Throttling `mu` on rows that
+contribute nothing to the cost therefore costs inner iterations without changing where the solve
+lands. There is no performance argument for the ungated cap to weigh against the parity loss.
+
 ### Sparse QDLDL KKT factorization for Projected Newton
 
 `_solve_kkt_step` in `src/trajopt/solvers/pn.py` no longer assembles the dense masked KKT matrix.
