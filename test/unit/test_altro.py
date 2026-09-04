@@ -382,10 +382,9 @@ def test_altro_bypasses_pn_when_projected_newton_false(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(altro_module, "pn_solve", fail_pn_solve)
 
-    prob, x0, dt, xf = _cartpole_problem(N=5)
-    state = MPCState.initial(prob, x0=x0, dt=dt, xf=xf, initial_trajectory=None)
+    prob, x0, _dt, xf = _cartpole_problem(N=5)
     options = SolverOptions(iterations=2, iterations_outer=2, projected_newton=False)
-    result = ALTRO(options=options).solve(prob, state)
+    result = MPC(prob, ALTRO(options=options), x0=x0, xf=xf).solve()
 
     assert result.info["ran_pn"] is False
     assert result.info["pn_stats"] is None

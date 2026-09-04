@@ -658,9 +658,32 @@ def penalty_update(
 ) -> ALConstraints:
     """Update mu, Altro's `penaltyupdate!`: `mu <- clamp(mu * penalty_scaling, 0, penalty_max)`.
 
-    When constraint residuals `C` are passed, caps each row's penalty so that the quadratic
-    penalty term `0.5 * mu * c^2` does not exceed `options.max_cost_value`, preventing inner
-    iLQR line search from aborting on MAXIMUM_COST. Masked rows remain frozen.
+    When constraint residuals `C` are passed, caps each row's penalty at
+    `2 * options.max_cost_value / c^2` so the quadratic penalty term `0.5 * mu * c^2` cannot push
+    the augmented cost past `options.max_cost_value` and abort iLQR's line search on
+    `MAXIMUM_COST` (ADR 0007). A row whose residual is exactly zero is left free to scale to
+    `penalty_max`. Masked rows remain frozen.
+
+    The cap applies only where the row's penalty is in the cost at all, under the same
+    `_active_penalty` test `al_cost` uses. A comfortably satisfied inequality has a large negative
+    residual and contributes nothing, so capping against its `c^2` would throttle a penalty that
+    costs nothing -- and would diverge from Altro's ladder on rows where there is no overflow to
+    prevent. Inactive rows therefore keep Altro's unconditional `mu * penalty_scaling`.
+
+    The cap is a `min` against the scaled value, not a one-way ratchet, so a `mu` inherited across
+    a receding-horizon step (`options.reset_penalties=False`, ADR 0006) against a residual that
+    has since grown comes *down* rather than scaling up. It applies at the update only: a `mu`
+    arriving from a warm start is not capped before the step's first inner solve reads it.
+
+    Parameters
+    ----------
+    al : ALConstraints
+        Padded duals and penalties whose `mu` of shape (N, p_max) is updated.
+    options : SolverOptions
+        Supplies `penalty_scaling`, `penalty_max` and `max_cost_value`.
+    C : jax.Array | None, optional
+        Constraint residuals of shape (N, p_max) to cap against. Defaults to None, which is the
+        uncapped Altro update.
     """
     scaled = al.mu * options.penalty_scaling
     if C is not None:
@@ -670,7 +693,8 @@ def penalty_update(
             (2.0 * options.max_cost_value) / jnp.maximum(c_sq, 1e-12),
             options.penalty_max,
         )
-        scaled = jnp.minimum(scaled, mu_cap)
+        contributes = _active_penalty(al, C) > 0.0
+        scaled = jnp.where(contributes, jnp.minimum(scaled, mu_cap), scaled)
     clamped = jnp.clip(scaled, 0.0, options.penalty_max)
     new_mu = jnp.where(al.row_mask, clamped, al.mu)
     return eqx.tree_at(lambda a: a.mu, al, new_mu)
@@ -830,17 +854,30 @@ def _evaluate_al_convergence(
 ) -> tuple[jax.Array, jax.Array]:
     """Decide the outer-loop status and whether to stop, matching `al_solve.jl`'s `evaluate_convergence`.
 
-    Reproduces the four independent `if`s from reference §5.5 as a **last-match-wins** sequence
-    of overwrites (finding A), not an ordered first-match list: a later check silently overwrites
-    an earlier one's `status`, so converging on the same outer iteration that also exhausts
+    Reproduces reference §5.5's independent `if`s as a **last-match-wins** sequence of overwrites
+    (finding A), not an ordered first-match list: a later check silently overwrites an earlier
+    one's `status`, so converging on the same outer iteration that also exhausts
     `iterations_outer` reports `MAX_ITERATIONS_OUTER`, not `SOLVE_SUCCEEDED`.
 
-    One targeted divergence from that port, taken only when `options.reset_penalties` is False:
+    Two divergences from that port, both recorded in ADR 0007:
+
+    - `inner_iterations >= options.iterations` is gone from `done` entirely. Altro counts inner
+      iterations cumulatively across outer iterations; `ilqr_solve`'s counter resets per call, so
+      reading it as an outer halt stopped the loop on iteration 1 before any dual update ran. An
+      exhausted inner solve is now a soft stall and the loop is bounded by `iterations_outer`
+      alone. `inner_iterations` is therefore unread, kept only so the signature still says what
+      the reference's condition was written against.
+    - `penalty_overflow` ends the loop when the *next* penalty scaling would put `0.5 * mu * c^2`
+      past `options.max_cost_value`, which iLQR's line search would otherwise hit as
+      `MAXIMUM_COST` on the following outer iteration.
+
+    One further divergence is taken only when `options.reset_penalties` is False (ADR 0006):
     `converged_violation` additionally requires `iter_num > 1`, so an inherited penalty cannot end
     the outer loop before a single dual update has run. `options` is static and untraced, so this
-    is a Python branch at trace time; under default options the expression is bit-identical to
-    Altro's, which is what keeps the Julia parity test and the recorded MPC golden valid.
-    `kickout`, `max_iters_hit` and `max_outer_hit` are untouched either way.
+    is a Python branch at trace time, and under default options the branch is not taken. That
+    scoping is what it claims and no more: the two divergences above apply under default options
+    too, so this function is *not* bit-identical to Altro's, and the Julia cross-verification
+    covers the update formulas and state transitions rather than a whole-solve history replay.
 
     `kickout_max_penalty` (finding B) is Altro's own broken branch, ported as clearly intended:
     `mu_max >= options.penalty_max` ends the loop ("converged") without writing `status` at all,
