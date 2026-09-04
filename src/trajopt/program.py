@@ -96,10 +96,9 @@ class WarmStart(eqx.Module):
         stage knot block that would have to source from that terminal block or from a knot of a
         different row count -- see `_lam_shift_index`. `lam`'s initial-condition block does not move -- it belongs to the x0 pin,
         which stays at the head of the horizon. `al` is masked back to the new horizon's own
-        `row_mask` after the shift: its `lam` falls back to zero where the source row is not a
-        real row, while its `mu` falls back to the destination knot's own penalty, because a
-        penalty is outer-loop schedule state rather than a multiplier and a real row must never be
-        left at zero penalty.
+        `row_mask` after the shift: a padded destination row is zeroed, and a real row with no real
+        source row holds its own `lam` and `mu` rather than taking the padding's, so a real row is
+        never left at zero penalty.
         """
         X, U = self.unpack(problem)
         Z = _trajectory_to_z(
@@ -160,7 +159,14 @@ def _lam_shift_index(problem: "Problem") -> jax.Array:
 
 
 def _shifted_al(al: "ALConstraints | None") -> "ALConstraints | None":
-    """Advance padded AL duals and penalties one knot, remasked onto the new horizon's real rows."""
+    """Advance padded AL duals and penalties one knot, remasked onto the new horizon's real rows.
+
+    The new horizon has the same shape as the old one, so a row is real exactly when `al.row_mask`
+    says so. A real row whose source row is padding -- the +-inf control bounds `ALConstraints.build`
+    adds at knot N - 1, which `shift` drags onto knot N - 2 -- has nothing to shift in and holds its
+    own `lam` and `mu` instead of being zeroed, the same "hold the last real value" rule the rest of
+    `WarmStart.shift` follows. Padded destination rows keep lambda=0 and their own (zero) penalty.
+    """
     if al is None:
         return None
 
@@ -168,11 +174,14 @@ def _shifted_al(al: "ALConstraints | None") -> "ALConstraints | None":
         """Drop the first knot of a (N, p_max) array and hold its last."""
         return jnp.concatenate([a[1:], a[-1:]], axis=0)
 
-    live = al.row_mask & shift(al.row_mask)
+    take = al.row_mask & shift(al.row_mask)
     return eqx.tree_at(
         lambda a: (a.lam, a.mu),
         al,
-        (jnp.where(live, shift(al.lam), 0.0), jnp.where(live, shift(al.mu), al.mu)),
+        (
+            jnp.where(al.row_mask, jnp.where(take, shift(al.lam), al.lam), 0.0),
+            jnp.where(take, shift(al.mu), al.mu),
+        ),
     )
 
 
