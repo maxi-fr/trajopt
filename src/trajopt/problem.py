@@ -11,6 +11,7 @@ from trajopt.dynamics.integrators import Integrator
 
 if TYPE_CHECKING:
     from trajopt.expansions import Expansion
+    from trajopt.models.transforms import LinearTrajectoryModel
     from trajopt.trajectory import Trajectory
 
 
@@ -141,3 +142,58 @@ class Problem(eqx.Module):
     def dynamics_expansion(self, traj: "Trajectory") -> "Expansion":
         """Stacked first-order dynamics expansion in error coordinates along traj."""
         return self.model.dynamics_expansion(traj)
+
+    def operating_trajectory(
+        self,
+        operating_point: "Trajectory | jax.Array | None" = None,
+        t0: float | jax.Array = 0.0,
+    ) -> "Trajectory":
+        """Operating Point as a Trajectory on this problem's time grid, the origin when None.
+
+        Parameters
+        ----------
+        operating_point : Trajectory | jax.Array | None, optional
+            Expansion point as a Trajectory or a flat Primal Vector of shape (N * n + (N - 1) * m,).
+            A Trajectory is returned with its own time grid; a flat vector is given this problem's.
+        t0 : float | jax.Array, optional
+            Initial timestamp of the grid a flat vector is placed on. Defaults to 0.0.
+        """
+        from trajopt.trajectory import Trajectory as _Trajectory  # noqa: PLC0415 -- avoid an import cycle
+        from trajopt.transcription.layout import _z_to_trajectory, operating_point_z  # noqa: PLC0415 -- same
+
+        if isinstance(operating_point, _Trajectory):
+            return operating_point
+
+        z_op = operating_point_z(self, operating_point)
+        X, U = _z_to_trajectory(z_op, self.N, int(self.model.n), int(self.model.m))
+        t = jnp.asarray(t0, dtype=jnp.float64) + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(self.dt)])
+        return _Trajectory(X=X, U=U, t=t, dt=self.dt)
+
+    def linearize(
+        self,
+        operating_point: "Trajectory | jax.Array | None" = None,
+        t0: float | jax.Array = 0.0,
+    ) -> "LinearTrajectoryModel":
+        """Linearize this problem's dynamics about an Operating Point, in error coordinates.
+
+        The same linearization `Model.linearize` performs, reached from the NLP tier's currency:
+        the Operating Point may be the flat Primal Vector the transcription works in, which is
+        placed on the problem's own time grid before the model is asked for its Jacobians. The
+        stagewise tier's per-knot (A_k, B_k) and the dynamics block of the NLP's constraint
+        Jacobian therefore come from one computation.
+
+        Parameters
+        ----------
+        operating_point : Trajectory | jax.Array | None, optional
+            Expansion point as a Trajectory or a flat Primal Vector of shape (N * n + (N - 1) * m,).
+            Defaults to None, meaning the origin.
+        t0 : float | jax.Array, optional
+            Initial timestamp of the horizon. Defaults to 0.0.
+
+        Returns
+        -------
+        LinearTrajectoryModel
+            Linearized model exposing stacked Jacobians A of shape (N - 1, ne, ne) and
+            B of shape (N - 1, ne, m).
+        """
+        return self.model.linearize(self.operating_trajectory(operating_point, t0))
