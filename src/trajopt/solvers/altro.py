@@ -306,7 +306,9 @@ class ALTRO:
         ------
         ValueError
             `ws.al` carries duals built under the opposite `use_conic_cost` convention and
-            `options.reset_duals` is False -- identical guard to `AL.solve` (finding E).
+            `options.reset_duals` is False -- identical guard to `AL.solve` (finding E); or
+            `ws.al` carries duals with `options.reset_duals` False and `options.reset_penalties`
+            True, which pairs stale multipliers with fresh penalties.
         """
         problem = program.problem
         options = self.options
@@ -341,6 +343,15 @@ class ALTRO:
                     "lambda with opposite signs (finding E), so warm-starting across the switch "
                     "would silently reinterpret it. Set options.reset_duals=True to discard the "
                     "old duals, or keep use_conic_cost consistent with the state that produced them."
+                )
+                raise ValueError(msg)
+            if not options.reset_duals and options.reset_penalties:
+                msg = (
+                    "options.reset_duals=False with options.reset_penalties=True carries stale "
+                    "multipliers forward against freshly reset penalties, leaving a linear "
+                    "multiplier term with no matching quadratic and an objective unbounded below "
+                    "in the directions it favours. Either carry both (reset_penalties=False) or "
+                    "reset both (reset_duals=True)."
                 )
                 raise ValueError(msg)
             lam = fresh_al.lam if options.reset_duals else ws.al.lam

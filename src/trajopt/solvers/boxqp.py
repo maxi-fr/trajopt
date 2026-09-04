@@ -434,7 +434,14 @@ class BoxQP:
     options: SolverOptions = field(default_factory=SolverOptions)
 
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> BoxQPSolveResult:
-        """Run the traced AL outer loop with a box-QP inner backward pass, boundary-converting the result."""
+        """Run the traced AL outer loop with a box-QP inner backward pass, boundary-converting the result.
+
+        Raises
+        ------
+        ValueError
+            `ws.al` carries duals with `options.reset_duals` False and `options.reset_penalties`
+            True, which pairs stale multipliers with fresh penalties.
+        """
         problem = program.problem
         options = self.options
         init_traj = build_warm_start(problem, bc, ws)
@@ -453,6 +460,15 @@ class BoxQP:
 
         fresh_al = ALConstraints.build(constraints_for_al, penalty_initial=options.penalty_initial)
         if ws.al is not None:
+            if not options.reset_duals and options.reset_penalties:
+                msg = (
+                    "options.reset_duals=False with options.reset_penalties=True carries stale "
+                    "multipliers forward against freshly reset penalties, leaving a linear "
+                    "multiplier term with no matching quadratic and an objective unbounded below "
+                    "in the directions it favours. Either carry both (reset_penalties=False) or "
+                    "reset both (reset_duals=True)."
+                )
+                raise ValueError(msg)
             lam = fresh_al.lam if options.reset_duals else ws.al.lam
             mu = fresh_al.mu if options.reset_penalties else ws.al.mu
             init_al = eqx.tree_at(lambda a: (a.lam, a.mu), fresh_al, (lam, mu))

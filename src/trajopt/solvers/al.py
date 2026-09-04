@@ -1081,6 +1081,9 @@ class AL:
             (finding E: the conic and non-conic paths store lambda with opposite signs) and
             `options.reset_duals` is False, so warm-starting them would silently reinterpret the
             sign (ticket 31). Set `options.reset_duals=True` to discard the old duals instead.
+        ValueError
+            `ws.al` carries duals with `options.reset_duals` False and
+            `options.reset_penalties` True, which pairs stale multipliers with fresh penalties.
         """
         problem = program.problem
         options = self.options
@@ -1097,6 +1100,15 @@ class AL:
                     "lambda with opposite signs (finding E), so warm-starting across the switch "
                     "would silently reinterpret it. Set options.reset_duals=True to discard the "
                     "old duals, or keep use_conic_cost consistent with the state that produced them."
+                )
+                raise ValueError(msg)
+            if not options.reset_duals and options.reset_penalties:
+                msg = (
+                    "options.reset_duals=False with options.reset_penalties=True carries stale "
+                    "multipliers forward against freshly reset penalties, leaving a linear "
+                    "multiplier term with no matching quadratic and an objective unbounded below "
+                    "in the directions it favours. Either carry both (reset_penalties=False) or "
+                    "reset both (reset_duals=True)."
                 )
                 raise ValueError(msg)
             lam = fresh_al.lam if options.reset_duals else ws.al.lam
