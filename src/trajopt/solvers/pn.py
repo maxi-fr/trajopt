@@ -5,6 +5,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import qdldl  # ty: ignore[unresolved-import]
+import scipy.sparse as sp
 
 from trajopt.expansions import _stage_cost_expansion, _terminal_cost_expansion
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
@@ -254,27 +256,46 @@ def _residual_only(  # noqa: PLR0913, PLR0917 -- one argument per residual input
     return jnp.concatenate([d_init, d_dyn.reshape(-1), C.reshape(-1)])
 
 
+_DUAL_REG = 1e-8
+
+
+def _host_qdldl_kkt_solve(  # noqa: PLR0913, PLR0917 -- arguments match pure_callback inputs
+    H: jax.Array | np.ndarray,
+    D: jax.Array | np.ndarray,
+    d_pn: jax.Array | np.ndarray,
+    active: jax.Array | np.ndarray,
+    Np: int,
+    rho_primal: float,
+) -> np.ndarray:
+    """Solve the active-set KKT system via QDLDL LDL^T factorization."""
+    act_np = np.asarray(active, dtype=bool)
+    Na = int(np.sum(act_np))
+    if Na == 0:
+        return np.zeros(Np, dtype=H.dtype)
+
+    H_reg = np.asarray(H) + rho_primal * np.eye(Np, dtype=H.dtype)
+    D_act = np.asarray(D)[act_np, :]
+    d_act = np.asarray(d_pn)[act_np]
+
+    top = sp.hstack([sp.csc_matrix(H_reg), sp.csc_matrix(D_act.T)], format="csc")
+    bot = sp.hstack([sp.csc_matrix(D_act), -_DUAL_REG * sp.eye(Na, format="csc")], format="csc")
+    kkt = sp.vstack([top, bot], format="csc")
+    kkt_triu = sp.triu(kkt, format="csc")
+    rhs = np.concatenate([np.zeros(Np, dtype=H.dtype), -d_act])
+
+    F = qdldl.Solver(kkt_triu)
+    sol = F.solve(rhs)
+    return sol[:Np].astype(H.dtype)
+
+
 def _solve_kkt_step(ev: PNEval, layout: PNLayout, options: SolverOptions) -> jax.Array:
-    """Solve the dense masked KKT system for the primal Newton step `p`, Altro's `_qdldl_solve!` assembly.
+    """Solve the active-set KKT system for primal step p via sparse QDLDL factorization."""
+    result_shape = jax.ShapeDtypeStruct((layout.Np,), ev.H.dtype)
 
-    Minimizes `0.5 dz' (H + rho_primal I) dz` subject to the *active* rows of `D dz = -d_pn`
-    (inactive rows masked to an identity block so their multiplier solves to zero) -- a
-    Hessian-weighted projection onto the active constraint manifold, not a full-gradient Newton
-    step: Altro's own RHS zeroes the primal block (`update_b!` clears `b` before filling only the
-    dual block with `-d`), so the cost gradient never enters this system.
-    """
-    Np = layout.Np
-    H_reg = ev.H + options.rho_primal * jnp.eye(Np, dtype=ev.H.dtype)
-    D_masked = ev.D * ev.active[:, None]
-    inactive_diag = jnp.where(ev.active, 0.0, 1.0)
+    def _callback(H: jax.Array, D: jax.Array, d_pn: jax.Array, active: jax.Array) -> np.ndarray:
+        return _host_qdldl_kkt_solve(H, D, d_pn, active, layout.Np, options.rho_primal)
 
-    top = jnp.concatenate([H_reg, D_masked.T], axis=1)
-    bottom = jnp.concatenate([D_masked, jnp.diag(inactive_diag)], axis=1)
-    kkt = jnp.concatenate([top, bottom], axis=0)
-    rhs = jnp.concatenate([jnp.zeros(Np, dtype=ev.H.dtype), jnp.where(ev.active, -ev.d_pn, 0.0)])
-
-    sol = jnp.linalg.solve(kkt, rhs)
-    return sol[:Np]
+    return jax.pure_callback(_callback, result_shape, ev.H, ev.D, ev.d_pn, ev.active, vmap_method="sequential")
 
 
 def multiplier_projection(ev: PNEval, layout: PNLayout) -> jax.Array:
