@@ -67,8 +67,17 @@ class ControlRateModel(DiscreteDynamics):
     model: DiscreteDynamics
 
     def __init__(self, model: DiscreteDynamics) -> None:
-        super().__init__(n=model.n + model.m, m=model.m, ne=model.ne + model.m)
+        super().__init__(n=model.n + model.m, m=model.m, ne=model.ne + model.m, p=model.p)
         self.model = model
+
+    def output(
+        self,
+        x: jax.Array,
+        u: jax.Array | None = None,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output function on original state x[:n]."""
+        return self.model.output(x[: self.model.n], u, t)
 
     def discrete_dynamics(
         self,
@@ -174,6 +183,10 @@ class LinearTrajectoryModel(eqx.Module):
         Stacked state Jacobians of shape (N - 1, ne, ne).
     B : jax.Array
         Stacked control Jacobians of shape (N - 1, ne, m).
+    C : jax.Array | None, optional
+        Stacked output state Jacobians of shape (N, p, ne). Defaults to None.
+    D : jax.Array | None, optional
+        Stacked output control Jacobians of shape (N - 1, p, m). Defaults to None.
     """
 
     A: jax.Array
@@ -182,44 +195,56 @@ class LinearTrajectoryModel(eqx.Module):
     m: int = eqx.field(static=True)
     ne: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
+    C: jax.Array | None = None
+    D: jax.Array | None = None
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 -- Trajectory model stores state and output Jacobians with dimensions
         self,
         A: jax.Array,
         B: jax.Array,
         n: int,
         m: int,
         ne: int,
+        *,
+        C: jax.Array | None = None,
+        D: jax.Array | None = None,
     ) -> None:
         self.A = jnp.asarray(A)
         self.B = jnp.asarray(B)
+        self.C = None if C is None else jnp.asarray(C)
+        self.D = None if D is None else jnp.asarray(D)
         self.n = n
         self.m = m
         self.ne = ne
         self.N = int(self.A.shape[0]) + 1
+
+    @property
+    def p(self) -> int | None:
+        """Output dimension, or None if this model has no output matrices."""
+        return None if self.C is None else int(self.C.shape[1])
 
 
 def _linearize_about(
     model: AbstractModel,
     traj: Trajectory,
 ) -> LinearTrajectoryModel:
-    """Linearize a dynamics model about a reference trajectory.
+    """Linearize a dynamics model about a reference Trajectory.
 
     Produces stacked discrete state Jacobians A of shape (N-1, ne, ne) and control Jacobians
-    B of shape (N-1, ne, m) in error coordinates along the horizon.
+    B of shape (N-1, ne, m) in error coordinates along the Horizon.
 
     Parameters
     ----------
     model : AbstractModel
         Dynamics model to linearize. If continuous, discretized with RK4 by default.
     traj : Trajectory
-        Reference trajectory holding states X of shape (N, n), controls U of shape (N-1, m),
+        Reference Trajectory holding states X of shape (N, n), controls U of shape (N-1, m),
         times t of shape (N,), and step durations dt of shape (N-1,).
 
     Returns
     -------
     LinearTrajectoryModel
-        Linearized model exposing stacked Jacobians A and B.
+        Linearized model exposing stacked Jacobians A and B, and optional C and D.
     """
     X_arr = traj.X
     U_arr = traj.U
@@ -251,10 +276,38 @@ def _linearize_about(
         dt_arr,
     )
 
+    if discrete_model.p is not None:
+
+        def output_step_jacobians(
+            xk: jax.Array,
+            uk: jax.Array,
+            tk: float | jax.Array,
+        ) -> tuple[jax.Array, jax.Array]:
+            dg_dx = discrete_model.output_state_jacobian(xk, uk, tk)
+            dg_du = discrete_model.output_control_jacobian(xk, uk, tk)
+            Gk = discrete_model.errstate_jacobian(xk)
+            Ck = dg_dx @ Gk
+            return Ck, dg_du
+
+        C_stages, D_stacked = jax.vmap(output_step_jacobians)(
+            X_arr[:-1],
+            U_arr,
+            t_arr[:-1],
+        )
+        dg_dx_term = discrete_model.output_state_jacobian(X_arr[-1], None, t_arr[-1])
+        G_term = discrete_model.errstate_jacobian(X_arr[-1])
+        C_term = dg_dx_term @ G_term
+        C_stacked = jnp.vstack([C_stages, C_term[None, ...]])
+    else:
+        C_stacked = None
+        D_stacked = None
+
     return LinearTrajectoryModel(
         A=A_stacked,
         B=B_stacked,
         n=discrete_model.n,
         m=discrete_model.m,
         ne=discrete_model.ne,
+        C=C_stacked,
+        D=D_stacked,
     )

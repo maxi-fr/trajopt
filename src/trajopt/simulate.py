@@ -46,6 +46,18 @@ def _build_problem(spec: dict[str, Any] | Problem) -> tuple[Problem, BoundaryCon
     return res, None
 
 
+def _evaluate_model_output(
+    model: AbstractModel,
+    t: float,
+    x: np.ndarray,
+    u: np.ndarray | None = None,
+) -> np.ndarray:
+    """Evaluate an AbstractModel output map with numpy arrays."""
+    x_jax = jnp.asarray(x)
+    u_jax = None if u is None else jnp.asarray(u)
+    return np.asarray(model.output(x_jax, u_jax, t), dtype=np.float64)
+
+
 @dataclasses.dataclass(frozen=True)
 class TrajOptMPCLog:
     """Telemetry log emitted at each receding-horizon MPC step.
@@ -272,3 +284,76 @@ class TrajOptDynamics(Dynamics[StateLog]):
             x0=config.get("x0"),
             integrator=integrator,
         )
+
+    def output(
+        self,
+        t: float,
+        x: np.ndarray,
+        u: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Evaluate the model's output y = g(x, u, t).
+
+        Parameters
+        ----------
+        t : float
+            Current simulation time.
+        x : np.ndarray
+            State vector of shape (n,).
+        u : np.ndarray | None, optional
+            Commanded control input of shape (m,). Defaults to None.
+
+        Returns
+        -------
+        np.ndarray
+            Output vector of shape (p,).
+        """
+        return _evaluate_model_output(self.model, t, x, u)
+
+
+class TrajOptMeasurement:
+    """Measurement model component wrapping an AbstractModel output function for simulate."""
+
+    model: AbstractModel
+
+    def __init__(self, model: AbstractModel) -> None:
+        self.model = model
+
+    def __call__(
+        self,
+        t: float,
+        x: np.ndarray,
+        u: np.ndarray,
+    ) -> np.ndarray:
+        """Compute the measurement output from current state and control.
+
+        Parameters
+        ----------
+        t : float
+            Current simulation time.
+        x : np.ndarray
+            State vector of shape (n,).
+        u : np.ndarray
+            Control input vector of shape (m,).
+
+        Returns
+        -------
+        np.ndarray
+            Measurement output vector of shape (p,).
+        """
+        return _evaluate_model_output(self.model, t, x, u)
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> Self:
+        """Instantiate measurement component from a configuration dictionary.
+
+        Parameters
+        ----------
+        config : dict[str, Any]
+            Dictionary containing ``model`` (as an AbstractModel instance or {class_path, ...} dictionary).
+
+        Returns
+        -------
+        Self
+            Instantiated TrajOptMeasurement component.
+        """
+        return cls(model=_build_model(config["model"]))

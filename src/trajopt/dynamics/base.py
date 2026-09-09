@@ -31,16 +31,26 @@ class AbstractModel(eqx.Module):
         Control dimension. Compile-time static metadata.
     ne : int | None, optional
         Error-state dimension. Defaults to n for Euclidean state vectors.
+    p : int | None, optional
+        Output dimension. Compile-time static metadata. Defaults to None.
     """
 
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     ne: int = eqx.field(static=True)
+    p: int | None = eqx.field(static=True, default=None, kw_only=True)
 
-    def __init__(self, n: int, m: int, ne: int | None = None) -> None:
+    def __init__(
+        self,
+        n: int,
+        m: int,
+        ne: int | None = None,
+        p: int | None = None,
+    ) -> None:
         self.n = n
         self.m = m
         self.ne = n if ne is None else ne
+        self.p = p
 
     @abstractmethod
     def evaluate(
@@ -158,6 +168,69 @@ class AbstractModel(eqx.Module):
         """
         return jnp.eye(self.n, dtype=x.dtype)
 
+    def output(
+        self,
+        x: jax.Array,
+        u: jax.Array | None = None,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output y = g(x, u, t) of shape (p,)."""
+        del x, u, t
+        if self.p is None:
+            msg = f"{type(self).__name__} does not define an output dimension p."
+            raise NotImplementedError(msg)
+        msg = f"{type(self).__name__}.output is not implemented."
+        raise NotImplementedError(msg)
+
+    def output_state_jacobian(
+        self,
+        x: jax.Array,
+        u: jax.Array | None = None,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output state Jacobian dg/dx of shape (p, n) via automatic differentiation."""
+        if self.p is None:
+            msg = f"{type(self).__name__} does not define an output dimension p."
+            raise NotImplementedError(msg)
+        return jax.jacobian(lambda x_: self.output(x_, u, t))(x)
+
+    def output_control_jacobian(
+        self,
+        x: jax.Array,
+        u: jax.Array,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output control Jacobian dg/du of shape (p, m) via automatic differentiation."""
+        if self.p is None:
+            msg = f"{type(self).__name__} does not define an output dimension p."
+            raise NotImplementedError(msg)
+        return jax.jacobian(lambda u_: self.output(x, u_, t))(u)
+
+    def evaluate_output(self, trajectory: Trajectory) -> jax.Array:
+        """Evaluate output sequence Y along Trajectory of shape (N, p).
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Trajectory holding states X of shape (N, n), controls U of shape (N-1, m),
+            and times t of shape (N,).
+
+        Returns
+        -------
+        jax.Array
+            Stacked output Trajectory Y of shape (N, p).
+        """
+        if self.p is None:
+            msg = f"{type(self).__name__} does not define an output dimension p."
+            raise NotImplementedError(msg)
+        Y_stages = jax.vmap(self.output)(trajectory.X[:-1], trajectory.U, trajectory.t[:-1])
+        y_terminal = self.output(trajectory.X[-1], None, trajectory.t[-1])
+        return jnp.vstack([Y_stages, y_terminal[None, :]])
+
+    def has_control_feedthrough(self) -> bool:
+        """Whether the output function depends directly on control u."""
+        return False
+
 
 class ContinuousDynamics(AbstractModel):
     """Abstract base class for continuous-time dynamics models: xdot = f(x, u, t)."""
@@ -193,8 +266,8 @@ class ContinuousDynamics(AbstractModel):
 class EuclideanModel(ContinuousDynamics):
     """Continuous-time model on a Euclidean state space: ne == n with an identity error map."""
 
-    def __init__(self, n: int, m: int) -> None:
-        super().__init__(n=n, m=m, ne=n)
+    def __init__(self, n: int, m: int, p: int | None = None) -> None:
+        super().__init__(n=n, m=m, ne=n, p=p)
 
 
 class RigidBody(ContinuousDynamics):
@@ -218,10 +291,12 @@ class RigidBody(ContinuousDynamics):
     ----------
     m : int
         Control dimension. Compile-time static metadata.
+    p : int | None, optional
+        Output dimension. Defaults to None.
     """
 
-    def __init__(self, m: int) -> None:
-        super().__init__(n=13, m=m, ne=12)
+    def __init__(self, m: int, p: int | None = None) -> None:
+        super().__init__(n=13, m=m, ne=12, p=p)
 
     def state_diff(self, x: jax.Array, x0: jax.Array) -> jax.Array:
         """Compute error state dx = x (-) x0 of shape (12,) from states of shape (13,).
@@ -317,6 +392,7 @@ class DiscretizedDynamics(DiscreteDynamics):
             n=continuous_dynamics.n,
             m=continuous_dynamics.m,
             ne=continuous_dynamics.ne,
+            p=continuous_dynamics.p,
         )
         self.continuous_dynamics = continuous_dynamics
         self.integrator = integrator
@@ -338,3 +414,34 @@ class DiscretizedDynamics(DiscreteDynamics):
     def errstate_jacobian(self, x: jax.Array) -> jax.Array:
         """Evaluate the error-state Jacobian of shape (n, ne), delegating to the continuous model."""
         return self.continuous_dynamics.errstate_jacobian(x)
+
+    def output(
+        self,
+        x: jax.Array,
+        u: jax.Array | None = None,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate the output function, delegating to the continuous-time model."""
+        return self.continuous_dynamics.output(x, u, t)
+
+    def output_state_jacobian(
+        self,
+        x: jax.Array,
+        u: jax.Array | None = None,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output state Jacobian, delegating to the continuous-time model."""
+        return self.continuous_dynamics.output_state_jacobian(x, u, t)
+
+    def output_control_jacobian(
+        self,
+        x: jax.Array,
+        u: jax.Array,
+        t: float | jax.Array = 0.0,
+    ) -> jax.Array:
+        """Evaluate output control Jacobian, delegating to the continuous-time model."""
+        return self.continuous_dynamics.output_control_jacobian(x, u, t)
+
+    def has_control_feedthrough(self) -> bool:
+        """Whether output function has control feedthrough."""
+        return self.continuous_dynamics.has_control_feedthrough()
