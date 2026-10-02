@@ -40,6 +40,9 @@ class Objective(eqx.Module):
         stage_cost.
     N : int | None, optional
         Horizon length in knot points. Required when stage_cost is not stacked.
+    linear_control_cost : jax.Array | None, optional
+        Independent stage linear control term of shape (N - 1, m), preserved when retargeting.
+        Defaults to the stage cost's initial linear control term.
     """
 
     stage_cost: CostFunction
@@ -47,13 +50,16 @@ class Objective(eqx.Module):
     N: int = eqx.field(static=True)
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
+    linear_control_cost: jax.Array
 
     def __init__(
         self,
         stage_cost: CostFunction,
         terminal_cost: CostFunction | None = None,
         N: int | None = None,
+        linear_control_cost: jax.Array | None = None,
     ) -> None:
+        """Build a stacked Objective, retaining independent linear control costs."""
         if stage_cost.is_stacked:
             n_knots = int(_quadratic(stage_cost).Q.shape[0]) + 1
             if N is not None and n_knots != N:
@@ -90,6 +96,13 @@ class Objective(eqx.Module):
         self.N = N_val
         self.n = int(stage_cost.n)
         self.m = int(stage_cost.m)
+        self.linear_control_cost = (
+            jnp.asarray(st_cost.r)
+            if linear_control_cost is None and isinstance(st_cost, QuadraticCostFunction)
+            else jnp.zeros((N_val - 1, self.m))
+            if linear_control_cost is None
+            else jnp.asarray(linear_control_cost)
+        )
 
     @property
     def Q(self) -> jax.Array:  # noqa: N802
@@ -178,11 +191,12 @@ class Objective(eqx.Module):
         return _cost_expansion(self, traj, model)
 
     def invert(self) -> "Objective":
-        """Objective holding the inverted stage and terminal cost parameters."""
+        """Invert stage, terminal, and independent linear control costs."""
         return Objective(
             stage_cost=self.stage_cost.invert(),
             terminal_cost=self.terminal_cost.invert(),
             N=self.N,
+            linear_control_cost=-self.linear_control_cost,
         )
 
     def update_reference(self, trajectory: Trajectory, start: int = 0) -> "Objective":
@@ -217,7 +231,7 @@ class Objective(eqx.Module):
             self,
             (
                 -stage_cls.matvec(self.Q, X_stage),
-                -stage_cls.matvec(self.R, U_ref),
+                -stage_cls.matvec(self.R, U_ref) + self.linear_control_cost,
                 0.5 * stage_cls.quad_form(self.Q, X_stage) + 0.5 * stage_cls.quad_form(self.R, U_ref),
                 -term_cls.matvec(self.Q_f, x_term),
                 0.5 * term_cls.quad_form(self.Q_f, x_term),
@@ -278,7 +292,9 @@ def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective
         R=jnp.repeat(R_arr[None], N - 1, axis=0),
     )
     terminal_cost = cost_cls(Q=Qf_arr, terminal=True, m=m)
-    return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
+    return Objective(
+        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=jnp.zeros_like(stage_cost.r)
+    )
 
 
 def TrackingObjective(  # noqa: N802
@@ -313,7 +329,9 @@ def TrackingObjective(  # noqa: N802
         trajectory.U,
     )
     terminal_cost = cost_cls.terminal_tracking(Qf_arr, trajectory.X[-1], trajectory.m)
-    return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
+    return Objective(
+        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=jnp.zeros_like(stage_cost.r)
+    )
 
 
 def update_reference(
@@ -348,5 +366,8 @@ def update_reference(
     U_ref = trajectory.U[start : start + N - 1]
 
     stage_cost = cost_cls.tracking(obj.Q, obj.R, X_ref[:-1], U_ref)
+    stage_cost = eqx.tree_at(lambda c: c.r, stage_cost, stage_cost.r + obj.linear_control_cost)
     terminal_cost = cost_cls.terminal_tracking(obj.Q_f, X_ref[-1], obj.m)
-    return Objective(stage_cost=stage_cost, terminal_cost=terminal_cost, N=N)
+    return Objective(
+        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=obj.linear_control_cost
+    )

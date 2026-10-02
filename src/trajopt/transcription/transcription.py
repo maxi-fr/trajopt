@@ -100,7 +100,7 @@ def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     *,
     xf: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Evaluate constraint vector c(Z) and sparse constraint Jacobian values.
+    """Evaluate canonical constraints and Jacobian, appending linear Horizon rows.
 
     Parameters
     ----------
@@ -178,6 +178,10 @@ def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
         c_list.append(val_term)
         jac_list.append(jx_term.reshape(-1))
 
+    for con in built_constraints.horizon_constraints:
+        c_list.append(con.evaluate(Z))
+        jac_list.append(con.A.reshape(-1))
+
     c_all = jnp.concatenate(c_list)
     jac_all = jnp.concatenate(jac_list)
     return c_all, jac_all
@@ -192,7 +196,7 @@ def _constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
     *,
     xf: jax.Array | None = None,
 ) -> jax.Array:
-    """Evaluate constraint vector c(Z) of shape (P,) without computing Jacobians."""
+    """Evaluate constraint vector c(Z), including trailing Horizon rows, without Jacobians."""
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
@@ -228,6 +232,8 @@ def _constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
 
     if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
         c_list.append(knot_evaluators[N - 1].evaluate(X[-1], None, t_term, xf=xf))
+
+    c_list.extend(con.evaluate(Z) for con in built_constraints.horizon_constraints)
 
     return jnp.concatenate(c_list)
 

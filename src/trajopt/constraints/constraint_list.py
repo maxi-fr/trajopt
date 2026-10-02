@@ -7,6 +7,7 @@ import numpy as np
 
 from trajopt.constraints.base import Constraint
 from trajopt.constraints.bounds import BoundConstraint, ControlBound, StateBound
+from trajopt.constraints.horizon import LinearHorizonConstraint
 from trajopt.constraints.linear import GoalConstraint
 
 BoxBound = (StateBound, ControlBound, BoundConstraint)
@@ -148,6 +149,7 @@ class BuiltConstraintList(eqx.Module):
     knot_evaluators: tuple[BuiltKnotConstraint, ...]
     bound_evaluators: tuple[BuiltKnotConstraint, ...]
     groups: tuple[ConstraintGroup, ...]
+    horizon_constraints: tuple[LinearHorizonConstraint, ...]
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     N: int = eqx.field(static=True)
@@ -157,19 +159,22 @@ class BuiltConstraintList(eqx.Module):
     u_lower: jax.Array
     u_upper: jax.Array
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917 -- fused dimensions, bounds, and Horizon rows define the list
         self,
         knot_evaluators: Sequence[BuiltKnotConstraint],
         n: int,
         m: int,
         N: int,
         bounds: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+        horizon_constraints: Sequence[LinearHorizonConstraint] = (),
     ) -> None:
+        """Fuse Knot Point evaluators, bounds, and trailing Horizon rows."""
         self.knot_evaluators = tuple(knot_evaluators)
         self.n = int(n)
         self.m = int(m)
         self.N = int(N)
         self.p = tuple(k.p for k in self.knot_evaluators)
+        self.horizon_constraints = tuple(horizon_constraints)
 
         if bounds is not None:
             self.x_lower = jnp.asarray(bounds[0])
@@ -201,12 +206,12 @@ class BuiltConstraintList(eqx.Module):
         )
 
     def is_unconstrained(self) -> bool:
-        """Whether there are no constraint rows and no finite box bounds at all.
+        """Whether there are no Knot Point or Horizon rows and no finite box bounds.
 
         Structural (numpy/Python), never traced: sums the per-knot constraint-row counts and
         checks every box bound for at least one finite entry.
         """
-        has_rows = sum(self.p) > 0
+        has_rows = sum(self.p) + sum(c.p for c in self.horizon_constraints) > 0
         has_bounds = bool(
             np.any(np.isfinite(np.asarray(self.x_lower)))
             or np.any(np.isfinite(np.asarray(self.x_upper)))
@@ -338,6 +343,7 @@ class ConstraintList:
     m: int
     N: int
     constraints: list[Constraint]
+    horizon_constraints: list[LinearHorizonConstraint]
     inds: list[tuple[int, ...]]
     p: np.ndarray
 
@@ -346,6 +352,7 @@ class ConstraintList:
         self.m = int(m)
         self.N = int(N)
         self.constraints = []
+        self.horizon_constraints = []
         self.inds = []
         self.p = np.zeros(self.N, dtype=int)
 
@@ -393,6 +400,17 @@ class ConstraintList:
         self.constraints.append(con)
         self.inds.append(inds_tuple)
         self._recompute_p()
+
+    def add_horizon_constraint(self, con: LinearHorizonConstraint) -> None:
+        """Register linear rows over the complete interleaved Primal Vector."""
+        nz = self.N * self.n + (self.N - 1) * self.m
+        if any(i < 0 or i >= nz for i in con.inds):
+            msg = f"Horizon constraint index outside Primal Vector of length {nz}."
+            raise ValueError(msg)
+        if con.full_vector and len(con.inds) != nz:
+            msg = f"Horizon constraint without inds needs {nz} columns."
+            raise ValueError(msg)
+        self.horizon_constraints.append(con)
 
     def _recompute_p(self) -> None:
         """Recompute total constraint dimension p across the horizon."""
@@ -484,7 +502,7 @@ class ConstraintList:
         return xL, xU, uL, uU
 
     def build(self) -> BuiltConstraintList:
-        """Trace and fuse all registered constraints into a single BuiltConstraintList.
+        """Fuse registered Knot Point constraints and retain trailing Horizon rows.
 
         Box bounds are hoisted out of the knot evaluators and carried only as primal variable
         limits. `Box.residual` reproduces exactly the limits `primal_bounds` collects, so
@@ -511,6 +529,7 @@ class ConstraintList:
             m=self.m,
             N=self.N,
             bounds=self.primal_bounds(),
+            horizon_constraints=self.horizon_constraints,
         )
 
     def __len__(self) -> int:

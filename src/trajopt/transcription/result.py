@@ -115,10 +115,10 @@ def normalize_status(*, success: bool, message: str) -> SolverStatus:
 
 
 def constraint_row_count(problem: Problem) -> int:
-    """Return the canonical constraint row count P of the transcribed problem."""
+    """Return canonical row count P, including trailing linear Horizon rows."""
     n = int(problem.model.n)
     N = int(problem.N)
-    return n + (N - 1) * n + int(sum(problem.constraints.p))
+    return n + (N - 1) * n + int(sum(problem.constraints.p)) + sum(c.p for c in problem.constraints.horizon_constraints)
 
 
 def split_bound_duals(mu: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

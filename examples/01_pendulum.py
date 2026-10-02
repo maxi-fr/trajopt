@@ -387,5 +387,159 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Switched torque with a binary control
+
+    Let $a_k\in\{0,1\}$ decide whether the pendulum actuator is available at step $k$.
+    The physical model still reads torque $\tau_k$; the optimization control is now
+    $[\tau_k,a_k]$. We keep the swing-up objective and add an activation charge:
+
+    $$\min\; J_{\mathrm{existing}}(X,\tau)+\lambda_a\sum_{k=0}^{N-2}a_k.$$
+
+    At each control Knot Point, two linear inequalities impose
+    $-a_k\tau_{\max}\leq\tau_k\leq a_k\tau_{\max}$. When $a_k=0$, torque must be zero.
+    `Problem` bounds the declared binary coordinate to $[0,1]`, and Ipopt's homotopy
+    drives it within the configured $2\times10^{-4}$ numerical tolerance of an endpoint.
+    There is no balance constraint on torque.
+    """)
+    return
+
+
+@app.cell
+def _(Pendulum):
+    import jax
+
+    from trajopt.dynamics.base import ContinuousDynamics
+
+    class SwitchedPendulum(ContinuousDynamics):
+        """Pendulum dynamics with a torque and an activation control coordinate."""
+
+        physical: Pendulum
+
+        def __init__(self, physical: Pendulum) -> None:
+            """Expose two controls while retaining the original physical dynamics."""
+            super().__init__(n=physical.n, m=2, ne=physical.ne)
+            self.physical = physical
+
+        def dynamics(self, x: jax.Array, u: jax.Array, t: float | jax.Array = 0.0) -> jax.Array:
+            """Evaluate the physical dynamics using torque ``u[0]`` only."""
+            return self.physical.dynamics(x, u[:1], t)
+
+    return (SwitchedPendulum,)
+
+
+@app.cell
+def _(
+    ConstraintList,
+    GoalConstraint,
+    Ipopt,
+    MPC,
+    N,
+    Problem,
+    RK4,
+    SwitchedPendulum,
+    dt,
+    jnp,
+    model,
+    obj,
+    res_ipopt,
+    u_max,
+    x0,
+    xf,
+):
+    from trajopt.constraints.linear import LinearConstraint
+    from trajopt.costs.objective import Objective
+    from trajopt.costs.quadratic import QuadraticCost
+    from trajopt.trajectory import Trajectory
+
+    lambda_activation = 0.02
+    switched_stage = QuadraticCost(
+        Q=obj.Q[0],
+        R=jnp.diag(jnp.array([obj.R[0, 0, 0], 0.0])),
+        r=jnp.array([0.0, lambda_activation]),
+    )
+    switched_terminal = QuadraticCost(Q=obj.Q_f, terminal=True, m=2)
+    switched_objective = Objective(switched_stage, switched_terminal, N=N).with_reference(
+        jnp.repeat(xf[None, :], N, axis=0), jnp.zeros((N - 1, 2))
+    )
+
+    switched_constraints = ConstraintList(n=2, m=2, N=N)
+    switched_constraints.add_constraint(
+        LinearConstraint(
+            n=2,
+            m=2,
+            A=jnp.array([[1.0, -u_max], [-1.0, -u_max]]),
+            b=jnp.zeros(2),
+            inds=(2, 3),
+        ),
+        range(N - 1),
+    )
+    switched_constraints.add_constraint(GoalConstraint(n=2, xf=xf), N - 1)
+    switched_problem = Problem(
+        model=SwitchedPendulum(model),
+        obj=switched_objective,
+        constraints=switched_constraints,
+        N=N,
+        dt=dt,
+        integrator=RK4(),
+        binary_control_indices=(1,),
+    )
+
+    initial_controls = jnp.column_stack((res_ipopt.trajectory.U[:, 0], jnp.ones(N - 1)))
+    initial_trajectory = Trajectory(
+        X=res_ipopt.trajectory.X,
+        U=initial_controls,
+        t=res_ipopt.trajectory.t,
+        dt=res_ipopt.trajectory.dt,
+    )
+    switched_mpc = MPC(
+        switched_problem,
+        Ipopt(options={"print_level": 0, "max_iter": 500, "tol": 1e-6}, max_passes=10, binary_tolerance=2e-4),
+        x0=x0,
+        initial_trajectory=initial_trajectory,
+    )
+    switched_result = switched_mpc.solve()
+    return lambda_activation, switched_result
+
+
+@app.cell
+def _(lambda_activation, mo, np, plt, switched_result, u_max):
+    U_switch = np.asarray(switched_result.trajectory.U)
+    torque = U_switch[:, 0]
+    activation = U_switch[:, 1]
+    t_switch = np.asarray(switched_result.trajectory.t[:-1])
+    max_coupling = float(np.max(np.maximum(np.abs(torque) - u_max * activation, 0.0)))
+    active_steps = int(np.count_nonzero(activation > 0.5))
+
+    summary_switch = mo.md(
+        f"""
+        Ipopt success: `{switched_result.success}`. Active steps: `{active_steps}/{len(activation)}`.
+        Activation charge: `{lambda_activation * float(np.sum(activation)):.4f}`.
+        Maximum coupling violation: `{max_coupling:.2e}`.
+        Binary distance: `{switched_result.info["binary_distance"]:.2e}`.
+        Constraint violation: `{switched_result.constraint_violation:.2e}`.
+        Homotopy passes: `{switched_result.info["homotopy_passes"]}`.
+        Ipopt status: `{switched_result.status}`.
+        Original objective plus activation charge: `{switched_result.cost:.4f}`.
+        """
+    )
+
+    fig_switch, (ax_torque, ax_activation) = plt.subplots(2, 1, sharex=True, figsize=(9, 5))
+    ax_torque.step(t_switch, torque, where="post", label=r"Torque $\tau_k$")
+    ax_torque.step(t_switch, u_max * activation, where="post", linestyle=":", label=r"$a_k\tau_{\max}$")
+    ax_torque.step(t_switch, -u_max * activation, where="post", linestyle=":")
+    ax_torque.set_ylabel("Torque [N m]")
+    ax_torque.legend()
+    ax_activation.step(t_switch, activation, where="post", color="black")
+    ax_activation.set_ylabel(r"Activation $a_k$")
+    ax_activation.set_xlabel("Time [s]")
+    ax_activation.set_ylim(-0.1, 1.1)
+    plt.tight_layout()
+    mo.vstack([summary_switch, fig_switch])
+    return
+
+
 if __name__ == "__main__":
     app.run()

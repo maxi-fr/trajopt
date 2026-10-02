@@ -31,6 +31,7 @@ from trajopt.transcription.transcription import (
 
 _SUCCESS_STATUSES = {0, 1}  # 0: Solve_Succeeded, 1: Solved_To_Acceptable_Level
 _EMPTY = np.zeros(0, dtype=np.float64)
+_MIN_HOMOTOPY_PASSES = 2
 
 
 class IpoptResult(NamedTuple):
@@ -98,8 +99,19 @@ class _IpoptCallback:
         m = int(problem.model.m)
         p_seq = tuple(int(pk) for pk in problem.constraints.p)
 
-        self.jac_rows, self.jac_cols = jacobian_sparsity_pattern(N, n, m, p_seq)
+        self.jac_rows, self.jac_cols = jacobian_sparsity_pattern(
+            N,
+            n,
+            m,
+            p_seq,
+            tuple(c.inds for c in problem.constraints.horizon_constraints),
+            tuple(c.p for c in problem.constraints.horizon_constraints),
+        )
         self.hess_rows, self.hess_cols = hessian_sparsity_pattern(N, n, m)
+        self.binary_z_indices = np.asarray(
+            [k * (n + m) + n + i for k in range(N - 1) for i in problem.binary_control_indices], dtype=np.int32
+        )
+        self.beta = 0.0
         self.iteration_count = 0
 
     def intermediate(self, *args: object) -> bool:
@@ -109,12 +121,15 @@ class _IpoptCallback:
         return True
 
     def objective(self, z: np.ndarray) -> float:
-        """Evaluate scalar objective value J(z)."""
-        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt))
+        """Evaluate caller cost plus the current binary homotopy penalty."""
+        a = z[self.binary_z_indices]
+        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt)) + self.beta * float(np.sum(a * (1 - a)))
 
     def gradient(self, z: np.ndarray) -> np.ndarray:
-        """Evaluate objective gradient nabla J(z)."""
-        return np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64)
+        """Evaluate caller gradient plus the current binary penalty gradient."""
+        grad = np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64).copy()
+        grad[self.binary_z_indices] += self.beta * (1 - 2 * z[self.binary_z_indices])
+        return grad
 
     def constraints(self, z: np.ndarray) -> np.ndarray:
         """Evaluate constraint vector c(z)."""
@@ -131,8 +146,8 @@ class _IpoptCallback:
         return self.jac_rows, self.jac_cols
 
     def hessian(self, z: np.ndarray, lagrange: np.ndarray, obj_factor: float = 1.0) -> np.ndarray:
-        """Evaluate lower-triangular nonzeros of the Lagrangian Hessian."""
-        return np.asarray(
+        """Evaluate Lagrangian Hessian values including scaled binary diagonal terms."""
+        values = np.asarray(
             eval_h(
                 self.problem,
                 jnp.asarray(z),
@@ -144,7 +159,11 @@ class _IpoptCallback:
                 lam=jnp.asarray(lagrange),
             ),
             dtype=np.float64,
-        )
+        ).copy()
+        diagonal = self.hess_rows == self.hess_cols
+        binary = np.isin(self.hess_rows, self.binary_z_indices)
+        values[diagonal & binary] -= 2 * self.beta * obj_factor
+        return values
 
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         """Return build-time Lagrangian Hessian sparsity pattern (rows, cols)."""
@@ -163,6 +182,10 @@ class Ipopt:
     """
 
     options: Mapping[str, Any] = field(default_factory=dict)
+    beta_initial: float = 1.0
+    beta_growth: float = 10.0
+    max_passes: int = 8
+    binary_tolerance: float = 1e-4
 
     def transcription_callback(
         self,
@@ -179,9 +202,51 @@ class Ipopt:
         """
         return _IpoptCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
+    def _solve_passes(
+        self,
+        nlp: Any,  # noqa: ANN401 -- cyipopt's C-extension handle is untyped
+        cb: _IpoptCallback,
+        z0: np.ndarray,
+        lam0: np.ndarray | None,
+        mu0: np.ndarray | None,
+    ) -> tuple[np.ndarray, dict[str, Any], int, float]:
+        """Continue from the relaxation through penalty passes, carrying primal and dual iterates."""
+        n_passes = self.max_passes if len(cb.binary_z_indices) else 1
+        binary_distance = 0.0
+        for pass_index in range(n_passes):
+            cb.beta = 0.0 if pass_index == 0 else self.beta_initial * self.beta_growth ** (pass_index - 1)
+            if lam0 is not None and mu0 is not None:
+                nlp.add_option("warm_start_init_point", "yes")
+                nlp.add_option("warm_start_bound_push", 1e-9)
+                nlp.add_option("warm_start_mult_bound_push", 1e-9)
+                mult_x_L, mult_x_U = split_bound_duals(mu0)
+                z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
+            else:
+                z_opt, info = nlp.solve(z0)
+            z0 = np.asarray(z_opt, dtype=np.float64)
+            lam0 = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
+            mu0 = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64) - np.asarray(
+                info.get("mult_x_L", _EMPTY), dtype=np.float64
+            )
+            a = z0[cb.binary_z_indices]
+            binary_distance = float(np.max(np.minimum(np.abs(a), np.abs(1 - a)))) if len(a) else 0.0
+            if int(info.get("status", -1)) not in _SUCCESS_STATUSES:
+                break
+            if pass_index > 0 and binary_distance <= self.binary_tolerance:
+                break
+        return z0, dict(info), pass_index + 1, binary_distance
+
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
-        """Solve the transcribed optimal control problem using Ipopt via cyipopt."""
+        """Solve with Ipopt, continuing binary Problems from a relaxation to tolerance."""
         problem = program.problem
+        if problem.binary_control_indices and (
+            self.beta_initial <= 0
+            or self.beta_growth <= 1
+            or self.max_passes < _MIN_HOMOTOPY_PASSES
+            or self.binary_tolerance <= 0
+        ):
+            msg = "Binary homotopy needs positive beta/tolerance, growth > 1, and at least two passes."
+            raise ValueError(msg)
         try:
             import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
         except ImportError as e:
@@ -224,20 +289,20 @@ class Ipopt:
             for k, v in self.options.items():
                 nlp.add_option(k, v)
 
-        if lam0 is not None and mu0 is not None:
-            # Ipopt only honours the supplied multipliers with the warm-start option set; the
-            # push factors keep it from shoving them back off the bounds it just accepted.
-            nlp.add_option("warm_start_init_point", "yes")
-            nlp.add_option("warm_start_bound_push", 1e-9)
-            nlp.add_option("warm_start_mult_bound_push", 1e-9)
-            mult_x_L, mult_x_U = split_bound_duals(mu0)
-            z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
-        else:
-            z_opt, info = nlp.solve(z0)
+        z_opt, info, pass_count, binary_distance = self._solve_passes(nlp, cb, z0, lam0, mu0)
         status = int(info.get("status", -1))
-        success = status in _SUCCESS_STATUSES
+        success = status in _SUCCESS_STATUSES and (
+            not problem.binary_control_indices or (pass_count > 1 and binary_distance <= self.binary_tolerance)
+        )
         message = str(info.get("status_msg", ""))
-        cost_val = float(info.get("obj_val", cb.objective(z_opt)))
+        cost_val = float(eval_f(problem, jnp.asarray(z_opt), t0_arr, dt_arr))
+        a = z_opt[cb.binary_z_indices]
+        info.update(
+            homotopy_beta=cb.beta,
+            homotopy_penalty=cb.beta * float(np.sum(a * (1 - a))),
+            binary_distance=binary_distance,
+            homotopy_passes=pass_count,
+        )
 
         Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
         X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
@@ -259,6 +324,9 @@ class Ipopt:
             dt=dt_arr,
             xf=xf_val,
         )
+        if problem.binary_control_indices:
+            feasibility_tol = float(self.options.get("constr_viol_tol", 1e-4))
+            success = success and viol <= feasibility_tol
 
         lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
         mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)

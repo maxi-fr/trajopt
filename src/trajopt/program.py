@@ -48,7 +48,7 @@ class WarmStart(eqx.Module):
         initial_trajectory: "Trajectory | None" = None,
         initial_z: jax.Array | None = None,
     ) -> "WarmStart":
-        """Zero duals and a primal guess: `initial_z`, else `initial_trajectory`, else x0 held with zero controls."""
+        """Zero duals, including Horizon rows, and a primal guess from supplied data or x0."""
         N = int(problem.N)
         n = int(problem.model.n)
         m = int(problem.model.m)
@@ -63,7 +63,9 @@ class WarmStart(eqx.Module):
                 jnp.zeros((N - 1, m), dtype=jnp.float64),
             )
 
-        P_total = n + (N - 1) * n + sum(problem.constraints.p)
+        P_total = (
+            n + (N - 1) * n + sum(problem.constraints.p) + sum(c.p for c in problem.constraints.horizon_constraints)
+        )
         return cls(Z=Z, lam=jnp.zeros(P_total, dtype=jnp.float64), mu=jnp.zeros(len(Z), dtype=jnp.float64))
 
     def unpack(self, problem: "Problem") -> tuple[jax.Array, jax.Array]:
@@ -131,7 +133,8 @@ def _lam_shift_index(problem: "Problem") -> jax.Array:
     defect holds its own multiplier (the knot entering the horizon repeats the old final one).
     Rows with no counterpart map to -1: the terminal block, whose rows come from a different
     evaluator than any stage knot's; the last stage block, whose source would be that terminal
-    block; and any stage block whose width differs from its source's.
+    block; and any stage block whose width differs from its source's. Trailing Horizon rows
+    retain their multipliers because the same whole-Horizon restriction remains registered.
     """
     n = int(problem.model.n)
     N = int(problem.N)
@@ -145,7 +148,8 @@ def _lam_shift_index(problem: "Problem") -> jax.Array:
         off = block[1]
         offsets.append((defect, block))
 
-    index = np.full(off, -1, dtype=np.int32)
+    total = off + sum(c.p for c in problem.constraints.horizon_constraints)
+    index = np.full(total, -1, dtype=np.int32)
     index[:n] = np.arange(n)
     for k in range(N - 1):
         defect, block = offsets[k]
@@ -155,6 +159,7 @@ def _lam_shift_index(problem: "Problem") -> jax.Array:
             index[defect : defect + n] = np.arange(src, src + n)
         if k + 1 < N - 1 and block[1] - block[0] == src_block[1] - src_block[0]:
             index[block[0] : block[1]] = np.arange(src_block[0], src_block[1])
+    index[off:] = np.arange(off, total)
     return jnp.asarray(index)
 
 
@@ -257,5 +262,12 @@ class Program:
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
     def solve(self, bc: "BoundaryConditions", ws: WarmStart) -> "SolverResult":
-        """Solve this program's problem from boundary conditions `bc` and warm start `ws`."""
+        """Solve this Problem, rejecting features unsupported by the chosen Solver."""
+        from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415 -- avoid solver import cycle
+
+        if not isinstance(self.solver, Ipopt) and (
+            self.problem.binary_control_indices or self.problem.constraints.horizon_constraints
+        ):
+            msg = f"{type(self.solver).__name__} does not support binary controls or Horizon constraints."
+            raise ValueError(msg)
         return self.solver.solve(self, bc, ws)

@@ -115,7 +115,7 @@ def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray],
 
 
 def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
-    """Compute lower and upper bounds gL <= c(Z) <= gU for the transcribed constraint vector.
+    """Compute bounds for canonical constraints, ending with linear Horizon rows.
 
     Parameters
     ----------
@@ -155,6 +155,11 @@ def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
         lo_term, hi_term = _evaluator_bounds(knot_evaluators[N - 1])
         gL_list.extend(lo_term)
         gU_list.extend(hi_term)
+
+    for con in problem.constraints.horizon_constraints:
+        lo, hi = _cone_bounds(con.cone, con.p)
+        gL_list.append(lo)
+        gU_list.append(hi)
 
     gL = np.concatenate(gL_list) if gL_list else np.empty(0, dtype=np.float64)
     gU = np.concatenate(gU_list) if gU_list else np.empty(0, dtype=np.float64)
@@ -213,7 +218,7 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     dt: float | jax.Array = 0.05,
     xf: jax.Array | np.ndarray | None = None,
 ) -> float:
-    """Compute maximum constraint violation across all transcribed constraints and bounds.
+    """Compute maximum violation across dynamics, bounds, Knot Point and Horizon constraints.
 
     Parameters
     ----------
@@ -283,7 +288,11 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
         xf_jax=xf_jax,
     )
 
-    return max(max_primal, viol_init, viol_dyn, viol_stage)
+    viol_horizon = 0.0
+    for con in problem.constraints.horizon_constraints:
+        val = con.evaluate(Z_arr)
+        viol_horizon = max(viol_horizon, float(jnp.max(jnp.abs(val - con.cone.project(val)))))
+    return max(max_primal, viol_init, viol_dyn, viol_stage, viol_horizon)
 
 
 def parse_solver_initial_state(

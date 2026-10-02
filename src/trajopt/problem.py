@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from trajopt.constraints.constraint_list import BuiltConstraintList, ConstraintList
 from trajopt.costs.objective import Objective
@@ -105,6 +107,8 @@ class Problem(eqx.Module):
         horizon recedes. Defaults to 0.05.
     integrator : Integrator | IntegratorCallable | None, optional
         Integrator instance for continuous models. Defaults to None, meaning RK4.
+    binary_control_indices : Sequence[int], optional
+        Unique control coordinates constrained to [0, 1] at each nonterminal Knot Point.
     """
 
     model: DiscreteDynamics
@@ -112,6 +116,7 @@ class Problem(eqx.Module):
     constraints: BuiltConstraintList
     N: int = eqx.field(static=True)
     dt: jax.Array
+    binary_control_indices: tuple[int, ...] = eqx.field(static=True)
 
     def __init__(  # noqa: PLR0913, PLR0917 -- the six pieces that define a transcription
         self,
@@ -121,19 +126,42 @@ class Problem(eqx.Module):
         N: int | None = None,
         dt: float | jax.Array = 0.05,
         integrator: Integrator | IntegratorCallable | None = None,
+        binary_control_indices: Sequence[int] = (),
     ) -> None:
+        """Build a Problem and intersect declared binary control coordinates with box bounds."""
         n = int(model.n)
         m = int(model.m)
         N_val = int(N if N is not None else obj.N)
 
         cl = ConstraintList(n=n, m=m, N=N_val) if constraints is None else constraints
         built_con = cl.build()
+        binary = tuple(int(i) for i in binary_control_indices)
+        if len(set(binary)) != len(binary) or any(i < 0 or i >= m for i in binary):
+            msg = f"Binary control indices must be unique and in [0, {m})."
+            raise ValueError(msg)
+        if binary:
+            xL, xU, uL, uU = built_con.primal_bounds()
+            uL, uU = uL.copy(), uU.copy()
+            uL[:, binary] = np.maximum(uL[:, binary], 0.0)
+            uU[:, binary] = np.minimum(uU[:, binary], 1.0)
+            if np.any(uL > uU):
+                msg = "Binary control bounds contradict existing control bounds."
+                raise ValueError(msg)
+            built_con = BuiltConstraintList(
+                built_con.knot_evaluators,
+                n,
+                m,
+                N_val,
+                bounds=(xL, xU, uL, uU),
+                horizon_constraints=built_con.horizon_constraints,
+            )
 
         self.model = model.discretize(integrator)
         self.obj = obj
         self.constraints = built_con
         self.N = N_val
         self.dt = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N_val - 1,))
+        self.binary_control_indices = binary
 
     def cost_expansion(self, traj: "Trajectory") -> "Expansion":
         """Stacked first- and second-order cost expansion in error coordinates along traj."""

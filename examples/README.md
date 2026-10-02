@@ -49,7 +49,7 @@ uv run python examples/01_pendulum.py
 
 | Notebook | Physical System | Key Concepts Demonstrated | Solvers Compared |
 | :--- | :--- | :--- | :--- |
-| [`01_pendulum.py`](01_pendulum.py) | Inverted Pendulum | Swing-up dynamics, `LQRObjective`, `ControlBound` torque limits, terminal `GoalConstraint`, phase portraits | `ALTRO`, `Ipopt`, `ILQR` |
+| [`01_pendulum.py`](01_pendulum.py) | Inverted Pendulum | Swing-up dynamics, torque limits, terminal goal, and a switched-torque extension with binary activation and an activation charge | `ALTRO`, `Ipopt` |
 | [`02_cartpole.py`](02_cartpole.py) | Cartpole | Underactuated dynamics, cart track limits (`StateBound`), actuation force bounds (`ControlBound`), trajectory keyframes | `ALTRO`, `Ipopt` |
 | [`03_dubins_car.py`](03_dubins_car.py) | Dubins Car | Nonholonomic kinematics, `TrackingObjective`, lateral corridor constraints (`StateBound`), linear/angular velocity bounds | `ALTRO`, `Ipopt` |
 | [`04_quadrotor.py`](04_quadrotor.py) | Quadrotor | 6-DOF rigid body, JPL quaternions on $\mathrm{SO}(3)$, `QuatGeodesicCost`, `SphereConstraint` 3D obstacle avoidance | `ALTRO`, `Ipopt` |

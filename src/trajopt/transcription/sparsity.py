@@ -3,11 +3,13 @@ from collections.abc import Sequence
 import numpy as np
 
 
-def jacobian_sparsity_pattern(
+def jacobian_sparsity_pattern(  # noqa: PLR0913, PLR0917 -- knot and Horizon row layouts define the sparse pattern
     N: int,
     n: int,
     m: int,
     p: Sequence[int],
+    horizon_columns: Sequence[tuple[int, ...]] = (),
+    horizon_rows: Sequence[int] = (),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute build-time COO sparsity pattern for the transcribed constraint Jacobian.
 
@@ -21,6 +23,10 @@ def jacobian_sparsity_pattern(
         Control dimension.
     p : Sequence[int]
         Sequence of length N specifying total constraint dimension at each knot point.
+    horizon_columns : Sequence[tuple[int, ...]]
+        Primal Vector columns for each trailing linear Horizon constraint.
+    horizon_rows : Sequence[int]
+        Row counts paired with ``horizon_columns``.
 
     Returns
     -------
@@ -69,6 +75,11 @@ def jacobian_sparsity_pattern(
         row_list.append(np.repeat(np.arange(curr_row, curr_row + p_term), n_int))
         col_list.append(np.tile(np.arange(col_term, col_term + n_int), p_term))
         curr_row += p_term
+
+    for columns, count in zip(horizon_columns, horizon_rows, strict=True):
+        row_list.append(np.repeat(np.arange(curr_row, curr_row + count), len(columns)))
+        col_list.append(np.tile(np.asarray(columns), count))
+        curr_row += count
 
     rows = np.concatenate(row_list).astype(np.int32) if row_list else np.empty(0, dtype=np.int32)
     cols = np.concatenate(col_list).astype(np.int32) if col_list else np.empty(0, dtype=np.int32)
