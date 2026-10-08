@@ -260,8 +260,6 @@ this solver without globalization or a Hessian update. The two should stay separ
 backend's value is that it is exactly one convex solve — but the relationship is worth a sentence
 in both docstrings.
 
-Two documentation follow-ups are open. The repository has no `CONTEXT.md` despite the agent
-instructions referencing one, and the terms this design settles — Operating Point, Merit
-Function, Damped BFGS, Elastic Mode — are natural first entries. An architecture decision record
+Two documentation follow-ups are open. An architecture decision record
 covering the vanilla-scope cuts is also warranted, since a future reader hitting the quadrotor
 failure mode will otherwise re-litigate the elastic-mode decision from scratch.
