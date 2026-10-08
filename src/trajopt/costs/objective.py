@@ -171,12 +171,13 @@ class Objective(eqx.Module):
         """Whether the linear and constant terms are already aimed at a build-time reference.
 
         True for a `TrackingObjective` or anything passed through `update_reference`, and False
-        for the shape-only `LQRObjective`, whose q, r and c start at zero. Reads concrete values,
-        so it belongs to eager problem setup rather than to a traced solver core.
+        for the shape-only `LQRObjective`. Independent linear control costs do not count as a
+        reference. Reads concrete values, so it belongs to eager problem setup rather than a
+        traced solver core.
         """
         if not self.is_quadratic:
             return False
-        terms = (self.q, self.r, self.c, self.q_f, self.c_f)
+        terms = (self.q, self.r - self.linear_control_cost, self.c, self.q_f, self.c_f)
         return any(bool(jnp.any(term)) for term in terms)
 
     def cost(self, traj: Trajectory) -> jax.Array:

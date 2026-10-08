@@ -4,8 +4,6 @@
 * make tests faster
   * new ALTRO tests
 
-* Implement: SQP adapter
-
 * Remove unnecessary configurability. Many if else blocks
 
 * make configurable

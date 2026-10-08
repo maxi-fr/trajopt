@@ -161,6 +161,30 @@ U = result.trajectory.U
 print(f"Optimal final state: {np.asarray(X[-1])}")
 ```
 
+### L1 control penalties
+
+`PseudoHuberControlCost` is a smooth stage cost that can be used directly in an `Objective`:
+
+```python3
+from trajopt.costs.objective import Objective
+from trajopt.costs.pseudo_huber import PseudoHuberControlCost
+
+smooth_obj = Objective(PseudoHuberControlCost(n=n, m=m, weight=0.5, delta=0.01), N=N)
+```
+
+For an exact L1 penalty added to an existing `Problem`, use `add_l1_epigraph`:
+
+```python3
+from trajopt.problem import add_l1_epigraph
+
+l1_prob = add_l1_epigraph(prob, weight=0.5)
+```
+
+The returned problem has controls `[u, s]` of width `2m`, with `s >= |u|`. Supply augmented
+controls in Trajectories, warm starts, and reference windows. For an existing control array `U`,
+`jnp.concatenate([U, jnp.abs(U)], axis=-1)` gives a feasible epigraph control array. For a
+reference window, append `jnp.zeros_like(U_ref)` to the original control reference.
+
 ### Native iLQR / ALTRO solvers
 
 Alongside the Ipopt/OSQP/Clarabel transcription adapters, `trajopt.solvers` ports iLQR, an
