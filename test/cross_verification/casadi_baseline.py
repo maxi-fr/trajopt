@@ -24,6 +24,26 @@ from trajopt.trajectory import Trajectory
 from trajopt.transcription.result import SolverResult
 
 
+def _casadi_solver_options(solver: str, options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build the CasADi options for Ipopt or the reference sqpmethod."""
+    opts: dict[str, Any] = {"print_time": False}
+    if solver == "ipopt":
+        opts.update({"ipopt.print_level": 0, "ipopt.sb": "yes"})
+    elif solver == "sqpmethod":
+        opts.update({"qpsol": "qrqp", "print_header": False, "print_iteration": False, "print_status": False})
+    else:
+        msg = f"Unsupported CasADi NLP solver: {solver}"
+        raise ValueError(msg)
+    for key, value in (options or {}).items():
+        option_key = (
+            f"ipopt.{key}"
+            if solver == "ipopt" and key in {"print_level", "max_iter", "tol", "acceptable_tol", "constr_viol_tol"}
+            else key
+        )
+        opts[option_key] = value
+    return opts
+
+
 class CasadiResult(NamedTuple):
     """Result of a CasADi trajectory optimization solve.
 
@@ -294,8 +314,10 @@ class CasadiProblem:
         options: Mapping[str, Any] | None = None,
         initial_X: np.ndarray | None = None,
         initial_U: np.ndarray | None = None,
+        *,
+        solver: str = "ipopt",
     ) -> CasadiResult:
-        """Solve the transcribed NLP using CasADi with Ipopt.
+        """Solve the transcribed NLP using CasADi with Ipopt or sqpmethod.
 
         Parameters
         ----------
@@ -305,6 +327,8 @@ class CasadiProblem:
             Initial state guess of shape (N, n) or (n, N).
         initial_U : np.ndarray | None, optional
             Initial control guess of shape (N-1, m) or (m, N-1).
+        solver : str, optional
+            CasADi NLP solver, ``"ipopt"`` or ``"sqpmethod"``.
 
         Returns
         -------
@@ -328,19 +352,7 @@ class CasadiProblem:
         else:
             self.opti.set_initial(self.U, np.zeros((self.m, self.N - 1)))
 
-        ipopt_opts: dict[str, Any] = {
-            "print_time": False,
-            "ipopt.print_level": 0,
-            "ipopt.sb": "yes",
-        }
-        if options:
-            for k, v in options.items():
-                if k in {"print_level", "max_iter", "tol", "acceptable_tol", "constr_viol_tol"}:
-                    ipopt_opts[f"ipopt.{k}"] = v
-                else:
-                    ipopt_opts[k] = v
-
-        self.opti.solver("ipopt", ipopt_opts)
+        self.opti.solver(solver, _casadi_solver_options(solver, options))
 
         sol = self.opti.solve()
 

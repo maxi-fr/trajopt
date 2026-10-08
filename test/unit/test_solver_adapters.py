@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any
 
 import jax
@@ -22,6 +23,7 @@ from trajopt.transcription.clarabel import Clarabel, ClarabelResult
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.osqp import OSQP, OSQPResult
 from trajopt.transcription.result import SolverResult, split_bound_duals
+from trajopt.transcription.sqp import SQP, SQPResult
 
 
 class PlanarDoubleIntegrator(ContinuousDynamics):
@@ -136,6 +138,7 @@ _BACKENDS = [
     ("ipopt", Ipopt, IpoptResult, _IPOPT_OPTS),
     ("osqp", OSQP, OSQPResult, _OSQP_OPTS),
     ("clarabel", Clarabel, ClarabelResult, _CLARABEL_OPTS),
+    ("sqp", partial(SQP, hessian="gauss_newton"), SQPResult, {}),
 ]
 
 
@@ -202,7 +205,7 @@ def test_common_adapter_interface() -> None:
 
 
 def test_backends_agree_on_the_duals_of_a_shared_optimum() -> None:
-    """Verify all three adapters report the same duals, in the same rows, with the same signs."""
+    """Verify all Backends report matching Multiplier rows and signs."""
     prob, bc, ws = _bound_active_double_integrator()
 
     results = {name: Program(prob, solver_cls(options=opts)).solve(bc, ws) for name, solver_cls, _, opts in _BACKENDS}
@@ -229,6 +232,7 @@ def test_backends_agree_on_the_duals_of_a_shared_optimum() -> None:
         # Clarabel exposes no warm-start API, so handing it duals is a documented no-op. Asserting
         # the count is unchanged is what keeps that a deliberate gap rather than a silent one.
         ("clarabel", Clarabel, _CLARABEL_OPTS, False),
+        ("sqp", partial(SQP, hessian="gauss_newton"), {}, True),
     ],
 )
 def test_dual_warm_start_cuts_iterations(name, solver_cls, opts, warm_startable) -> None:

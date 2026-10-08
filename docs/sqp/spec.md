@@ -18,7 +18,7 @@ sequential quadratic programming method.
 The gap is a small, readable sequential quadratic programming solver: one that repeatedly
 linearizes the nonlinear program, solves the resulting quadratic program with OSQP, and takes a
 globalized step. The reference point is CasADi's `sqpmethod` — deliberately vanilla, with a
-dense quasi-Newton Hessian and an L1 merit line search, and nothing else.
+quasi-Newton Hessian and an L1 merit line search, and nothing else.
 
 ## Solution
 
@@ -77,12 +77,14 @@ warm-start helper plugs in directly.
 
 Two modes, selected by an option:
 
-- **Damped BFGS (default).** A dense quasi-Newton approximation of the Lagrangian Hessian.
+- **Damped BFGS (default).** One small quasi-Newton matrix per Knot Point, assembled as a sparse
+  block-diagonal approximation of the Lagrangian Hessian. The exact Lagrangian Hessian has this
+  block structure because objective, dynamics curvature, and path constraints are knot-local.
   Curvature pairs are formed from the accepted step and the change in the Lagrangian gradient
-  evaluated at the *same* multipliers. Powell damping is applied whenever the curvature
-  condition fails, which keeps the matrix positive definite unconditionally. That guarantee is
+  evaluated at the *same* multipliers, then restricted to each block. Powell damping is applied
+  whenever a block's curvature condition fails, which keeps it positive definite. That guarantee is
   load-bearing beyond convergence quality: OSQP requires a positive semidefinite quadratic term,
-  and Powell damping supplies it without any separate convexification routine. The matrix is
+  and Powell damping supplies it without any separate convexification routine. Each block is
   initialized to the identity at the start of every solve.
 - **Gauss-Newton.** The objective's own second-order model, with the constraint-curvature term
   dropped. Positive semidefinite for the quadratic costs the library ships, and it needs no
@@ -93,10 +95,11 @@ The **exact Lagrangian Hessian is not offered**, even though a callback for it e
 indefinite away from the solution, so it would need a convexification routine that neither other
 mode requires.
 
-The BFGS matrix is dense, making that mode quadratic in the primal dimension. At the horizons
-the benchmark suite uses this is immaterial — the largest problem has a few hundred primal
-variables — but it is a real constraint at long horizons and belongs in the docstring rather
-than being discovered.
+Both modes pass sparse Hessians and Jacobians to OSQP. At fixed state and control dimensions,
+the Hessian storage grows linearly with Horizon length. A global L-BFGS update would keep only a
+short history of curvature pairs but still produce a generally dense QP Hessian for OSQP.
+CasADi's optional `sqpmethod` limited-memory mode likewise uses a dense Hessian and periodically
+resets its BFGS matrix; its default mode uses the exact Hessian.
 
 ### Globalization
 
@@ -120,7 +123,10 @@ than triggering a fallback.
 
 ### Quadratic program handling
 
-The subproblem is set up and solved fresh each iteration.
+The subproblem is solved each iteration. Its sparse Hessian and Jacobian values are updated in
+one OSQP workspace when their CSC patterns match the previous iteration. A changed pattern
+triggers a fresh setup. Explicit structural zeros keep the pattern stable for ordinary knot
+constraints; a changing second-order cone supporting plane can require a rebuild.
 
 **Second-order cone constraints are accepted**, unlike the direct `OSQP` backend, which rejects
 them. The difference is structural rather than an added feature: the direct backend must hand a
@@ -166,7 +172,9 @@ A good test here asserts on **external behaviour of the adapter**: the returned 
 cost, the constraint violation, the reported status, the duals. It does not reach into the
 iteration loop, the Hessian matrix, or the penalty parameter's trajectory. The one exception is
 iteration *count* as a proxy for warm-start effectiveness, which the repository already treats
-as observable behaviour in its existing adapter tests.
+as observable behaviour in its existing adapter tests. The sparse QP contract is checked at the
+OSQP boundary: Hessian nonzeros stay within Knot Point blocks after BFGS updates, and stable
+patterns use matrix updates after one setup.
 
 ### Seam 1 — the adapter's own behaviour
 
@@ -230,13 +238,6 @@ complexity.
   it is only a tightening of the step bounds. Rejected because radius management — shrink and
   grow factors, acceptance ratio thresholds, an initial radius — is a larger tuning surface than
   the line search's two constants.
-- **Warm-started OSQP factorization across iterations.** Reusing the symbolic factorization by
-  updating matrix values in place, rather than setting the subproblem up fresh, is the single
-  largest performance gain available. It requires assembling the row block from a fixed
-  structural sparsity pattern with explicit zeros retained, never from dense blocks, because
-  dropped numerical zeros would silently change the pattern between iterations. The pattern
-  helper already exists. This is the first optimization to reach for if profiling shows setup
-  cost dominating.
 - **Adaptive subproblem tolerance.** Loosening the OSQP tolerance early and tightening it as the
   outer iteration converges. Cheap, but nonstandard and absent from the reference.
 - **Exact Lagrangian Hessian mode.** Would require convexification.

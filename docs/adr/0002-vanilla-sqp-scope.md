@@ -84,6 +84,22 @@ solution, and OSQP requires a positive semidefinite quadratic term, so offering 
 writing a convexification routine that neither Damped BFGS (positive definite by construction)
 nor Gauss-Newton (positive semidefinite for the shipped costs) needs.
 
+### Knot-local Damped BFGS instead of global L-BFGS
+
+The Lagrangian Hessian's structural pattern is block diagonal by Knot Point. Objective and
+constraint curvature belongs to one knot; a dynamics Defect is nonlinear only in that knot's
+state and control, while its next-state term is affine. SQP updates one small Damped BFGS matrix
+per knot from the accepted step and Lagrangian-gradient change at fixed Multipliers. Each block
+stays positive definite, and OSQP receives a sparse block-diagonal Hessian. The Jacobian also
+stays sparse through QP assembly. For fixed state and control dimensions, storage grows linearly
+with Horizon length.
+
+Global L-BFGS would store fewer curvature pairs but generally produce a dense Hessian when
+assembled for OSQP. CasADi's [`sqpmethod` limited-memory mode](https://github.com/casadi/casadi/blob/main/casadi/solvers/sqpmethod.cpp)
+also declares a dense QP Hessian and resets its BFGS matrix periodically. It does not solve the
+sparsity problem here. Knot-local updates give up cross-knot curvature corrections; the exact
+Hessian has no such terms for this Transcription.
+
 ### Separate primal and dual tolerances, not Ipopt's scaled criterion
 
 Convergence is tested as maximum constraint violation against one tolerance and the Lagrangian
@@ -91,14 +107,15 @@ gradient's infinity-norm against another, following CasADi. Ipopt's Multiplier-s
 is not ported. Head-to-head timings against Ipopt therefore compare two different notions of
 "solved" and should not be read as precise.
 
-### The subproblem is set up fresh each iteration
+### Reuse OSQP within a solve when the sparse patterns match
 
-Reusing OSQP's symbolic factorization by updating matrix values in place is the largest
-performance gain available and was deliberately deferred, not overlooked. It requires assembling
-the row block from a fixed structural sparsity pattern with explicit zeros retained — never from
-dense blocks, whose dropped numerical zeros would silently change the pattern between iterations
-and corrupt the update. `jacobian_sparsity_pattern` already supplies the pattern. This is the
-first optimization to reach for if profiling shows setup cost dominating.
+Profiling after the knot-local Hessian change found that constructing dozens of small SciPy
+matrices dominated runtime. SQP now fills one fixed CSC pattern for its BFGS Hessian, keeps the
+Jacobian sparse, and updates the OSQP workspace's matrix values and bounds between iterations.
+It compares both CSC patterns before every update and rebuilds the workspace if either changes,
+which can happen for a second-order cone supporting plane. Structural zeros remain stored so a
+zero derivative cannot silently change a pattern. The workspace is local to one solve; the
+Hessian and Penalty Parameter still reset for each MPC step.
 
 ## Consequences
 
@@ -107,10 +124,9 @@ Ipopt on problems with poor initial guesses. It is not intended to replace Ipopt
 problems; it is intended to be a correct, inspectable SQP that the benchmark can include and that
 a reader can follow.
 
-The Damped BFGS matrix is dense, making that mode quadratic in the size of the Primal Vector. At
-the horizons the benchmark suite uses (a few hundred primal variables at most) this is
-immaterial, but it bounds the useful Horizon length, and Gauss-Newton is the mode to reach for
-when that bound bites.
+The sparse Hessian removes the quadratic storage cost of global BFGS. Fixed-pattern assembly and
+OSQP updates also reduce setup overhead, though JAX evaluations and the QP solve still set a
+floor on runtime. Both Hessian modes preserve knot-local sparsity through QP setup.
 
 Reversing any single cut is contained work, since each was designed before being dropped. Elastic
 Mode is the largest and would touch subproblem assembly, the Penalty Parameter update, and the
