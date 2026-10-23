@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 import numpy as np
+import scipy.sparse as sp
 
 
 def jacobian_sparsity_pattern(  # noqa: PLR0913, PLR0917 -- knot and Horizon row layouts define the sparse pattern
@@ -132,3 +133,41 @@ def hessian_sparsity_pattern(
     rows = np.concatenate(row_list).astype(np.int32) if row_list else np.empty(0, dtype=np.int32)
     cols = np.concatenate(col_list).astype(np.int32) if col_list else np.empty(0, dtype=np.int32)
     return rows, cols
+
+
+def stacked_constraint_pattern(
+    jr: np.ndarray,
+    jc: np.ndarray,
+    n_con: int,
+    nz: int,
+) -> tuple[sp.csc_matrix, np.ndarray]:
+    """Build the canonical CSC template for [J; I] and the Jacobian data mapping.
+
+    Parameters
+    ----------
+    jr, jc : np.ndarray
+        Row and column index arrays of shape ``(nnz_jac,)``.
+    n_con : int
+        Number of constraint rows in the Jacobian.
+    nz : int
+        Dimension of the flat Primal Vector.
+
+    Returns
+    -------
+    tuple[sp.csc_matrix, np.ndarray]
+        Canonical CSC matrix of shape ``(n_con + nz, nz)`` with identity entries set to 1.0,
+        and an integer index array of shape ``(nnz_jac,)`` mapping Jacobian entries to data offsets.
+    """
+    all_r = np.concatenate([jr, n_con + np.arange(nz, dtype=np.int32)])
+    all_c = np.concatenate([jc, np.arange(nz, dtype=np.int32)])
+    perm = np.lexsort((all_r, all_c))
+    inv_perm = np.empty_like(perm)
+    inv_perm[perm] = np.arange(len(perm))
+    jac_map = inv_perm[: len(jr)]
+    col_counts = np.bincount(all_c, minlength=nz)
+    indptr = np.r_[0, np.cumsum(col_counts)]
+    indices = all_r[perm]
+    data = np.zeros(len(all_r), dtype=np.float64)
+    data[inv_perm[len(jr) :]] = 1.0
+    template = sp.csc_matrix((data, indices, indptr), shape=(n_con + nz, nz))
+    return template, jac_map

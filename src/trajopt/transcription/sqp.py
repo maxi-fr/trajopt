@@ -16,7 +16,11 @@ from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import _z_to_trajectory, constraint_bounds, parse_solver_initial_state, primal_bounds
 from trajopt.transcription.result import warm_start_duals
-from trajopt.transcription.sparsity import hessian_sparsity_pattern, jacobian_sparsity_pattern
+from trajopt.transcription.sparsity import (
+    hessian_sparsity_pattern,
+    jacobian_sparsity_pattern,
+    stacked_constraint_pattern,
+)
 from trajopt.transcription.subproblem import constraint_blocks
 from trajopt.transcription.transcription import (
     constraints_and_jac,
@@ -191,9 +195,19 @@ class SQP:
         gl, gu = constraint_bounds(problem)
         zl, zu = primal_bounds(problem)
         blocks = constraint_blocks(problem)
+        has_soc = any(isinstance(block.cone, SecondOrderCone) for block in blocks)
         jr, jc = jacobian_sparsity_pattern(
             int(problem.N), int(problem.model.n), int(problem.model.m), problem.constraints.p
         )
+        a_template: sp.csc_matrix | None = None
+        jac_map: np.ndarray | None = None
+        lower_full: np.ndarray | None = None
+        upper_full: np.ndarray | None = None
+        if not has_soc:
+            a_template, jac_map = stacked_constraint_pattern(jr, jc, len(gl), nz)
+            lower_full = np.empty(len(gl) + nz, dtype=np.float64)
+            upper_full = np.empty(len(gl) + nz, dtype=np.float64)
+
         knot_slices = _knot_slices(problem)
         bfgs_blocks = [np.eye(z[part].size) for part in knot_slices]
         positions = tuple(
@@ -223,7 +237,7 @@ class SQP:
 
         def evaluate(
             point: np.ndarray, values: tuple[float, np.ndarray] | None = None
-        ) -> tuple[float, np.ndarray, np.ndarray, sp.csr_matrix]:
+        ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, sp.csr_matrix | None]:
             """Evaluate derivatives and reuse cost and constraints from an accepted trial."""
             p = jnp.asarray(point)
             if values is None:
@@ -232,15 +246,41 @@ class SQP:
             else:
                 f, c = values
                 grad, jvals = _trial_derivatives(problem, p, x0, t0, dt, xf=xf)
-            jac = sp.coo_matrix((np.asarray(jvals), (jr, jc)), shape=(len(gl), nz)).tocsr()
-            return float(f), np.asarray(grad), np.asarray(c), jac
+            jvals_np = np.asarray(jvals)
+            jac = sp.coo_matrix((jvals_np, (jr, jc)), shape=(len(gl), nz)).tocsr() if has_soc else None
+            return float(f), np.asarray(grad), np.asarray(c), jvals_np, jac
 
         def solve_qp() -> Any:  # noqa: ANN401 -- OSQP's C-extension result has no type
             """Solve the current convex Quadratic Subproblem in the step variable."""
             nonlocal solver, qp_p_pattern, qp_a_pattern
-            a, lower, upper = _linearized_rows(c, jac, (gl, gu), blocks)
-            matrix = sp.vstack([a, sp.eye(nz, format="csc")], format="csc")
             p = h if self.hessian == "bfgs" else sp.triu(h, format="csc")
+
+            if (
+                not has_soc
+                and a_template is not None
+                and jac_map is not None
+                and lower_full is not None
+                and upper_full is not None
+            ):
+                a_template.data[jac_map] = jvals_curr
+                lower_full[: len(gl)] = gl - c
+                upper_full[: len(gl)] = gu - c
+                lower_full[len(gl) :] = zl - z
+                upper_full[len(gl) :] = zu - z
+
+                if solver is not None:
+                    solver.update(Px=p.data, Ax=a_template.data, q=grad, l=lower_full, u=upper_full)
+                else:
+                    solver = osqp.OSQP()
+                    qp_options = {"verbose": False, "eps_abs": 1e-8, "eps_rel": 1e-8, "max_iter": 20000, **self.options}
+                    solver.setup(P=p, q=grad, A=a_template, l=lower_full, u=upper_full, **qp_options)
+                    if iteration == 0 and lam0 is not None and mu0 is not None:
+                        solver.warm_start(x=np.zeros(nz), y=np.r_[lam, mu])
+                return solver.solve()
+
+            soc_jac = jac if jac is not None else sp.coo_matrix((jvals_curr, (jr, jc)), shape=(len(gl), nz)).tocsr()
+            a, lower, upper = _linearized_rows(c, soc_jac, (gl, gu), blocks)
+            matrix = sp.vstack([a, sp.eye(nz, format="csc")], format="csc")
             lower = np.r_[lower, zl - z]
             upper = np.r_[upper, zu - z]
             p_pattern = (p.indptr, p.indices)
@@ -279,11 +319,16 @@ class SQP:
                 alpha *= self.backtrack
             return None
 
-        f, grad, c, jac = evaluate(z)
+        f, grad, c, jvals_curr, jac = evaluate(z)
         for iteration in range(self.max_iter + 1):
             violation = _violation(c, z, (gl, gu, zl, zu), blocks)
             primal = float(np.max(violation))
-            dual = float(np.max(np.abs(grad + jac.T @ lam + mu)))
+            jt_lam = (
+                jac.T @ lam
+                if has_soc and jac is not None
+                else np.bincount(jc, weights=jvals_curr * lam[jr], minlength=nz)
+            )
+            dual = float(np.max(np.abs(grad + jt_lam + mu)))
             if primal <= self.primal_tol and dual <= self.dual_tol:
                 status = "converged"
                 break
@@ -312,12 +357,18 @@ class SQP:
                 status = "line search failure"
                 break
             trial, alpha, trial_f, trial_c = accepted
-            old_grad, old_jac = grad, jac
+            old_grad = grad
+            old_jvals = jvals_curr
+            old_jac = jac
             z = trial
-            f, grad, c, jac = evaluate(z, (trial_f, trial_c))
+            f, grad, c, jvals_curr, jac = evaluate(z, (trial_f, trial_c))
             if self.hessian == "bfgs":
                 s = alpha * step
-                y = grad + jac.T @ next_lam - old_grad - old_jac.T @ next_lam
+                if has_soc and jac is not None and old_jac is not None:
+                    jt_diff = jac.T @ next_lam - old_jac.T @ next_lam
+                else:
+                    jt_diff = np.bincount(jc, weights=(jvals_curr - old_jvals) * next_lam[jr], minlength=nz)
+                y = grad - old_grad + jt_diff
                 bfgs_blocks = [
                     _bfgs(block, s[part], y[part]) for block, part in zip(bfgs_blocks, knot_slices, strict=True)
                 ]

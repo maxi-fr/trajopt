@@ -43,6 +43,15 @@
 
 * Stale entry above: "MPCState: .X, .U, .t instead of states, controls" — `MPCState` is gone, split into `BoundaryConditions` + `WarmStart` + the `MPC` driver. Re-aim it at `MPC`'s accessors or drop it.
 
+* Explore next-generation general sparse QP solvers (PIQP, ProxSuite) as drop-in alternatives to OSQP
+  * PIQP (Proximal Interior Point QP) and ProxSuite (PROXQP) converge in 10-25 iterations to high precision (1e-8) where OSQP's ADMM requires hundreds of iterations.
+  * Evaluate as an alternative Backend for full-space Transcription over the flat Primal Vector (accepting CSC matrices), preserving canonical dual/multiplier recovery while reducing solve times on ill-conditioned subproblems.
+
+* Explore structure-exploiting optimal control QP solvers (HPIPM / BLASFEO, native Riccati QP sweep)
+  * Instead of flattening optimal control problems into monolithic CSC matrices, interface directly with stagewise dynamics matrices (A_k, B_k) and stage costs (Q_k, R_k, S_k).
+  * HPIPM exploits block-tridiagonal KKT structure via Riccati-based IPM with AVX2/AVX-512 microkernels, targeting sub-millisecond (50-500 us) solve times for receding-horizon MPC.
+  * Compare against a pure JAX discrete Riccati backward-forward pass for linear-quadratic subproblems.
+
 * Cartpole swing-up benchmark does not converge at its default configuration
   * `cartpole_swingup_benchmark()` solved one-shot exits `MAX_ITERATIONS_OUTER` after 9 outer
     iterations with a max violation of 0.908 — the cart position bound is wide open, not merely
