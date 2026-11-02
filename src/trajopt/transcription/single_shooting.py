@@ -17,10 +17,17 @@ from trajopt.transcription.layout import (
     _evaluator_bounds,
     _trajectory_to_z,
     _z_to_trajectory,
+    blocked_control_bounds,
     compute_constraint_violation,
+    expand_controls,
     parse_solver_initial_state,
+    reduce_controls,
 )
-from trajopt.transcription.result import split_bound_duals, warm_start_duals
+from trajopt.transcription.result import (
+    constraint_row_count,
+    split_bound_duals,
+    warm_start_duals,
+)
 
 _SUCCESS_STATUSES = {0, 1}  # Ipopt Solve_Succeeded and Solved_To_Acceptable_Level
 _EMPTY = np.zeros(0, dtype=np.float64)
@@ -33,10 +40,13 @@ def _shooting_rollout(
     t0: float | jax.Array,
     dt: float | jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Roll out states from x0 and a flat control vector, returning (X, U, t)."""
+    """Roll out states from x0 and a flat block control vector, returning (X, U, t)."""
     N = int(problem.N)
     m = int(problem.model.m)
-    U = u.reshape((N - 1, m))
+    b = int(problem.control_block_steps)
+    B = (N - 1) // b
+    U_blk = u.reshape((B, m))
+    U = expand_controls(U_blk, b)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
     t_arr = t0 + jnp.concatenate([jnp.zeros(1, dtype=u.dtype), jnp.cumsum(dt_arr)])
     X = rollout_states(problem.model, x0, U, t=t_arr, dt=dt_arr)
@@ -108,7 +118,7 @@ def eval_grad_f(
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
 ) -> jax.Array:
-    """Evaluate objective gradient nabla J(u) of shape ((N-1)*m,)."""
+    """Evaluate objective gradient nabla J(u) of shape (B * m,)."""
     return jax.grad(lambda u_: _cost_fn(problem, u_, x0, t0, dt))(u)
 
 
@@ -134,7 +144,7 @@ def eval_jac_g(  # noqa: PLR0913, PLR0917 -- Jacobian callback takes 6 arguments
     dt: float | jax.Array = 0.05,
     xf: jax.Array | None = None,
 ) -> jax.Array:
-    """Evaluate dense constraint Jacobian values of shape (P_user * (N-1) * m,)."""
+    """Evaluate dense constraint Jacobian values of shape (P_user * B * m,)."""
     return jax.jacrev(lambda u_: _constraints_fn(problem, u_, x0, t0, dt, xf=xf))(u).reshape(-1)
 
 
@@ -150,7 +160,7 @@ def eval_h(  # noqa: PLR0913, PLR0917 -- Hessian callback takes 8 arguments
     xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the dense Lagrangian Hessian w.r.t. u."""
-    n_u = (int(problem.N) - 1) * int(problem.model.m)
+    n_u, _ = single_shooting_dimensions(problem)
     p_user = int(sum(problem.constraints.p))
     lam_vec = jnp.zeros(p_user, dtype=u.dtype) if lam is None else jnp.asarray(lam, dtype=u.dtype)
 
@@ -165,8 +175,10 @@ def eval_h(  # noqa: PLR0913, PLR0917 -- Hessian callback takes 8 arguments
 
 
 def single_shooting_dimensions(problem: Problem) -> tuple[int, int]:
-    """Return the single-shooting NLP's primal and constraint row counts (n_u, p_user)."""
-    n_u = (int(problem.N) - 1) * int(problem.model.m)
+    """Return the single-shooting NLP's Primal Vector and constraint row counts (n_u, p_user)."""
+    b = int(problem.control_block_steps)
+    B = (int(problem.N) - 1) // b
+    n_u = B * int(problem.model.m)
     p_user = int(sum(problem.constraints.p))
     return n_u, p_user
 
@@ -205,7 +217,11 @@ def _constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
-    """Return control-only primal bounds zL <= u <= zU of shape ((N-1)*m,)."""
+    """Return control-only primal bounds zL <= u <= zU of shape (B * m,)."""
+    b = int(problem.control_block_steps)
+    if b > 1:
+        block_u_l, block_u_u = blocked_control_bounds(problem)
+        return block_u_l.reshape(-1), block_u_u.reshape(-1)
     _, _, u_lower, u_upper = problem.constraints.primal_bounds()
     return u_lower.reshape(-1), u_upper.reshape(-1)
 
@@ -561,13 +577,14 @@ class SingleShooting:
         _validate_supported_constraints(problem)
 
         N = int(problem.N)
-        m = int(problem.model.m)
+        b = int(problem.control_block_steps)
 
         x0_arr, t0_arr, dt_arr, xf_val, _ = parse_solver_initial_state(problem, bc, ws)
         problem = retarget_problem(problem, bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
 
-        u0 = np.asarray(ws.unpack(problem)[1], dtype=np.float64).reshape(-1)
+        _, U_guess = ws.unpack(problem)
+        u0 = np.asarray(reduce_controls(U_guess, b), dtype=np.float64).reshape(-1)
         z_lower, z_upper = _primal_bounds(problem)
         g_lower, g_upper = _constraint_bounds(problem)
 
@@ -588,27 +605,59 @@ class SingleShooting:
         if self.hessian == "lbfgs":
             options.setdefault("hessian_approximation", "limited-memory")
 
-        lam_user0, mult_u_l0, mult_u_u0 = _extract_retained_warm_start_duals(problem, ws)
         solve_kwargs: dict[str, Any] = {}
-        if mult_u_l0 is not None and mult_u_u0 is not None:
-            options.setdefault("warm_start_init_point", "yes")
-            options.setdefault("warm_start_bound_push", 1e-9)
-            options.setdefault("warm_start_mult_bound_push", 1e-9)
-            solve_kwargs["zl"] = mult_u_l0
-            solve_kwargs["zu"] = mult_u_u0
-            if len(g_lower) > 0 and lam_user0 is not None:
-                solve_kwargs["lagrange"] = lam_user0
+        if b == 1:
+            lam_user0, mult_u_l0, mult_u_u0 = _extract_retained_warm_start_duals(problem, ws)
+            if mult_u_l0 is not None and mult_u_u0 is not None:
+                options.setdefault("warm_start_init_point", "yes")
+                options.setdefault("warm_start_bound_push", 1e-9)
+                options.setdefault("warm_start_mult_bound_push", 1e-9)
+                solve_kwargs["zl"] = mult_u_l0
+                solve_kwargs["zu"] = mult_u_u0
+                if len(g_lower) > 0 and lam_user0 is not None:
+                    solve_kwargs["lagrange"] = lam_user0
 
         for key, value in options.items():
             nlp.add_option(key, value)
 
         u_opt, info = nlp.solve(u0, **solve_kwargs)
+        return self._build_result(
+            problem,
+            cb,
+            u_opt,
+            info,
+            x0_arr=x0_arr,
+            t0_arr=t0_arr,
+            dt_arr=dt_arr,
+            xf_val=xf_val,
+        )
+
+    def _build_result(  # noqa: PLR0913 -- packaging result needs solve metadata
+        self,
+        problem: Problem,
+        cb: _SingleShootingCallback,
+        u_opt: np.ndarray,
+        info: dict[str, Any],
+        *,
+        x0_arr: jax.Array,
+        t0_arr: jax.Array,
+        dt_arr: jax.Array,
+        xf_val: jax.Array | None,
+    ) -> IpoptResult:
+        """Expand optimal block controls, roll out native states, and package canonical IpoptResult."""
+        N = int(problem.N)
+        b = int(problem.control_block_steps)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+        B = (N - 1) // b
+
         status = int(info.get("status", -1))
         success = status in _SUCCESS_STATUSES
         message = str(info.get("status_msg", ""))
         cost_val = float(info.get("obj_val", cb.objective(u_opt)))
 
-        U_opt = jnp.asarray(u_opt, dtype=jnp.float64).reshape((N - 1, m))
+        U_blk_opt = jnp.asarray(u_opt, dtype=jnp.float64).reshape((B, m))
+        U_opt = expand_controls(U_blk_opt, b)
         t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
         X_opt = rollout_states(problem.model, x0_arr, U_opt, t=t_opt, dt=dt_arr)
 
@@ -625,11 +674,17 @@ class SingleShooting:
             xf=xf_val,
         )
 
-        lam_out, mu_out = _recover_canonical_multipliers(
-            problem,
-            opt_traj,
-            info,
-        )
+        if b > 1:
+            P_total = constraint_row_count(problem)
+            nz_primal = N * n + (N - 1) * m
+            lam_out = np.zeros(P_total, dtype=np.float64)
+            mu_out = np.zeros(nz_primal, dtype=np.float64)
+        else:
+            lam_out, mu_out = _recover_canonical_multipliers(
+                problem,
+                opt_traj,
+                info,
+            )
 
         return IpoptResult(
             trajectory=opt_traj,
