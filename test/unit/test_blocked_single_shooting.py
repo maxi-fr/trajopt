@@ -204,7 +204,9 @@ def test_callback_jacobian_and_hessian_matches_finite_differences() -> None:
         LinearConstraint(n=n, m=m, A=jnp.array([[1.0, 0.0, 0.0]]), b=jnp.array([0.5])),
         range(H),
     )
-    problem = Problem(model=model, obj=obj, constraints=constraints, N=N, dt=0.05, integrator=RK4(), control_block_steps=b)
+    problem = Problem(
+        model=model, obj=obj, constraints=constraints, N=N, dt=0.05, integrator=RK4(), control_block_steps=b
+    )
 
     x0 = jnp.array([0.2, -0.1])
     cb = SingleShooting(Ipopt(), hessian="dense").transcription_callback(problem, x0, jnp.array(0.0), jnp.array(0.05))

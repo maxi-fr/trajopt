@@ -853,7 +853,9 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    P_total = n + H * n + sum(k.p for k in retained_evaluators) + sum(c.p for c in problem.constraints.horizon_constraints)
+    P_total = (
+        n + H * n + sum(k.p for k in retained_evaluators) + sum(c.p for c in problem.constraints.horizon_constraints)
+    )
     lam_vec = jnp.zeros(P_total, dtype=z.dtype) if lam is None else jnp.asarray(lam, dtype=z.dtype)
 
     offset = n

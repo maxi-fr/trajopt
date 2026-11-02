@@ -314,9 +314,7 @@ class Problem(eqx.Module):
         control_block_steps: int = 1,
     ) -> None:
         """Build a Problem with structural control blocking and validate binary control coordinates."""
-        if isinstance(control_block_steps, (bool, np.bool_)) or not isinstance(
-            control_block_steps, (int, np.integer)
-        ):
+        if isinstance(control_block_steps, (bool, np.bool_)) or not isinstance(control_block_steps, (int, np.integer)):
             msg = f"control_block_steps must be a positive integer, got {type(control_block_steps).__name__}."
             raise TypeError(msg)
         b = int(control_block_steps)

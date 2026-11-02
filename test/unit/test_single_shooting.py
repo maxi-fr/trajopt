@@ -320,4 +320,3 @@ def test_mpc_solve_validates_multiplier_dimensions() -> None:
     mpc2 = MPC(prob, BadBoundSolver(), x0=x0, xf=xf)
     with pytest.raises(ValueError, match="Multiplier mu has length 5, expected canonical Primal Vector length"):
         mpc2.solve()
-

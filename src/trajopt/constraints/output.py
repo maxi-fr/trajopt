@@ -46,9 +46,11 @@ class OutputConstraint(Constraint):
         self._uses_state = constraint.uses_state() and model.output_uses_state()
 
         from trajopt.models.affine import AffineModel  # noqa: PLC0415 -- local import
+
         inner_key = constraint.structural_key()
         if isinstance(model, AffineModel):
             import numpy as np  # noqa: PLC0415 -- local import
+
             d_bytes = np.asarray(model.D).tobytes() if model.D is not None else b""
             dy_bytes = np.asarray(model.dy).tobytes() if model.dy is not None else b""
             self._structural_key = (

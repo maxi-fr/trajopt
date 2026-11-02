@@ -464,6 +464,7 @@ def nlp_constraint_row_count(problem: Problem) -> int:
     b = int(problem.control_block_steps)
     if b == 1:
         from trajopt.transcription.result import constraint_row_count  # noqa: PLC0415 -- local import
+
         return constraint_row_count(problem)
 
     n = int(problem.model.n)

@@ -16,12 +16,7 @@ def validate_homotopy_parameters(
     binary_tolerance: float,
 ) -> None:
     """Validate binary continuation parameters for positive beta/tolerance, growth > 1, and at least two passes."""
-    if (
-        beta_initial <= 0
-        or beta_growth <= 1
-        or max_passes < _MIN_HOMOTOPY_PASSES
-        or binary_tolerance <= 0
-    ):
+    if beta_initial <= 0 or beta_growth <= 1 or max_passes < _MIN_HOMOTOPY_PASSES or binary_tolerance <= 0:
         msg = "Binary homotopy needs positive beta/tolerance, growth > 1, and at least two passes."
         raise ValueError(msg)
 
@@ -68,11 +63,7 @@ def solve_continuation_passes(  # noqa: PLR0913 -- continuation loop coordinates
         lam0 = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
         mult_x_u_arr = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
         mult_x_l_arr = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
-        mu0 = (
-            mult_x_u_arr - mult_x_l_arr
-            if len(mult_x_u_arr) == len(z0) and len(mult_x_l_arr) == len(z0)
-            else None
-        )
+        mu0 = mult_x_u_arr - mult_x_l_arr if len(mult_x_u_arr) == len(z0) and len(mult_x_l_arr) == len(z0) else None
 
         a = z0[binary_indices]
         binary_distance = float(np.max(np.minimum(np.abs(a), np.abs(1 - a)))) if len(a) else 0.0

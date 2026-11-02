@@ -103,7 +103,9 @@ def test_warm_start_reduction_and_expansion() -> None:
     assert float(U_reduced[1, 0]) == 4.0  # U_native[3] is 4.0
 
     dt_arr = jnp.full(H, 0.1)
-    ws = WarmStart.cold(problem, X_native[0], initial_trajectory=Trajectory(X=X_native, U=U_native, t=jnp.zeros(N), dt=dt_arr))
+    ws = WarmStart.cold(
+        problem, X_native[0], initial_trajectory=Trajectory(X=X_native, U=U_native, t=jnp.zeros(N), dt=dt_arr)
+    )
     bc = BoundaryConditions(x0=X_native[0], t0=jnp.array(0.0))
     prog = Program(problem, solver=Ipopt(options={"print_level": 0, "max_iter": 50}))
     res = prog.solve(bc, ws)
@@ -379,7 +381,9 @@ def test_blocked_binary_homotopy_multiple_shooting() -> None:
     assert len(cb.binary_z_indices) == B
 
     x0 = jnp.array([0.05, 0.0])
-    res = MPC(problem, Ipopt(options={"print_level": 0}, beta_initial=0.1, beta_growth=10.0, max_passes=3), x0=x0).solve()
+    res = MPC(
+        problem, Ipopt(options={"print_level": 0}, beta_initial=0.1, beta_growth=10.0, max_passes=3), x0=x0
+    ).solve()
 
     assert res.trajectory.X.shape == (N, n)
     assert res.trajectory.U.shape == (H, m)
@@ -439,5 +443,3 @@ def test_blocked_multiple_shooting_with_linear_horizon_constraints() -> None:
 
     res = MPC(prob, Ipopt(options={"print_level": 0}), x0=jnp.zeros(n)).solve()
     assert res.success
-
-

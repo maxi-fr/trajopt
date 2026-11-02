@@ -813,8 +813,7 @@ class SingleShooting:
         )
 
         success = status in _SUCCESS_STATUSES and (
-            not problem.binary_control_indices
-            or (pass_count > 1 and binary_distance <= self.solver.binary_tolerance)
+            not problem.binary_control_indices or (pass_count > 1 and binary_distance <= self.solver.binary_tolerance)
         )
         if problem.binary_control_indices:
             feasibility_tol = float(self.solver.options.get("constr_viol_tol", 1e-4))

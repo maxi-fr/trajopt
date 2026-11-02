@@ -235,6 +235,7 @@ def test_indexed_and_output_constraint_classification() -> None:
 
 def test_custom_and_epigraph_constraint_classification() -> None:
     """Custom constraints default conservatively and epigraph constraints classify as input-only."""
+
     # Custom constraint defaults to uses_state() -> True
     class ArbitraryConstraint(Constraint):
         def __init__(self, n: int, m: int, p: int) -> None:
