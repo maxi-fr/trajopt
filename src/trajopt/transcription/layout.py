@@ -184,7 +184,7 @@ def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     return zL.astype(np.float64), zU.astype(np.float64)
 
 
-def _cone_bounds(cone: object, p: int) -> tuple[np.ndarray, np.ndarray]:
+def _cone_bounds(cone: object, p: int, *, strict: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Compute (gL, gU) bounds corresponding to an interval Cone constraint."""
     if isinstance(cone, NegativeOrthant):
         return np.full(p, -np.inf, dtype=np.float64), np.zeros(p, dtype=np.float64)
@@ -193,6 +193,8 @@ def _cone_bounds(cone: object, p: int) -> tuple[np.ndarray, np.ndarray]:
     if isinstance(cone, IdentityCone):
         return np.full(p, -np.inf, dtype=np.float64), np.full(p, np.inf, dtype=np.float64)
     if isinstance(cone, ZeroCone):
+        return np.zeros(p, dtype=np.float64), np.zeros(p, dtype=np.float64)
+    if not strict:
         return np.zeros(p, dtype=np.float64), np.zeros(p, dtype=np.float64)
     msg = f"Cannot express non-interval cone {type(cone).__name__} as bounds."
     raise ValueError(msg)
@@ -297,12 +299,16 @@ def nlp_primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     return zL.astype(np.float64), zU.astype(np.float64)
 
 
-def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def _evaluator_bounds(
+    evaluator: BuiltKnotConstraint,
+    *,
+    strict: bool = False,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Compute (gL, gU) arrays for all constraints in a knot evaluator."""
     gL_list: list[np.ndarray] = []
     gU_list: list[np.ndarray] = []
     for c in evaluator.constraints:
-        lo, hi = _cone_bounds(c.cone, int(c.p))
+        lo, hi = _cone_bounds(c.cone, int(c.p), strict=strict)
         gL_list.append(lo)
         gU_list.append(hi)
     return gL_list, gU_list
@@ -351,7 +357,7 @@ def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
         gU_list.extend(hi_term)
 
     for con in problem.constraints.horizon_constraints:
-        lo, hi = _cone_bounds(con.cone, con.p)
+        lo, hi = _cone_bounds(con.cone, con.p, strict=False)
         gL_list.append(lo)
         gU_list.append(hi)
 
@@ -450,7 +456,7 @@ def nlp_constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
 
     # 4. Trailing linear Horizon rows
     for con in problem.constraints.horizon_constraints:
-        lo, hi = _cone_bounds(con.cone, con.p)
+        lo, hi = _cone_bounds(con.cone, con.p, strict=False)
         gL_list.append(lo)
         gU_list.append(hi)
 
