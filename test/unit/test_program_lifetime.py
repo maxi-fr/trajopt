@@ -35,7 +35,7 @@ def _make_problem(
     binary: bool = False,
     with_goal: bool = False,
 ) -> Problem:
-    """Build a linear AffineModel Problem with specified Horizon and control blocking."""
+    """Build a linear AffineModel Problem with specified Horizon and Control Blocking."""
     A = jnp.array([[1.0, 0.1], [0.0, 1.0]])
     B = jnp.array([[0.0], [0.1]])
     model = AffineModel(A=A, B=B)
@@ -119,10 +119,9 @@ def test_program_retains_single_single_shooting_handle_across_mpc_cycles(
     res1 = mpc.solve()
     assert res1.success
     assert allocations == 1
-    assert "single_shooting" in mpc.program.handles or "ipopt" in mpc.program.handles
+    assert "single_shooting" in mpc.program.handles
 
-    handle = mpc.program.handles.get("single_shooting") or mpc.program.handles.get("ipopt")
-    assert handle is not None
+    handle = mpc.program.handles["single_shooting"]
     initial_nlp = handle.nlp
 
     for step in range(1, 4):
@@ -131,8 +130,7 @@ def test_program_retains_single_single_shooting_handle_across_mpc_cycles(
         res = mpc.solve()
         assert res.success
         assert allocations == 1
-        current_handle = mpc.program.handles.get("single_shooting") or mpc.program.handles.get("ipopt")
-        assert current_handle is not None
+        current_handle = mpc.program.handles["single_shooting"]
         assert current_handle.nlp is initial_nlp
 
 

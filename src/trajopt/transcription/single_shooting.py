@@ -472,6 +472,7 @@ class _SingleShootingCallback:
         dt: jax.Array,
         xf: jax.Array | None = None,
     ) -> None:
+        """Initialize single-shooting callback state and binary coordinate indices."""
         self.problem = problem
         self.x0 = x0
         self.t0 = t0
@@ -505,7 +506,7 @@ class _SingleShootingCallback:
         dt: jax.Array,
         xf: jax.Array | None = None,
     ) -> None:
-        """Update dynamic problem and Boundary Conditions and reset per-solve state."""
+        """Update dynamic Problem and Boundary Conditions and reset per-solve state."""
         self.problem = problem
         self.x0 = x0
         self.t0 = t0
@@ -516,7 +517,7 @@ class _SingleShootingCallback:
 
     @property
     def binary_indices(self) -> np.ndarray:
-        """Return indices of binary decision variables in the reduced control vector."""
+        """Return indices of binary coordinates in the reduced control vector."""
         return self.binary_u_indices
 
     def intermediate(self, *args: object) -> bool:
@@ -526,7 +527,7 @@ class _SingleShootingCallback:
         return True
 
     def objective(self, u: np.ndarray) -> float:
-        """Evaluate scalar objective value J(u) plus binary homotopy penalty."""
+        """Evaluate scalar Objective value J(u) plus binary homotopy penalty."""
         b = int(self.problem.control_block_steps)
         a = u[self.binary_u_indices]
         cost = float(eval_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt))
@@ -535,7 +536,7 @@ class _SingleShootingCallback:
         return cost
 
     def gradient(self, u: np.ndarray) -> np.ndarray:
-        """Evaluate objective gradient nabla J(u) plus binary penalty gradient."""
+        """Evaluate Objective gradient nabla J(u) plus binary penalty gradient."""
         b = int(self.problem.control_block_steps)
         grad = np.asarray(
             eval_grad_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt),
@@ -605,7 +606,7 @@ class SingleShootingHandle:
 
 @dataclass(frozen=True)
 class SingleShooting:
-    """Single-shooting transcription: solve over controls only, with states recovered by rollout.
+    """Single-shooting Transcription: solve over controls only, with states recovered by Rollout.
 
     Parameters
     ----------
@@ -735,7 +736,6 @@ class SingleShooting:
                 nlp.add_option(key, value)
             handle = SingleShootingHandle(nlp=nlp, cb=cb)
             program.handles["single_shooting"] = handle
-            program.handles.setdefault("ipopt", handle)
         else:
             cb = handle.cb
             nlp = handle.nlp

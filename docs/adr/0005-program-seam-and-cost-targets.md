@@ -69,7 +69,7 @@ possible, and batching a *solve* is what is lost.
 - **A `Program` field must never become a traced value, and a `BoundaryConditions` field must never
   become static.** Either mistake reintroduces per-step recompilation, silently — nothing fails,
   it just gets slow. The compile-count test is the only thing that catches it.
-- **`Program.handles` gives eager backends somewhere to keep live state.** OSQP uses it to reuse a
+- **`Program.handles` gives eager Backends somewhere to keep live state.** OSQP uses it to reuse a
   factorization across steps rather than setting one up each time. `Ipopt` and `SingleShooting` retain
   their external `cyipopt.Problem` handle and callback wrapper here across MPC cycles and continuation passes.
 - **A goal-carrying objective built the old way now regulates to the origin instead.** There is no

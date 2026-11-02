@@ -201,10 +201,12 @@ def test_single_shooting_penalty_finite_differences_unblocked_and_blocked() -> N
 
 
 def test_continuation_schedule_dual_carry_and_abort_on_failure() -> None:
-    """Continuation carries dual iterates, follows schedule, and aborts immediately on failed pass."""
+    """Continuation carries Multiplier iterates, follows schedule, and aborts immediately on failed pass."""
     pytest.importorskip("cyipopt")
 
     class MockNLP:
+        """Mock cyipopt Problem recording solve options and passes."""
+
         def __init__(self, fail_on_pass: int | None = None) -> None:
             self.options: dict[str, Any] = {}
             self.pass_calls: list[dict[str, Any]] = []
@@ -229,6 +231,8 @@ def test_continuation_schedule_dual_carry_and_abort_on_failure() -> None:
             return z_ret, info
 
     class MockCB:
+        """Mock callback tracking homotopy beta."""
+
         def __init__(self) -> None:
             self.beta = 0.0
 

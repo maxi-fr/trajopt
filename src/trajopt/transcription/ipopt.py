@@ -140,7 +140,7 @@ class _IpoptCallback:
         dt: float | jax.Array,
         xf: jax.Array | None = None,
     ) -> None:
-        """Update dynamic problem and Boundary Conditions and reset per-solve state."""
+        """Update dynamic Problem and Boundary Conditions and reset per-solve state."""
         self.problem = problem
         self.x0 = x0
         self.t0 = t0
@@ -151,7 +151,7 @@ class _IpoptCallback:
 
     @property
     def binary_indices(self) -> np.ndarray:
-        """Return indices of binary decision variables in the NLP primal vector."""
+        """Return indices of binary coordinates in the NLP Primal Vector."""
         return self.binary_z_indices
 
     def intermediate(self, *args: object) -> bool:
@@ -232,7 +232,7 @@ class IpoptHandle:
 
 @dataclass(frozen=True)
 class Ipopt:
-    """Ipopt nonlinear interior-point solver backend, solving the nonlinear problem directly.
+    """Ipopt nonlinear interior-point solver Backend, solving the nonlinear problem directly.
 
     Parameters
     ----------
@@ -270,7 +270,7 @@ class Ipopt:
         lam0: np.ndarray | None,
         mu0: np.ndarray | None,
     ) -> tuple[np.ndarray, dict[str, Any], int, float]:
-        """Continue from the relaxation through penalty passes, carrying primal and dual iterates."""
+        """Continue from the relaxation through penalty passes, carrying Primal Vector and Multipliers."""
         return solve_continuation_passes(
             nlp,
             cb,
