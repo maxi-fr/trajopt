@@ -76,7 +76,7 @@ class GoalConstraint(StateConstraint):
         return x[self.inds_arr] - target
 
     def is_time_independent(self) -> bool:
-        """GoalConstraint defect does not depend on timestamp t."""
+        """GoalConstraint residual does not depend on timestamp t."""
         return True
 
 
@@ -141,13 +141,13 @@ class LinearConstraint(StageConstraint):
 
         A_np = np.asarray(A)
         b_np = np.asarray(b)
-        uses_s = False
-        uses_c = False
+        uses_state = False
+        uses_control = False
         for col_idx, i in enumerate(inds_tuple):
             if i < n_int and np.any(A_np[:, col_idx] != 0):
-                uses_s = True
+                uses_state = True
             if i >= n_int and np.any(A_np[:, col_idx] != 0):
-                uses_c = True
+                uses_control = True
 
         p = int(A_arr.shape[0])
         cone = NegativeOrthant() if sense is None else sense
@@ -156,8 +156,8 @@ class LinearConstraint(StageConstraint):
         self.b = b_arr
         self.inds = inds_tuple
         self.inds_arr = jnp.asarray(inds_tuple, dtype=int)
-        self._uses_state = uses_s
-        self._uses_control = uses_c
+        self._uses_state = uses_state
+        self._uses_control = uses_control
         self._structural_key = (
             "LinearConstraint",
             n_int,

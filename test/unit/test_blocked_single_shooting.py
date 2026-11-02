@@ -261,7 +261,7 @@ def test_callback_jacobian_and_hessian_matches_finite_differences() -> None:
 
 
 def test_zero_canonical_multipliers_for_b_gt_1() -> None:
-    """For b > 1, SingleShooting returns canonical-sized zero lam and mu arrays and does not consume prior duals."""
+    """For b > 1, SingleShooting returns canonical-sized zero lam and mu arrays and does not consume prior Multipliers."""
     pytest.importorskip("cyipopt")
 
     N, b, n, m = 7, 3, 2, 1
@@ -275,7 +275,7 @@ def test_zero_canonical_multipliers_for_b_gt_1() -> None:
     nz_primal = N * n + H * m
     seeded_lam = jnp.ones(P_total, dtype=jnp.float64) * 5.0
     seeded_mu = jnp.ones(nz_primal, dtype=jnp.float64) * 3.0
-    mpc._ws = WarmStart(Z=mpc.warm_start.Z, lam=seeded_lam, mu=seeded_mu)  # noqa: SLF001 -- seeding test multipliers
+    mpc._ws = WarmStart(Z=mpc.warm_start.Z, lam=seeded_lam, mu=seeded_mu)  # noqa: SLF001 -- seeding test Multipliers
 
     res = mpc.solve()
     assert res.success
@@ -290,7 +290,7 @@ def test_zero_canonical_multipliers_for_b_gt_1() -> None:
 
 
 def test_multiplier_behavior_b_eq_1_preserved() -> None:
-    """For b = 1, adjoint-recovered canonical Multipliers and dual warm starting are preserved."""
+    """For b = 1, adjoint-recovered canonical Multipliers and Multiplier warm starting are preserved."""
     pytest.importorskip("cyipopt")
 
     N, n, m = 7, 2, 1
@@ -390,7 +390,7 @@ def test_numerical_agreement_with_multiple_shooting() -> None:
     assert x2_dense <= 0.8951
     assert abs(x2_dense - 0.895) < 1e-4  # active
 
-    # Single shooting satisfies dynamics defects to machine precision
+    # Single shooting satisfies dynamics Defects to machine precision
     rolled = problem.model.rollout(res_ss_dense.trajectory)
     np.testing.assert_allclose(rolled.X, res_ss_dense.trajectory.X, atol=1e-12)
     rolled_lbfgs = problem.model.rollout(res_ss_lbfgs.trajectory)

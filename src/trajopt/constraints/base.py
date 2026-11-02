@@ -68,11 +68,7 @@ class Constraint(ConstraintShape):
         return ("Constraint", id(self))
 
     def stage_vector(self, x: jax.Array | None, u: jax.Array | None) -> jax.Array:
-        """Assemble the gather source z = [x; u] of shape (n + m,), or x of shape (n,) alone.
-
-        Constraints that index into z must go through this so that a constraint reaching
-        into the control block can never silently gather out of range when u is absent.
-        """
+        """Assemble gather source z = [x; u] of shape (n + m,), or x of shape (n,), padding zeros when x is absent and unused."""
         if x is None:
             if not self.uses_state():
                 x = jnp.zeros(self.n, dtype=u.dtype if u is not None else jnp.float64)

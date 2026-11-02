@@ -308,7 +308,7 @@ def test_kirchhoff_deduplication_in_both_shooting_formulations() -> None:
 
     # 2. Check NLP constraint row count
     nlp_rows = nlp_constraint_row_count(prob)
-    # n (init) + H * n (defects) + B (retained kirchhoff)
+    # n (init) + H * n (Defects) + B (retained kirchhoff)
     assert nlp_rows == n + H * n + B
     gL, gU = nlp_constraint_bounds(prob)
     assert len(gL) == nlp_rows
@@ -462,7 +462,7 @@ def test_single_shooting_horizon_constraint_finite_differences() -> None:
 
     n_u, p_user = single_shooting_dimensions(prob)
     assert n_u == B * m
-    assert p_user == 1  # 1 horizon constraint row
+    assert p_user == 1  # 1 Horizon constraint row
 
     u = jnp.array([0.4, -0.6])
 
@@ -482,6 +482,10 @@ def test_single_shooting_horizon_constraint_finite_differences() -> None:
     lam = jnp.array([0.7])
     obj_factor = 1.2
     h_ad = eval_h(prob, u, x0, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam)
+
+    # Verify unconstrained Hessian (lam=None) sizes correctly and evaluates without error
+    h_unconstrained = eval_h(prob, u, x0, t0=t0, dt=dt, obj_factor=obj_factor, lam=None)
+    assert len(h_unconstrained) == len(u) * (len(u) + 1) // 2
 
     # Gradient of Lagrangian
     def lagrangian(u_vec: jax.Array) -> jax.Array:

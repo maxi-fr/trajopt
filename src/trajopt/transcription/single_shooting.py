@@ -123,7 +123,7 @@ def eval_grad_f(
     t0: float | jax.Array = 0.0,
     dt: float | jax.Array = 0.05,
 ) -> jax.Array:
-    """Evaluate objective gradient nabla J(u) of shape (B * m,)."""
+    """Evaluate Objective gradient nabla J(u) of shape (B * m,)."""
     return jax.grad(lambda u_: _cost_fn(problem, u_, x0, t0, dt))(u)
 
 
@@ -165,8 +165,7 @@ def eval_h(  # noqa: PLR0913, PLR0917 -- Hessian callback takes 8 arguments
     xf: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the dense Lagrangian Hessian w.r.t. u."""
-    n_u, _ = single_shooting_dimensions(problem)
-    p_user = int(sum(problem.constraints.p))
+    n_u, p_user = single_shooting_dimensions(problem)
     lam_vec = jnp.zeros(p_user, dtype=u.dtype) if lam is None else jnp.asarray(lam, dtype=u.dtype)
 
     def lagrangian(u_: jax.Array) -> jax.Array:
@@ -306,14 +305,14 @@ def _unpack_retained_multipliers(
             lam_c.append(jnp.asarray(mult_g_arr[offset : offset + pk], dtype=jnp.float64))
             offset += pk
         else:
-            lam_c.append(jnp.zeros(0, dtype=jnp.float64))
+            lam_c.append(jnp.zeros(pk, dtype=jnp.float64))
 
     p_term = knot_evaluators[N - 1].p if len(knot_evaluators) > N - 1 else 0
     if p_term > 0 and offset + p_term <= len(mult_g_arr):
         lam_c.append(jnp.asarray(mult_g_arr[offset : offset + p_term], dtype=jnp.float64))
         offset += p_term
     else:
-        lam_c.append(jnp.zeros(0, dtype=jnp.float64))
+        lam_c.append(jnp.zeros(p_term, dtype=jnp.float64))
 
     p_hz = sum(con.p for con in horizon_constraints)
     if p_hz > 0 and offset + p_hz <= len(mult_g_arr):
@@ -577,7 +576,7 @@ class SingleShooting:
         dt: jax.Array,
         xf: jax.Array | None = None,
     ) -> _SingleShootingCallback:
-        """Assemble the callback wrapper connecting the single-shooting problem to cyipopt."""
+        """Assemble callback wrapper connecting single-shooting Problem to cyipopt."""
         return _SingleShootingCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:

@@ -90,7 +90,7 @@ class OutputConstraint(Constraint):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate the wrapped constraint of shape (p,) on output y = g(x, u, t)."""
+        """Evaluate wrapped constraint of shape (p,) on model output y = g(x, u, t)."""
         if x is None:
             if not self.uses_state():
                 x = jnp.zeros(self.n, dtype=u.dtype if u is not None else jnp.float64)

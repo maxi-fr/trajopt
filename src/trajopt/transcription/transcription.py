@@ -531,7 +531,7 @@ def _nlp_constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     *,
     xf: jax.Array | None = None,
 ) -> jax.Array:
-    """Evaluate constraint vector c(z_nlp) of shape (P,) without Jacobians."""
+    """Evaluate retained NLP constraint vector c(z_nlp) of shape (P,) without Jacobians."""
     b = int(problem.control_block_steps)
     if b == 1:
         return _constraints_fn(problem, z, x0, t0, dt, xf=xf)
@@ -853,7 +853,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    P_total = n + H * n + sum(k.p for k in retained_evaluators)
+    P_total = n + H * n + sum(k.p for k in retained_evaluators) + sum(c.p for c in problem.constraints.horizon_constraints)
     lam_vec = jnp.zeros(P_total, dtype=z.dtype) if lam is None else jnp.asarray(lam, dtype=z.dtype)
 
     offset = n

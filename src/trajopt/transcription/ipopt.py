@@ -333,7 +333,6 @@ class Ipopt:
             t0_arr=t0_arr,
             dt_arr=dt_arr,
             xf_val=xf_val,
-            gL_len=len(gL),
         )
 
     def _build_result(  # noqa: PLR0913, PLR0917 -- unpack helper needs solve metadata
@@ -349,10 +348,8 @@ class Ipopt:
         t0_arr: jax.Array,
         dt_arr: jax.Array,
         xf_val: jax.Array | None,
-        gL_len: int,
     ) -> IpoptResult:
         """Expand optimal NLP iterate and package canonical IpoptResult."""
-        del gL_len
         N = int(problem.N)
         n = int(problem.model.n)
         m = int(problem.model.m)
