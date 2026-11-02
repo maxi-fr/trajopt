@@ -229,6 +229,7 @@ def _validate_single_shooting(problem: "Problem") -> None:
 
 def _validate_program_pairing(problem: "Problem", solver: "Solver") -> None:
     """Validate Problem and Solver pairing upfront before compilation or numerical work."""
+    from trajopt.transcription.homotopy import validate_homotopy_parameters  # noqa: PLC0415
     from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415
     from trajopt.transcription.layout import blocked_control_bounds  # noqa: PLC0415
     from trajopt.transcription.single_shooting import SingleShooting  # noqa: PLC0415
@@ -244,6 +245,15 @@ def _validate_program_pairing(problem: "Problem", solver: "Solver") -> None:
             msg = f"{type(solver).__name__} does not support binary controls or Horizon constraints."
             raise ValueError(msg)
         return
+
+    if problem.binary_control_indices:
+        target_ipopt = solver if is_ipopt else solver.solver
+        validate_homotopy_parameters(
+            target_ipopt.beta_initial,
+            target_ipopt.beta_growth,
+            target_ipopt.max_passes,
+            target_ipopt.binary_tolerance,
+        )
 
     _validate_cones(problem)
     if isinstance(solver, SingleShooting):

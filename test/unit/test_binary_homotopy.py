@@ -14,6 +14,7 @@ from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import compute_constraint_violation, constraint_bounds
 from trajopt.transcription.osqp import OSQP
+from trajopt.transcription.single_shooting import SingleShooting
 from trajopt.transcription.sparsity import jacobian_sparsity_pattern
 from trajopt.transcription.transcription import eval_g, eval_jac_g
 
@@ -87,6 +88,22 @@ def test_mpc_binary_homotopy_and_budget() -> None:
     assert limited.cost == pytest.approx(float(_problem(budget=1.0).obj.cost(limited.trajectory)))
 
 
+def test_single_shooting_binary_homotopy_and_budget() -> None:
+    """SingleShooting solves binary OCP and enforces Horizon budget under both Hessian modes."""
+    pytest.importorskip("cyipopt")
+    solver = Ipopt(options={"print_level": 0}, beta_initial=1.0)
+    for hessian in ("dense", "lbfgs"):
+        ss = SingleShooting(solver, hessian=hessian)  # type: ignore[arg-type]
+        unconstrained = MPC(_problem(), ss, x0=jnp.zeros(1)).solve()
+        limited = MPC(_problem(budget=1.0), ss, x0=jnp.zeros(1)).solve()
+        assert unconstrained.success
+        assert limited.success
+        np.testing.assert_allclose(np.asarray(unconstrained.trajectory.U), 1.0, atol=1e-4)
+        assert float(jnp.sum(limited.trajectory.U)) <= 1.0 + 1e-4
+        assert limited.info["binary_distance"] <= solver.binary_tolerance
+        assert limited.cost == pytest.approx(float(_problem(budget=1.0).obj.cost(limited.trajectory)))
+
+
 def test_pass_limit_keeps_fractional_primal() -> None:
     """Report failure without rounding when continuation ends before integrality."""
     pytest.importorskip("cyipopt")
@@ -120,6 +137,5 @@ def test_reference_keeps_linear_control_cost_and_shift() -> None:
 
 def test_unsupported_solver_rejects_binary_problem() -> None:
     """Reject binary declarations before an unsupported Backend solves a relaxation."""
-    mpc = MPC(_problem(), OSQP(), x0=jnp.zeros(1))
     with pytest.raises(ValueError, match="does not support"):
-        mpc.solve()
+        MPC(_problem(), OSQP(), x0=jnp.zeros(1))

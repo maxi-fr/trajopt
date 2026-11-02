@@ -9,6 +9,11 @@ import numpy as np
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
+from trajopt.transcription.homotopy import (
+    _SUCCESS_STATUSES,
+    solve_continuation_passes,
+    validate_homotopy_parameters,
+)
 from trajopt.transcription.layout import (
     _nlp_z_to_trajectory,
     _trajectory_to_nlp_z,
@@ -24,7 +29,6 @@ from trajopt.transcription.layout import (
 )
 from trajopt.transcription.result import (
     constraint_row_count,
-    split_bound_duals,
     warm_start_duals,
 )
 from trajopt.transcription.sparsity import (
@@ -40,9 +44,7 @@ from trajopt.transcription.transcription import (
     nlp_eval_jac_g,
 )
 
-_SUCCESS_STATUSES = {0, 1}  # 0: Solve_Succeeded, 1: Solved_To_Acceptable_Level
 _EMPTY = np.zeros(0, dtype=np.float64)
-_MIN_HOMOTOPY_PASSES = 2
 
 
 class IpoptResult(NamedTuple):
@@ -129,6 +131,11 @@ class _IpoptCallback:
         )
         self.beta = 0.0
         self.iteration_count = 0
+
+    @property
+    def binary_indices(self) -> np.ndarray:
+        """Return indices of binary decision variables in the NLP primal vector."""
+        return self.binary_z_indices
 
     def intermediate(self, *args: object) -> bool:
         """Track solver iteration counter from Ipopt."""
@@ -234,42 +241,29 @@ class Ipopt:
         mu0: np.ndarray | None,
     ) -> tuple[np.ndarray, dict[str, Any], int, float]:
         """Continue from the relaxation through penalty passes, carrying primal and dual iterates."""
-        n_passes = self.max_passes if len(cb.binary_z_indices) else 1
-        binary_distance = 0.0
-        for pass_index in range(n_passes):
-            cb.beta = 0.0 if pass_index == 0 else self.beta_initial * self.beta_growth ** (pass_index - 1)
-            if lam0 is not None and mu0 is not None:
-                nlp.add_option("warm_start_init_point", "yes")
-                nlp.add_option("warm_start_bound_push", 1e-9)
-                nlp.add_option("warm_start_mult_bound_push", 1e-9)
-                mult_x_L, mult_x_U = split_bound_duals(mu0)
-                z_opt, info = nlp.solve(z0, lagrange=lam0, zl=mult_x_L, zu=mult_x_U)
-            else:
-                z_opt, info = nlp.solve(z0)
-            z0 = np.asarray(z_opt, dtype=np.float64)
-            lam0 = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
-            mu0 = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64) - np.asarray(
-                info.get("mult_x_L", _EMPTY), dtype=np.float64
-            )
-            a = z0[cb.binary_z_indices]
-            binary_distance = float(np.max(np.minimum(np.abs(a), np.abs(1 - a)))) if len(a) else 0.0
-            if int(info.get("status", -1)) not in _SUCCESS_STATUSES:
-                break
-            if pass_index > 0 and binary_distance <= self.binary_tolerance:
-                break
-        return z0, dict(info), pass_index + 1, binary_distance
+        return solve_continuation_passes(
+            nlp,
+            cb,
+            z0,
+            lam0,
+            mu0,
+            binary_indices=cb.binary_z_indices,
+            beta_initial=self.beta_initial,
+            beta_growth=self.beta_growth,
+            max_passes=self.max_passes,
+            binary_tolerance=self.binary_tolerance,
+        )
 
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
         """Solve with Ipopt, continuing binary Problems from a relaxation to tolerance."""
         problem = program.problem
-        if problem.binary_control_indices and (
-            self.beta_initial <= 0
-            or self.beta_growth <= 1
-            or self.max_passes < _MIN_HOMOTOPY_PASSES
-            or self.binary_tolerance <= 0
-        ):
-            msg = "Binary homotopy needs positive beta/tolerance, growth > 1, and at least two passes."
-            raise ValueError(msg)
+        if problem.binary_control_indices:
+            validate_homotopy_parameters(
+                self.beta_initial,
+                self.beta_growth,
+                self.max_passes,
+                self.binary_tolerance,
+            )
         try:
             import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
         except ImportError as e:

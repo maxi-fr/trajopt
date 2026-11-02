@@ -1,5 +1,3 @@
-"""Single-shooting transcription: the NLP primal is the control trajectory alone."""
-
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -12,6 +10,11 @@ from trajopt.dynamics.rollout import rollout_states
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
+from trajopt.transcription.homotopy import (
+    _SUCCESS_STATUSES,
+    solve_continuation_passes,
+    validate_homotopy_parameters,
+)
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
     _cone_bounds,
@@ -27,11 +30,9 @@ from trajopt.transcription.layout import (
 )
 from trajopt.transcription.result import (
     constraint_row_count,
-    split_bound_duals,
     warm_start_duals,
 )
 
-_SUCCESS_STATUSES = {0, 1}  # Ipopt Solve_Succeeded and Solved_To_Acceptable_Level
 _EMPTY = np.zeros(0, dtype=np.float64)
 
 
@@ -248,11 +249,11 @@ def _dense_jacobian_pattern(p: int, n: int) -> tuple[np.ndarray, np.ndarray]:
 def _extract_retained_warm_start_duals(
     problem: Problem,
     ws: WarmStart,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Extract retained user and Horizon constraint Multipliers and control-bound Multipliers from WarmStart."""
     lam_canon, mu_canon = warm_start_duals(problem, ws)
     if lam_canon is None or mu_canon is None:
-        return None, None, None
+        return None, None
 
     N = int(problem.N)
     n = int(problem.model.n)
@@ -282,9 +283,8 @@ def _extract_retained_warm_start_duals(
 
     _, U_mu = _z_to_trajectory(jnp.asarray(mu_canon), N, n, m)
     mu_u = np.asarray(U_mu, dtype=np.float64).reshape(-1)
-    mult_u_l, mult_u_u = split_bound_duals(mu_u)
 
-    return lam_user, mult_u_l, mult_u_u
+    return lam_user, mu_u
 
 
 def _unpack_retained_multipliers(
@@ -487,6 +487,21 @@ class _SingleShootingCallback:
         self.hess_cols = hess_cols.astype(np.int32)
         self.iteration_count = 0
 
+        N = int(problem.N)
+        b = int(problem.control_block_steps)
+        m = int(problem.model.m)
+        B = (N - 1) // b
+        self.binary_u_indices = np.asarray(
+            [k * m + i for k in range(B) for i in problem.binary_control_indices],
+            dtype=np.int32,
+        )
+        self.beta = 0.0
+
+    @property
+    def binary_indices(self) -> np.ndarray:
+        """Return indices of binary decision variables in the reduced control vector."""
+        return self.binary_u_indices
+
     def intermediate(self, *args: object) -> bool:
         """Track solver iteration counter from Ipopt."""
         if len(args) > 1 and isinstance(args[1], (int, float, str)):
@@ -494,15 +509,24 @@ class _SingleShootingCallback:
         return True
 
     def objective(self, u: np.ndarray) -> float:
-        """Evaluate scalar objective value J(u)."""
-        return float(eval_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt))
+        """Evaluate scalar objective value J(u) plus binary homotopy penalty."""
+        b = int(self.problem.control_block_steps)
+        a = u[self.binary_u_indices]
+        cost = float(eval_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt))
+        if len(a) and self.beta != 0.0:
+            return cost + b * self.beta * float(np.sum(a * (1 - a)))
+        return cost
 
     def gradient(self, u: np.ndarray) -> np.ndarray:
-        """Evaluate objective gradient nabla J(u)."""
-        return np.asarray(
+        """Evaluate objective gradient nabla J(u) plus binary penalty gradient."""
+        b = int(self.problem.control_block_steps)
+        grad = np.asarray(
             eval_grad_f(self.problem, jnp.asarray(u), self.x0, t0=self.t0, dt=self.dt),
             dtype=np.float64,
-        )
+        ).copy()
+        if len(self.binary_u_indices) and self.beta != 0.0:
+            grad[self.binary_u_indices] += b * self.beta * (1 - 2 * u[self.binary_u_indices])
+        return grad
 
     def constraints(self, u: np.ndarray) -> np.ndarray:
         """Evaluate constraint vector c(u)."""
@@ -523,8 +547,9 @@ class _SingleShootingCallback:
         return self.jac_rows, self.jac_cols
 
     def hessian(self, u: np.ndarray, lagrange: np.ndarray, obj_factor: float = 1.0) -> np.ndarray:
-        """Evaluate lower-triangular nonzeros of the dense Lagrangian Hessian."""
-        return np.asarray(
+        """Evaluate lower-triangular nonzeros of the dense Lagrangian Hessian including binary penalty."""
+        b = int(self.problem.control_block_steps)
+        values = np.asarray(
             eval_h(
                 self.problem,
                 jnp.asarray(u),
@@ -536,7 +561,12 @@ class _SingleShootingCallback:
                 xf=self.xf,
             ),
             dtype=np.float64,
-        )
+        ).copy()
+        if len(self.binary_u_indices) and self.beta != 0.0:
+            diagonal = self.hess_rows == self.hess_cols
+            binary = np.isin(self.hess_rows, self.binary_u_indices)
+            values[diagonal & binary] -= 2 * b * self.beta * obj_factor
+        return values
 
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         """Return build-time Lagrangian Hessian sparsity pattern (rows, cols)."""
@@ -568,6 +598,26 @@ class SingleShooting:
             msg = f"hessian must be 'lbfgs' or 'dense', got {self.hessian!r}."
             raise ValueError(msg)
 
+    @property
+    def beta_initial(self) -> float:
+        """Initial binary continuation penalty coefficient."""
+        return float(self.solver.beta_initial)
+
+    @property
+    def beta_growth(self) -> float:
+        """Growth factor for binary continuation penalty."""
+        return float(self.solver.beta_growth)
+
+    @property
+    def max_passes(self) -> int:
+        """Maximum number of binary continuation passes."""
+        return int(self.solver.max_passes)
+
+    @property
+    def binary_tolerance(self) -> float:
+        """Integrality tolerance for binary continuation."""
+        return float(self.solver.binary_tolerance)
+
     def transcription_callback(
         self,
         problem: Problem,
@@ -579,12 +629,50 @@ class SingleShooting:
         """Assemble callback wrapper connecting single-shooting Problem to cyipopt."""
         return _SingleShootingCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
+    def _solve_passes(
+        self,
+        nlp: Any,  # noqa: ANN401 -- cyipopt's C-extension handle is untyped
+        cb: _SingleShootingCallback,
+        u0: np.ndarray,
+        lam0: np.ndarray | None,
+        mu0: np.ndarray | None,
+    ) -> tuple[np.ndarray, dict[str, Any], int, float]:
+        """Continue from relaxation through penalty passes, carrying Primal Vector and Multipliers."""
+        return solve_continuation_passes(
+            nlp,
+            cb,
+            u0,
+            lam0,
+            mu0,
+            binary_indices=cb.binary_u_indices,
+            beta_initial=self.solver.beta_initial,
+            beta_growth=self.solver.beta_growth,
+            max_passes=self.solver.max_passes,
+            binary_tolerance=self.solver.binary_tolerance,
+        )
+
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
         """Solve the single-shooting Transcription of `program`'s Problem from `bc` and `ws` using Ipopt."""
-        import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
-
         problem = program.problem
+        if problem.binary_control_indices:
+            validate_homotopy_parameters(
+                self.solver.beta_initial,
+                self.solver.beta_growth,
+                self.solver.max_passes,
+                self.solver.binary_tolerance,
+            )
         _validate_supported_constraints(problem)
+
+        try:
+            import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
+        except ImportError as e:
+            msg = (
+                "cyipopt is not installed. It is part of the `solvers` extra: install with "
+                '`pip install "trajopt[solvers]"` or `uv add "trajopt[solvers]"`, which compiles '
+                "cyipopt against a system Ipopt (see the README's Installation section). "
+                "Alternatively, drive the problem with a different solver, e.g. OSQP() or ALTRO()."
+            )
+            raise ImportError(msg) from e
 
         N = int(problem.N)
         b = int(problem.control_block_steps)
@@ -615,39 +703,36 @@ class SingleShooting:
         if self.hessian == "lbfgs":
             options.setdefault("hessian_approximation", "limited-memory")
 
-        solve_kwargs: dict[str, Any] = {}
-        if b == 1:
-            lam_user0, mult_u_l0, mult_u_u0 = _extract_retained_warm_start_duals(problem, ws)
-            if mult_u_l0 is not None and mult_u_u0 is not None:
-                options.setdefault("warm_start_init_point", "yes")
-                options.setdefault("warm_start_bound_push", 1e-9)
-                options.setdefault("warm_start_mult_bound_push", 1e-9)
-                solve_kwargs["zl"] = mult_u_l0
-                solve_kwargs["zu"] = mult_u_u0
-                if len(g_lower) > 0 and lam_user0 is not None:
-                    solve_kwargs["lagrange"] = lam_user0
-
         for key, value in options.items():
             nlp.add_option(key, value)
 
-        u_opt, info = nlp.solve(u0, **solve_kwargs)
+        if b == 1:
+            lam0, mu0 = _extract_retained_warm_start_duals(problem, ws)
+        else:
+            lam0, mu0 = None, None
+
+        u_opt, info, pass_count, binary_distance = self._solve_passes(nlp, cb, u0, lam0, mu0)
         return self._build_result(
             problem,
             cb,
             u_opt,
             info,
+            pass_count,
+            binary_distance,
             x0_arr=x0_arr,
             t0_arr=t0_arr,
             dt_arr=dt_arr,
             xf_val=xf_val,
         )
 
-    def _build_result(  # noqa: PLR0913 -- packaging result needs solve metadata
+    def _build_result(  # noqa: PLR0913, PLR0917 -- packaging result needs solve metadata
         self,
         problem: Problem,
         cb: _SingleShootingCallback,
         u_opt: np.ndarray,
         info: dict[str, Any],
+        pass_count: int,
+        binary_distance: float,
         *,
         x0_arr: jax.Array,
         t0_arr: jax.Array,
@@ -662,9 +747,7 @@ class SingleShooting:
         B = (N - 1) // b
 
         status = int(info.get("status", -1))
-        success = status in _SUCCESS_STATUSES
         message = str(info.get("status_msg", ""))
-        cost_val = float(info.get("obj_val", cb.objective(u_opt)))
 
         U_blk_opt = jnp.asarray(u_opt, dtype=jnp.float64).reshape((B, m))
         U_opt = expand_controls(U_blk_opt, b)
@@ -673,6 +756,16 @@ class SingleShooting:
 
         opt_traj = Trajectory(X=X_opt, U=U_opt, t=t_opt, dt=dt_arr)
         Z_opt_jax = _trajectory_to_z(X_opt, U_opt)
+
+        cost_val = float(eval_f(problem, jnp.asarray(u_opt), x0_arr, t0=t0_arr, dt=dt_arr))
+
+        a = u_opt[cb.binary_u_indices] if len(cb.binary_u_indices) else _EMPTY
+        info.update(
+            homotopy_beta=cb.beta,
+            homotopy_penalty=b * cb.beta * float(np.sum(a * (1 - a))) if len(a) else 0.0,
+            binary_distance=binary_distance,
+            homotopy_passes=pass_count,
+        )
 
         iter_count = int(cb.iteration_count)
         viol = compute_constraint_violation(
@@ -683,6 +776,14 @@ class SingleShooting:
             dt=dt_arr,
             xf=xf_val,
         )
+
+        success = status in _SUCCESS_STATUSES and (
+            not problem.binary_control_indices
+            or (pass_count > 1 and binary_distance <= self.solver.binary_tolerance)
+        )
+        if problem.binary_control_indices:
+            feasibility_tol = float(self.solver.options.get("constr_viol_tol", 1e-4))
+            success = success and viol <= feasibility_tol
 
         if b > 1:
             P_total = constraint_row_count(problem)
