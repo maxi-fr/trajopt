@@ -7,7 +7,7 @@ import numpy as np
 from trajopt.problem import BoundaryConditions, Problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
-from trajopt.transcription.result import Solver, SolverResult
+from trajopt.transcription.result import Solver, SolverResult, constraint_row_count
 
 
 def _targets(
@@ -324,13 +324,22 @@ class MPC:
         )
 
     def solve(self) -> SolverResult:
-        """Solve one horizon, folding the result into the warm start and returning the backend's result.
+        """Solve one Horizon, validate canonical Multipliers, fold into the warm start, and return the Backend's result.
 
         A backend that returns no duals (an empty vector) leaves the warm start's own untouched,
         and only the AL solvers populate `res.al`, so a prior AL warm start survives a step taken
         by a solver that knows nothing about it.
         """
         res = self.program.solve(self.bc, self._ws)
+
+        if len(res.lam) > 0:
+            p_canon = constraint_row_count(self.problem)
+            if len(res.lam) != p_canon:
+                msg = f"Multiplier lam has length {len(res.lam)}, expected canonical constraint count {p_canon}."
+                raise ValueError(msg)
+        if len(res.mu) > 0 and len(res.mu) != len(self._ws.Z):
+            msg = f"Multiplier mu has length {len(res.mu)}, expected canonical primal length {len(self._ws.Z)}."
+            raise ValueError(msg)
 
         lam = jnp.asarray(res.lam, dtype=self._ws.Z.dtype) if len(res.lam) > 0 else self._ws.lam
         mu = jnp.asarray(res.mu, dtype=self._ws.Z.dtype) if len(res.mu) > 0 else self._ws.mu

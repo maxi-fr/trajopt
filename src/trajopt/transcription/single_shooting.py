@@ -16,8 +16,11 @@ from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
     _evaluator_bounds,
     _trajectory_to_z,
+    _z_to_trajectory,
+    compute_constraint_violation,
     parse_solver_initial_state,
 )
+from trajopt.transcription.result import split_bound_duals, warm_start_duals
 
 _SUCCESS_STATUSES = {0, 1}  # Ipopt Solve_Succeeded and Solved_To_Acceptable_Level
 _EMPTY = np.zeros(0, dtype=np.float64)
@@ -216,24 +219,220 @@ def _dense_jacobian_pattern(p: int, n: int) -> tuple[np.ndarray, np.ndarray]:
     return rows, cols
 
 
-def _compute_constraint_violation(  # noqa: PLR0913, PLR0917 -- Violation metric takes 6 arguments
+def _extract_retained_warm_start_duals(
     problem: Problem,
-    u: jax.Array,
-    x0: jax.Array,
-    t0: float | jax.Array,
-    dt: float | jax.Array,
-    xf: jax.Array | None,
-) -> float:
-    """Maximum violation over the control bounds and the user constraint rows."""
-    c = np.asarray(eval_g(problem, jnp.asarray(u), x0, t0=t0, dt=dt, xf=xf), dtype=np.float64)
-    max_con = float(np.max(np.abs(c))) if c.size else 0.0
+    ws: WarmStart,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Extract retained user and Horizon constraint Multipliers and control-bound Multipliers from WarmStart."""
+    lam_canon, mu_canon = warm_start_duals(problem, ws)
+    if lam_canon is None or mu_canon is None:
+        return None, None, None
 
-    u_lower, u_upper = _primal_bounds(problem)
-    u_np = np.asarray(u, dtype=np.float64)
-    viol_lo = np.maximum(0.0, u_lower - u_np)
-    viol_hi = np.maximum(0.0, u_np - u_upper)
-    max_bound = max(float(np.max(viol_lo)), float(np.max(viol_hi))) if u_np.size else 0.0
-    return max(max_con, max_bound)
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+
+    offset = n  # initial-state pin
+    retained_lam: list[np.ndarray] = []
+    for k in range(N - 1):
+        offset += n  # dynamics Defect k
+        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        if pk > 0:
+            retained_lam.append(lam_canon[offset : offset + pk])
+            offset += pk
+
+    p_term = knot_evaluators[N - 1].p if len(knot_evaluators) > N - 1 else 0
+    if p_term > 0:
+        retained_lam.append(lam_canon[offset : offset + p_term])
+        offset += p_term
+
+    for con in problem.constraints.horizon_constraints:
+        if con.p > 0:
+            retained_lam.append(lam_canon[offset : offset + con.p])
+            offset += con.p
+
+    lam_user = np.concatenate(retained_lam) if retained_lam else np.zeros(0, dtype=np.float64)
+
+    _, U_mu = _z_to_trajectory(jnp.asarray(mu_canon), N, n, m)
+    mu_u = np.asarray(U_mu, dtype=np.float64).reshape(-1)
+    mult_u_l, mult_u_u = split_bound_duals(mu_u)
+
+    return lam_user, mult_u_l, mult_u_u
+
+
+def _unpack_retained_multipliers(
+    problem: Problem,
+    mult_g: np.ndarray | None,
+) -> tuple[list[jax.Array], jax.Array]:
+    """Unpack raw solver constraint Multipliers into per-Knot Point and Horizon arrays."""
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    horizon_constraints = problem.constraints.horizon_constraints if problem.constraints is not None else ()
+    N = int(problem.N)
+
+    mult_g_arr = np.asarray(mult_g, dtype=np.float64) if mult_g is not None else _EMPTY
+    offset = 0
+    lam_c: list[jax.Array] = []
+    for k in range(N - 1):
+        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        if pk > 0 and offset + pk <= len(mult_g_arr):
+            lam_c.append(jnp.asarray(mult_g_arr[offset : offset + pk], dtype=jnp.float64))
+            offset += pk
+        else:
+            lam_c.append(jnp.zeros(0, dtype=jnp.float64))
+
+    p_term = knot_evaluators[N - 1].p if len(knot_evaluators) > N - 1 else 0
+    if p_term > 0 and offset + p_term <= len(mult_g_arr):
+        lam_c.append(jnp.asarray(mult_g_arr[offset : offset + p_term], dtype=jnp.float64))
+        offset += p_term
+    else:
+        lam_c.append(jnp.zeros(0, dtype=jnp.float64))
+
+    p_hz = sum(con.p for con in horizon_constraints)
+    if p_hz > 0 and offset + p_hz <= len(mult_g_arr):
+        lam_hz = jnp.asarray(mult_g_arr[offset : offset + p_hz], dtype=jnp.float64)
+    else:
+        lam_hz = jnp.zeros(0, dtype=jnp.float64)
+
+    return lam_c, lam_hz
+
+
+def _state_stationarity_rhs(
+    problem: Problem,
+    traj: Trajectory,
+    lam_c: list[jax.Array],
+    lam_hz: jax.Array,
+) -> jax.Array:
+    """Evaluate sum of Cost and constraint gradients with respect to states."""
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    X_opt, U_opt, t_opt = traj.X, traj.U, traj.t
+
+    def cost_of_x(X_var: jax.Array) -> jax.Array:
+        stage_costs = problem.obj.stage_cost.stage_costs(X_var[:-1], U_opt, t_opt[:-1])
+        term_cost = problem.obj.terminal_cost.evaluate(X_var[-1], None, t_opt[-1])
+        return jnp.sum(stage_costs) + term_cost
+
+    grad_cost_x = jax.grad(cost_of_x)(X_opt)
+
+    grad_con_x_list: list[jax.Array] = []
+    for k in range(N - 1):
+        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        if pk > 0:
+            jx_k, _ = knot_evaluators[k].jacobian(X_opt[k], U_opt[k], t_opt[k])
+            grad_con_x_list.append(jx_k.T @ lam_c[k])
+        else:
+            grad_con_x_list.append(jnp.zeros(n, dtype=jnp.float64))
+
+    if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
+        jx_term, _ = knot_evaluators[N - 1].jacobian(X_opt[-1], None, t_opt[-1])
+        grad_con_x_list.append(jx_term.T @ lam_c[N - 1])
+    else:
+        grad_con_x_list.append(jnp.zeros(n, dtype=jnp.float64))
+
+    grad_con_x = jnp.stack(grad_con_x_list, axis=0)
+
+    p_hz = sum(con.p for con in problem.constraints.horizon_constraints)
+    if p_hz > 0:
+        z_opt = _trajectory_to_z(X_opt, U_opt)
+        grad_hz_z = jnp.zeros(len(z_opt), dtype=jnp.float64)
+        hz_offset = 0
+        for con in problem.constraints.horizon_constraints:
+            con_lam = lam_hz[hz_offset : hz_offset + con.p]
+            hz_offset += con.p
+            grad_hz_z = grad_hz_z.at[jnp.asarray(con.inds)].add(con.A.T @ con_lam)
+        grad_hz_x, _ = _z_to_trajectory(grad_hz_z, N, n, m)
+    else:
+        grad_hz_x = jnp.zeros((N, n), dtype=jnp.float64)
+
+    return grad_cost_x + grad_con_x + grad_hz_x
+
+
+def _backward_adjoint_recursion(
+    problem: Problem,
+    traj: Trajectory,
+    rhs: jax.Array,
+) -> tuple[jax.Array, list[jax.Array]]:
+    """Recover initial pin and Defect Multipliers via backward adjoint recursion."""
+    N = int(problem.N)
+    n = int(problem.model.n)
+    X_opt, U_opt, t_opt, dt_arr = traj.X, traj.U, traj.t, traj.dt
+    lam_d: list[jax.Array] = [jnp.zeros(n, dtype=jnp.float64)] * (N - 1)
+    lam_d[N - 2] = -rhs[N - 1]
+    for k in range(N - 2, 0, -1):
+        ak = problem.model.state_jacobian(X_opt[k], U_opt[k], t_opt[k], dt_arr[k])
+        lam_d[k - 1] = ak.T @ lam_d[k] - rhs[k]
+
+    a0 = problem.model.state_jacobian(X_opt[0], U_opt[0], t_opt[0], dt_arr[0])
+    lam_0 = a0.T @ lam_d[0] - rhs[0]
+    return lam_0, lam_d
+
+
+def _assemble_canonical_lam(
+    problem: Problem,
+    lam_0: jax.Array,
+    lam_d: list[jax.Array],
+    lam_c: list[jax.Array],
+    lam_hz: jax.Array,
+) -> np.ndarray:
+    """Assemble recovered and retained Multipliers into canonical constraint order."""
+    N = int(problem.N)
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    lam_parts: list[np.ndarray] = [np.asarray(lam_0, dtype=np.float64)]
+    for k in range(N - 1):
+        lam_parts.append(np.asarray(lam_d[k], dtype=np.float64))
+        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        if pk > 0:
+            lam_parts.append(np.asarray(lam_c[k], dtype=np.float64))
+    if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
+        lam_parts.append(np.asarray(lam_c[N - 1], dtype=np.float64))
+    if len(lam_hz) > 0:
+        lam_parts.append(np.asarray(lam_hz, dtype=np.float64))
+    return np.concatenate(lam_parts)
+
+
+def _assemble_canonical_mu(
+    mult_x_l_raw: object,
+    mult_x_u_raw: object,
+    N: int,
+    n: int,
+    m: int,
+) -> np.ndarray:
+    """Assemble control-bound Multipliers into canonical Primal Vector bound layout."""
+    mult_x_l_out = np.asarray(mult_x_l_raw, dtype=np.float64) if mult_x_l_raw is not None else _EMPTY
+    mult_x_u_out = np.asarray(mult_x_u_raw, dtype=np.float64) if mult_x_u_raw is not None else _EMPTY
+    if len(mult_x_l_out) == (N - 1) * m and len(mult_x_u_out) == (N - 1) * m:
+        mu_u = mult_x_u_out - mult_x_l_out
+        u_mu = jnp.asarray(mu_u.reshape(N - 1, m), dtype=jnp.float64)
+        x_mu = jnp.zeros((N, n), dtype=jnp.float64)
+        return np.asarray(_trajectory_to_z(x_mu, u_mu), dtype=np.float64)
+    return _EMPTY
+
+
+def _recover_canonical_multipliers(
+    problem: Problem,
+    traj: Trajectory,
+    info: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Recover canonical constraint and bound Multipliers from state stationarity."""
+    mult_g = info.get("mult_g")
+    mult_x_l_raw = info.get("mult_x_L")
+    mult_x_u_raw = info.get("mult_x_U")
+    if mult_g is None and mult_x_l_raw is None:
+        return _EMPTY, _EMPTY
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+
+    lam_c, lam_hz = _unpack_retained_multipliers(problem, mult_g)
+    rhs = _state_stationarity_rhs(problem, traj, lam_c, lam_hz)
+    lam_0, lam_d = _backward_adjoint_recursion(problem, traj, rhs)
+    lam_canon = _assemble_canonical_lam(problem, lam_0, lam_d, lam_c, lam_hz)
+    mu_canon = _assemble_canonical_mu(mult_x_l_raw, mult_x_u_raw, N, n, m)
+    return lam_canon, mu_canon
 
 
 class _SingleShootingCallback:
@@ -355,7 +554,7 @@ class SingleShooting:
         return _SingleShootingCallback(problem=problem, x0=x0, t0=t0, dt=dt, xf=xf)
 
     def solve(self, program: Program, bc: BoundaryConditions, ws: WarmStart) -> IpoptResult:
-        """Solve the single-shooting transcription of `program`'s problem from `bc` and `ws` using Ipopt."""
+        """Solve the single-shooting Transcription of `program`'s Problem from `bc` and `ws` using Ipopt."""
         import cyipopt  # noqa: PLC0415 -- cyipopt is an optional solver dependency
 
         problem = program.problem
@@ -388,10 +587,22 @@ class SingleShooting:
         options: dict[str, Any] = dict(self.solver.options)
         if self.hessian == "lbfgs":
             options.setdefault("hessian_approximation", "limited-memory")
+
+        lam_user0, mult_u_l0, mult_u_u0 = _extract_retained_warm_start_duals(problem, ws)
+        solve_kwargs: dict[str, Any] = {}
+        if mult_u_l0 is not None and mult_u_u0 is not None:
+            options.setdefault("warm_start_init_point", "yes")
+            options.setdefault("warm_start_bound_push", 1e-9)
+            options.setdefault("warm_start_mult_bound_push", 1e-9)
+            solve_kwargs["zl"] = mult_u_l0
+            solve_kwargs["zu"] = mult_u_u0
+            if len(g_lower) > 0 and lam_user0 is not None:
+                solve_kwargs["lagrange"] = lam_user0
+
         for key, value in options.items():
             nlp.add_option(key, value)
 
-        u_opt, info = nlp.solve(u0)
+        u_opt, info = nlp.solve(u0, **solve_kwargs)
         status = int(info.get("status", -1))
         success = status in _SUCCESS_STATUSES
         message = str(info.get("status_msg", ""))
@@ -405,12 +616,20 @@ class SingleShooting:
         Z_opt_jax = _trajectory_to_z(X_opt, U_opt)
 
         iter_count = int(cb.iteration_count)
-        viol = _compute_constraint_violation(problem, u_opt, x0_arr, t0_arr, dt_arr, xf_val)
+        viol = compute_constraint_violation(
+            problem,
+            Z_opt_jax,
+            x0_arr,
+            t0=t0_arr,
+            dt=dt_arr,
+            xf=xf_val,
+        )
 
-        lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
-        mult_x_l_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
-        mult_x_u_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
-        mu_out = mult_x_u_out - mult_x_l_out
+        lam_out, mu_out = _recover_canonical_multipliers(
+            problem,
+            opt_traj,
+            info,
+        )
 
         return IpoptResult(
             trajectory=opt_traj,
