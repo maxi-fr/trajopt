@@ -3,6 +3,8 @@ from collections.abc import Sequence
 import numpy as np
 import scipy.sparse as sp
 
+from trajopt.transcription.layout import canonical_to_nlp_col
+
 
 def _canonical_jacobian_sparsity(  # noqa: PLR0913, PLR0917 -- canonical sparsity helper takes 6 arguments
     N: int,
@@ -123,18 +125,8 @@ def _blocked_jacobian_sparsity(  # noqa: PLR0913, PLR0917 -- blocked sparsity he
         col_list.append(np.tile(np.arange(col_term, col_term + n), p_term))
         curr_row += p_term
 
-    def _map_col(c: int) -> int:
-        stage_part_len = (N - 1) * (n + m)
-        if c >= stage_part_len:
-            return B * d_blk + (c - stage_part_len)
-        stage_idx = c // (n + m)
-        rem = c % (n + m)
-        if rem < n:
-            return (stage_idx // b) * d_blk + (stage_idx % b) * n + rem
-        return (stage_idx // b) * d_blk + b * n + (rem - n)
-
     for columns, count in zip(horizon_columns, horizon_rows, strict=True):
-        mapped_unique = np.unique([_map_col(int(c)) for c in columns])
+        mapped_unique = np.unique([canonical_to_nlp_col(int(c), N, n, m, b) for c in columns])
         row_list.append(np.repeat(np.arange(curr_row, curr_row + count), len(mapped_unique)))
         col_list.append(np.tile(mapped_unique, count))
         curr_row += count
@@ -158,13 +150,13 @@ def jacobian_sparsity_pattern(  # noqa: PLR0913, PLR0917 -- knot and Horizon row
     Parameters
     ----------
     N : int
-        Horizon length in knot points.
+        Horizon length in Knot Points.
     n : int
         State dimension.
     m : int
         Control dimension.
     p : Sequence[int]
-        Sequence of length N specifying total constraint dimension at each knot point.
+        Sequence of length N specifying total constraint dimension at each Knot Point.
     horizon_columns : Sequence[tuple[int, ...]]
         Primal Vector columns for each trailing linear Horizon constraint.
     horizon_rows : Sequence[int]
@@ -199,7 +191,7 @@ def hessian_sparsity_pattern(
     Parameters
     ----------
     N : int
-        Horizon length in knot points.
+        Horizon length in Knot Points.
     n : int
         State dimension.
     m : int

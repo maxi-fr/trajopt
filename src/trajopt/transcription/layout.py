@@ -73,7 +73,7 @@ def _z_to_trajectory(
     Z : jax.Array
         Flat primal vector of shape (N * n + (N - 1) * m,).
     N : int
-        Horizon length in knot points.
+        Horizon length in Knot Points.
     n : int
         State dimension.
     m : int
@@ -107,7 +107,7 @@ def _nlp_z_to_trajectory(
     z : jax.Array
         Flat NLP primal vector of shape (N * n + B * m,).
     N : int
-        Horizon length in knot points.
+        Horizon length in Knot Points.
     n : int
         State dimension.
     m : int
@@ -144,9 +144,20 @@ def expand_controls(U_blk: jax.Array, b: int) -> jax.Array:
     return jnp.repeat(U_blk, b, axis=0)
 
 
-def expand_controls_np(U_blk: np.ndarray, b: int) -> np.ndarray:
-    """Expand numpy block controls of shape (B, m) to native controls of shape (B * b, m)."""
-    return np.repeat(U_blk, b, axis=0)
+def canonical_to_nlp_col(c: int, N: int, n: int, m: int, b: int) -> int:
+    """Map canonical Primal Vector column index c to reduced NLP decision vector column index."""
+    if b == 1:
+        return c
+    stage_part_len = (N - 1) * (n + m)
+    d_blk = b * n + m
+    B = (N - 1) // b
+    if c >= stage_part_len:
+        return B * d_blk + (c - stage_part_len)
+    stage_idx = c // (n + m)
+    rem = c % (n + m)
+    if rem < n:
+        return (stage_idx // b) * d_blk + (stage_idx % b) * n + rem
+    return (stage_idx // b) * d_blk + b * n + (rem - n)
 
 
 def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
@@ -323,7 +334,7 @@ def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
 
     for k in range(N - 1):
-        # 2a. Dynamics defect k: x_{k+1} - f_d(x_k, u_k) = 0
+        # 2a. Dynamics Defect k: x_{k+1} - f_d(x_k, u_k) = 0
         gL_list.append(np.zeros(n, dtype=np.float64))
         gU_list.append(np.zeros(n, dtype=np.float64))
 

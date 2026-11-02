@@ -47,6 +47,7 @@ def _make_problem(
 
 
 def test_problem_blocking_construction_defaults() -> None:
+    """Problem defaults to unit control blocking and computes canonical dimensions."""
     prob = _make_problem(N=7)
     assert prob.control_block_steps == 1
     assert prob.N == 7
@@ -58,6 +59,7 @@ def test_problem_blocking_construction_defaults() -> None:
 
 
 def test_problem_blocking_validation_invalid_types() -> None:
+    """Problem rejects boolean, fractional, and non-positive control_block_steps."""
     with pytest.raises(TypeError, match="control_block_steps"):
         _make_problem(N=7, b=True)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="control_block_steps"):
@@ -71,6 +73,7 @@ def test_problem_blocking_validation_invalid_types() -> None:
 
 
 def test_problem_blocking_validation_horizon_divisibility() -> None:
+    """Problem requires H = N - 1 >= 1 and H divisible by control_block_steps."""
     model = Pendulum()
     obj = LQRObjective(Q=jnp.eye(2), R=jnp.eye(1), Qf=jnp.eye(2), N=1)
     with pytest.raises(ValueError, match="H = N - 1"):
@@ -88,6 +91,7 @@ def test_problem_blocking_validation_horizon_divisibility() -> None:
 
 
 def test_problem_blocking_preserved_through_transformations() -> None:
+    """Problem transformations retarget_problem and add_l1_epigraph preserve control_block_steps."""
     prob = _make_problem(N=7, b=2)
     bc = BoundaryConditions(x0=jnp.zeros(2), t0=jnp.array(0.0))
     retargeted = retarget_problem(prob, bc)
@@ -102,6 +106,7 @@ def test_problem_blocking_preserved_through_transformations() -> None:
 
 
 def test_blocked_control_bounds_computation() -> None:
+    """blocked_control_bounds computes intersected bounds across each block."""
     # H = 4, b = 2, B = 2
     cl = ConstraintList(n=2, m=1, N=5)
     cl.add_constraint(ControlBound(n=2, m=1, u_min=[-1.0], u_max=[2.0]), 0)
@@ -120,6 +125,7 @@ def test_blocked_control_bounds_computation() -> None:
 
 
 def test_blocked_control_bounds_infeasible_rejection() -> None:
+    """blocked_control_bounds raises ValueError when block lower bound exceeds upper bound."""
     # Empty intersection in block 0: [-1.0, 0.0] and [1.0, 2.0]
     cl = ConstraintList(n=2, m=1, N=5)
     cl.add_constraint(ControlBound(n=2, m=1, u_min=[-1.0], u_max=[0.0]), 0)
@@ -130,6 +136,7 @@ def test_blocked_control_bounds_infeasible_rejection() -> None:
 
 
 def test_blocked_control_bounds_binary_validation() -> None:
+    """blocked_control_bounds validates that binary control coordinates contain 0.0 or 1.0."""
     # Binary coordinate with [0.2, 0.8] contains neither 0.0 nor 1.0
     cl = ConstraintList(n=2, m=1, N=5)
     cl.add_constraint(ControlBound(n=2, m=1, u_min=[0.2], u_max=[0.8]), range(4))
@@ -150,6 +157,7 @@ def test_blocked_control_bounds_binary_validation() -> None:
 
 
 def test_program_pairing_guards_ipopt_and_single_shooting() -> None:
+    """Ipopt and SingleShooting(Ipopt) accept blocked Problems and LinearHorizonConstraints."""
     prob = _make_problem(N=7, b=2, binary=(0,))
     prog_ipopt = Program(prob, Ipopt())
     assert prog_ipopt.solver is not None
@@ -167,6 +175,7 @@ def test_program_pairing_guards_ipopt_and_single_shooting() -> None:
 
 
 def test_program_pairing_guards_single_shooting_rejects_state_bounds() -> None:
+    """SingleShooting rejects Problem configurations with state bounds."""
     cl_stage = ConstraintList(n=2, m=1, N=7)
     cl_stage.add_constraint(StateBound(n=2, x_min=[-1.0, -1.0], x_max=[1.0, 1.0]), 0)
     prob_stage = _make_problem(N=7, b=2, constraints=cl_stage)
@@ -184,6 +193,7 @@ def test_program_pairing_guards_single_shooting_rejects_state_bounds() -> None:
 
 
 def test_program_pairing_guards_unsupported_solvers_reject_blocking() -> None:
+    """Unsupported Backends and Native Solvers reject control_block_steps > 1."""
     prob_blocked = _make_problem(N=7, b=2)
     unsupported_solvers = [ALTRO(), ILQR(), AL(), SQP(), OSQP(), Clarabel()]
 
@@ -213,6 +223,7 @@ def test_program_pairing_guards_unsupported_solvers_reject_blocking() -> None:
 
 
 def test_program_pairing_guards_rejects_non_interval_cones() -> None:
+    """Pairing guards and _cone_bounds reject non-interval Cones such as SecondOrderCone."""
     cl = ConstraintList(n=2, m=1, N=7)
     cl.add_constraint(NormConstraint(n=2, m=1, inds=(0, 1), val=1.0, sense=SecondOrderCone()), 0)
     prob = _make_problem(N=7, b=1, constraints=cl)

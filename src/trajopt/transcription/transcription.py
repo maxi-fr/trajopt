@@ -9,7 +9,13 @@ from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
-from trajopt.transcription.layout import _nlp_z_to_trajectory, _trajectory_to_z, _z_to_trajectory, expand_controls
+from trajopt.transcription.layout import (
+    _nlp_z_to_trajectory,
+    _trajectory_to_z,
+    _z_to_trajectory,
+    canonical_to_nlp_col,
+    expand_controls,
+)
 
 
 def _cost_fn(
@@ -107,7 +113,7 @@ def constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     Parameters
     ----------
     problem : Problem
-        Problem instance containing model, constraints, and horizon.
+        Problem instance containing model, constraints, and Horizon.
     Z : jax.Array
         Flat primal vector of shape (N * n + (N - 1) * m,).
     x0 : jax.Array
@@ -457,7 +463,7 @@ def _nlp_cost_fn(
     dt: float | jax.Array,
     bc: BoundaryConditions | None = None,
 ) -> jax.Array:
-    """Evaluate total trajectory cost scalar J(z_nlp) on expanded controls."""
+    """Evaluate total Trajectory cost scalar J(z_nlp) on expanded controls."""
     b = int(problem.control_block_steps)
     if b == 1:
         return _cost_fn(problem, z, t0, dt, bc)
@@ -548,22 +554,13 @@ def _nlp_horizon_jac(  # noqa: PLR0913 -- Horizon Jacobian helper takes 7 argume
     B: int,
 ) -> tuple[list[jax.Array], list[jax.Array]]:
     """Evaluate Horizon constraint residuals and sparse Jacobian rows for z_nlp."""
+    del B
     c_list: list[jax.Array] = []
     jac_list: list[jax.Array] = []
 
-    def _map_col(c: int) -> int:
-        stage_part_len = (N - 1) * (n + m)
-        if c >= stage_part_len:
-            return B * (b * n + m) + (c - stage_part_len)
-        stage_idx = c // (n + m)
-        rem = c % (n + m)
-        if rem < n:
-            return (stage_idx // b) * (b * n + m) + (stage_idx % b) * n + rem
-        return (stage_idx // b) * (b * n + m) + b * n + (rem - n)
-
     for con in horizon_constraints:
         c_list.append(con.evaluate(Z_canon))
-        mapped = [_map_col(int(c)) for c in con.inds]
+        mapped = [canonical_to_nlp_col(int(c), N, n, m, b) for c in con.inds]
         unique_cols = np.unique(mapped)
         cols_arr = jnp.asarray(mapped)
         u_cols_arr = jnp.asarray(unique_cols)
@@ -638,7 +635,7 @@ def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 a
     Parameters
     ----------
     problem : Problem
-        Problem instance containing model, constraints, and horizon.
+        Problem instance containing model, constraints, and Horizon.
     z : jax.Array
         Flat NLP primal vector of shape (N * n + B * m,).
     x0 : jax.Array
@@ -824,7 +821,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     Parameters
     ----------
     problem : Problem
-        Problem instance containing model, objective, constraints, and horizon.
+        Problem instance containing model, objective, constraints, and Horizon.
     z : jax.Array
         Flat NLP primal vector of shape (N * n + B * m,).
     t0 : float | jax.Array, optional
@@ -834,7 +831,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     obj_factor : float | jax.Array, optional
         Objective scale factor sigma_f. Defaults to 1.0.
     lam : jax.Array | None, optional
-        Constraint multiplier vector of shape (P,). Defaults to zeros.
+        Constraint Multiplier vector of shape (P,). Defaults to zeros.
     bc : BoundaryConditions | None, optional
         Traced boundary conditions, accepted for signature parity. Defaults to None.
 

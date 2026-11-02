@@ -4,6 +4,8 @@ import pytest
 import scipy.sparse as sp
 
 import trajopt._env
+from trajopt.constraints.constraint_list import ConstraintList
+from trajopt.constraints.horizon import LinearHorizonConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.affine import AffineModel
@@ -388,5 +390,54 @@ def test_blocked_binary_homotopy_multiple_shooting() -> None:
     if res.success:
         for u_val in u_np.ravel():
             assert min(abs(u_val), abs(u_val - 1.0)) < 1e-3
+
+
+def test_blocked_multiple_shooting_with_linear_horizon_constraints() -> None:
+    """Multiple shooting correctly maps and differentiates linear Horizon constraints under control blocking."""
+    pytest.importorskip("cyipopt")
+
+    N = 7
+    b = 3
+    H = N - 1
+    n = 2
+    m = 1
+    A = jnp.eye(n)
+    B = jnp.ones((n, m))
+    model = AffineModel(A=A, B=B)
+    obj = LQRObjective(Q=jnp.eye(n), R=jnp.eye(m), Qf=jnp.eye(n), N=N)
+
+    # Constraint summing native controls in block 0: u0, u1, u2 at canonical indices (2, 5, 8)
+    cl = ConstraintList(n=n, m=m, N=N)
+    inds = (2, 5, 8)
+    A_hz = jnp.array([[1.0, 2.0, 3.0]])
+    b_hz = jnp.array([5.0])
+    hz = LinearHorizonConstraint(A=A_hz, b=b_hz, inds=inds)
+    cl.add_horizon_constraint(hz)
+
+    prob = Problem(model=model, obj=obj, constraints=cl, N=N, dt=0.1, control_block_steps=b)
+    cb = Ipopt().transcription_callback(prob, jnp.zeros(n), 0.0, 0.1)
+
+    nlp_len = N * n + (H // b) * m
+    z = np.ones(nlp_len, dtype=np.float64)
+    jac_val = cb.jacobian(z)
+    jac_rows, jac_cols = cb.jacobianstructure()
+    coords = list(zip(jac_rows, jac_cols, strict=True))
+    assert len(coords) == len(set(coords)), "Horizon constraint columns must not introduce duplicate sparse coordinates"
+
+    eps = 1e-6
+    P_total = len(cb.constraints(z))
+    jac_fd = np.zeros((P_total, nlp_len), dtype=np.float64)
+    for i in range(nlp_len):
+        zp = z.copy()
+        zm = z.copy()
+        zp[i] += eps
+        zm[i] -= eps
+        jac_fd[:, i] = (cb.constraints(zp) - cb.constraints(zm)) / (2 * eps)
+
+    jac_sparse = sp.coo_matrix((jac_val, (jac_rows, jac_cols)), shape=(P_total, nlp_len)).toarray()
+    np.testing.assert_allclose(jac_sparse, jac_fd, rtol=1e-4, atol=1e-5)
+
+    res = MPC(prob, Ipopt(options={"print_level": 0}), x0=jnp.zeros(n)).solve()
+    assert res.success
 
 
