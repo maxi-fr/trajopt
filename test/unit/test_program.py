@@ -75,7 +75,7 @@ def test_mpc_loop_builds_one_program_and_one_core(monkeypatch: pytest.MonkeyPatc
         mpc.set_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
         mpc.measure(x0 + 0.01 * step, t)
         mpc.solve()
-        mpc.shift(DT)
+        mpc.advance(1)
         t += DT
 
     assert constructions == 1

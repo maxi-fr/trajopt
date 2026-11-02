@@ -98,7 +98,7 @@ def test_problem_structure_driver_split() -> None:
 
 
 def test_driver_per_step_operations_update_boundary_and_warm_start() -> None:
-    """Verify per-step measurement update, goal update, and trajectory shift move the driver's state."""
+    """Verify per-step measurement update, goal update, and trajectory advancement move driver state."""
     model = Pendulum()
     Q = jnp.eye(2)
     R = jnp.eye(1)
@@ -130,7 +130,7 @@ def test_driver_per_step_operations_update_boundary_and_warm_start() -> None:
     mpc._ws = mpc.warm_start.with_primal(prob, X=X_init, U=U_init)  # noqa: SLF001 -- seeding a known primal
 
     t_before = mpc.t0
-    mpc.shift(dt=0.1)
+    mpc.advance(1)
     X_shifted, U_shifted = mpc.states, mpc.controls
 
     # Shift drops index 0, shifts remaining forward, and duplicates the final element
@@ -143,7 +143,7 @@ def test_driver_per_step_operations_update_boundary_and_warm_start() -> None:
 
 
 def test_pushed_reference_window_shifts_and_appends() -> None:
-    """Verify the reference window advances one knot per shift, appending a pushed point or holding the last."""
+    """Verify the reference window advances one knot per advance, appending a pushed point or holding the last."""
     model = Pendulum()
     N = 5
     obj = LQRObjective(Q=jnp.eye(2), R=jnp.eye(1), Qf=jnp.eye(2), N=N)
@@ -156,20 +156,20 @@ def test_pushed_reference_window_shifts_and_appends() -> None:
 
     # Nothing pushed: a constant window is shift-invariant, which is why a fixed goal needs no
     # special case at all.
-    mpc.shift()
+    mpc.advance(1)
     np.testing.assert_allclose(_window(mpc)[0], X_ref_0)
 
     # Pushed: the point enters at the far end, one knot per shift, and the window slides under it.
     entering = jnp.array([1.0, 2.0])
     mpc.push_reference(entering, jnp.array([0.5]))
-    mpc.shift()
+    mpc.advance(1)
     X_ref, U_ref = _window(mpc)
     np.testing.assert_allclose(X_ref[:-1], X_ref_0[1:])
     np.testing.assert_allclose(X_ref[-1], entering)
     np.testing.assert_allclose(U_ref[-1], jnp.array([0.5]))
 
     # The push is consumed, so the next shift holds that last point rather than repeating it.
-    mpc.shift()
+    mpc.advance(1)
     X_ref, _ = _window(mpc)
     np.testing.assert_allclose(X_ref[-1], entering)
     np.testing.assert_allclose(X_ref[-2], entering)
@@ -365,8 +365,8 @@ def test_cartpole_warm_start_reduces_iterations() -> None:
     x1 = dmodel.discrete_dynamics(x0, u0, 0.0, dt)
 
     # 1. Warm start: shift previous optimal solution
+    mpc.advance(1)
     mpc.measure(x1, dt)
-    mpc.shift(dt)
     res_warm = mpc.solve()
 
     # 2. Cold start: reset trajectory to constant x1 and zero controls
@@ -414,7 +414,7 @@ def test_closed_loop_cartpole_mpc() -> None:
         # Simulate system forward with applied control
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
         t_curr += dt
-        mpc.shift(dt)
+        mpc.advance(1)
 
     # After 20 steps (1.0 second), cartpole should be stabilized close to upright [0, pi, 0, 0]
     np.testing.assert_allclose(x_curr[1], np.pi, atol=0.1)
@@ -508,7 +508,7 @@ def test_runtime_reference_window_tracks_while_the_goal_constrains() -> None:
     # with even after a pushed waypoint has moved the window's far end.
     assert mpc.xf is None
     mpc.push_reference(jnp.array([1.0, 0.25, 0.0]))
-    mpc.shift()
+    mpc.advance(1)
     assert mpc.xf is None
     con, _ = constraints_and_jac(prob, mpc.Z, mpc.x0, mpc.t0, prob.dt, xf=mpc.xf)
     np.testing.assert_allclose(con[-3:], mpc.states[-1] - jnp.array([2.0, 0.0, 0.0]), atol=1e-12)
@@ -529,7 +529,7 @@ def test_moving_window_leaves_the_terminal_goal_where_it_was_set() -> None:
     # Pushing a waypoint moves the window's far end; the destination does not follow it.
     waypoint = jnp.array([1.0, 0.25, 0.0])
     mpc.push_reference(waypoint)
-    mpc.shift()
+    mpc.advance(1)
     X_ref, _ = _window(mpc)
     np.testing.assert_allclose(X_ref[-1], waypoint, atol=1e-12)
     assert mpc.xf is not None

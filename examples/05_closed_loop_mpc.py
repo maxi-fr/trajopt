@@ -51,7 +51,7 @@ def _(mo):
 
     We explore the fundamentals of receding-horizon optimal control:
     1. **Receding Horizon Control**: Formulating and solving a constrained finite-horizon optimal control problem at every sampling instant $t_k$.
-    2. **State Feedback & Multiplier Warm-Starting**: Injecting real-time state feedback via `MPC.measure()` and warm-starting the primal-dual trajectory with `MPC.shift()`.
+    2. **State Feedback & Multiplier Warm-Starting**: Injecting real-time state feedback via `MPC.measure()` and warm-starting the primal-dual trajectory with `MPC.advance()`.
     3. **Disturbance Rejection & Hard Constraint Enforcement**: Rejecting an unmodeled angular velocity impulse kick at $t = 1.0\,\text{s}$ while strictly respecting control saturation ($|u| \le 20.0\,\text{N}$) and cart track boundaries ($|p| \le 0.8\,\text{m}$).
     4. **Solver Comparison & Local Minima**: Benchmarking native JAX **ALTRO** against **Ipopt**, and seeing what a shooting method's initial guess costs you: from the default guess (states repeated from $x_0$, controls all zero) ALTRO lands in a *different local minimum* than Ipopt, so the closed loop is seeded from Ipopt's plan to put it on the balancing branch.
 
@@ -273,7 +273,7 @@ def _(mo):
     - `mpc.solve()` optimizes the next control trajectory.
     - The first control input $u_0^*$ is applied to simulate the true plant dynamics:
       $$x(t_{k+1}) = f_d(x(t_k), u_0^*, t_k, \Delta t)$$
-    - `mpc.shift(dt)` rolls the trajectory and Augmented Lagrangian dual multipliers forward by $\Delta t$, warm-starting the next solve.
+    - `mpc.advance()` rolls the trajectory and Augmented Lagrangian dual multipliers forward by one Knot Point, warm-starting the next solve.
     - **Disturbance Kick**: At $t = 1.0\,\text{s}$ (step 20), an unmodeled angular velocity impulse of **$+1.5\,\text{rad/s}$** is injected into the pole. The MPC loop must immediately detect the state deviation and steer the cartpole back to upright equilibrium without violating track limits.
     """)
     return
@@ -325,8 +325,8 @@ def _(dmodel, dt, mpc, n_steps, np, time, x0):
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, dt)
         x_history.append(np.asarray(x_curr))
 
-        # 5. Shift the driver forward for warm-starting the next iteration
-        mpc.shift(dt)
+        # 5. Advance the driver forward for warm-starting the next iteration
+        mpc.advance()
         t_curr += dt
         t_history.append(float(t_curr))
 
@@ -369,7 +369,7 @@ def _(dt, mo, np, solve_times_arr):
     > These are single-threaded CPU timings of the whole Python-level `mpc.solve` call, warm-started but with no attempt at real-time scheduling, so whether they clear the $\Delta t$ budget depends on the machine. The simulation above is not real-time: it applies each solved $u_0^*$ regardless of how long the solve took. Read the numbers as relative cost per step, not as a latency guarantee.
 
     > [!TIP]
-    > **Warm-Starting Efficacy**: Once JIT-compiled by XLA, `MPC.shift()` initializes both the primal trajectory and the Augmented Lagrangian dual multipliers close to the optimal manifold. Between steps $k$ and $k+1$, ALTRO needs far fewer Riccati sweeps to re-converge than the cold first solve does.
+    > **Warm-Starting Efficacy**: Once JIT-compiled by XLA, `MPC.advance()` initializes both the primal trajectory and the Augmented Lagrangian dual multipliers close to the optimal manifold. Between steps $k$ and $k+1$, ALTRO needs far fewer Riccati sweeps to re-converge than the cold first solve does.
     """)
     return budget_ms, p95_lat
 
@@ -617,7 +617,7 @@ def _(mo):
     1. **The initial guess picks the local minimum.** ALTRO is a shooting method: its first act is an open-loop rollout from $X_0[0]$ under $U_0$, so the guessed *states* past the first knot are thrown away and only the guessed *controls* decide which branch it descends. From the default all-zero controls the pole falls during that rollout and ALTRO converges — reporting `converged`, with every constraint satisfied — to a swing-through solution far more expensive than Ipopt's balancing one. Handed Ipopt's trajectory it agrees with Ipopt to ten digits. A converged status is not a claim of global optimality.
     2. **Horizon length is part of the formulation.** At $N = 20$ (a $0.95\,\text{s}$ horizon) the balancing branch is not reachable at all here: even seeded from Ipopt's plan, the closed loop cannot absorb the kick and the pole goes over the top. $N = 40$ ($1.95\,\text{s}$) gives the optimizer enough runway to trade cart travel against angular recovery.
     3. **Receding-horizon disturbance rejection.** With those two things fixed, replanning at $20\,\text{Hz}$ absorbs the unmodeled impulse ($\Delta\dot{\theta} = +1.5\,\text{rad/s}$ at $t = 1.0\,\text{s}$) with no gain scheduling: $\theta$ dips about $0.38\,\text{rad}$ below upright (its minimum lands around $t = 1.5\,\text{s}$) and climbs back toward $\pi$ over the second that follows.
-    4. **State feedback and warm-starting.** `MPC.measure(x_meas, t_meas)` injects the new measurement and `MPC.shift(dt)` rolls the primal trajectory and the augmented-Lagrangian duals forward, so each solve after the first starts from the previous plan rather than from scratch.
+    4. **State feedback and warm-starting.** `MPC.measure(x_meas, t_meas)` injects the new measurement and `MPC.advance()` rolls the primal trajectory and the augmented-Lagrangian duals forward, so each solve after the first starts from the previous plan rather than from scratch.
     5. **Constraint fidelity.** Commanded force stays inside $[-20\,\text{N}, +20\,\text{N}]$ throughout, peaking at the step-20 reaction to the kick, and the cart never leaves the track envelope $|p| \le 0.8\,\text{m}$. Both bounds are enforced by the augmented Lagrangian and the projected-Newton polish, not by clipping after the fact.
     """)
     return

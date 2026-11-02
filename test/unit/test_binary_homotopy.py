@@ -111,7 +111,7 @@ def test_reference_keeps_linear_control_cost_and_shift() -> None:
     pytest.importorskip("cyipopt")
     mpc = MPC(problem, Ipopt(options={"print_level": 0}), x0=jnp.zeros(1))
     first = mpc.solve()
-    mpc.shift()
+    mpc.advance(1)
     second = mpc.solve()
     assert first.success
     assert second.success

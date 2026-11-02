@@ -50,7 +50,7 @@ def _count_core_compiles(monkeypatch: pytest.MonkeyPatch, *, moving_goal: bool) 
             mpc.set_goal(jnp.array([np.pi + 0.01 * (step + 1), 0.0], dtype=jnp.float64))
         mpc.measure(x0, t)
         mpc.solve()
-        mpc.shift(DT)
+        mpc.advance(1)
         t += DT
     return builds
 

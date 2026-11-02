@@ -708,8 +708,8 @@ Holds one `Program`, the current `BoundaryConditions`, and the warm start.
 - `mpc.measure(x, t)` — inject the measurement into $x_0$, $t_0$.
 - `mpc.set_goal(xf)` — replace the reference with a constant window.
 - `mpc.set_reference(window)` / `mpc.push_reference(x_ref, u_ref)` — replace the tracked window
-  wholesale, or stage the point that enters it at the far end on the next shift.
-- `mpc.shift(dt)` — advance a knot: warm start and reference window both slide.
+  wholesale, or stage the point that enters it at the far end on the next advance.
+- `mpc.advance(steps=1)` — advance the horizon: warm start, clock, and reference window slide.
 
 ### Control loop
 
@@ -722,7 +722,7 @@ loop:
     mpc.set_goal(xf)                 # optional
     mpc.solve()                      # Ipopt() / OSQP() / Clarabel() / ALTRO() / ...
     u_command = mpc.controls[0]
-    mpc.shift(dt)                    # warm start next solve
+    mpc.advance(1)                   # warm start next solve
 ```
 
 The Julia `set_goal_state!` mutates the problem, the objective, and the goal constraints in

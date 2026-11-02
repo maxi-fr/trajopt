@@ -42,8 +42,8 @@ def _make_pendulum_problem(N: int = 15, dt: float = 0.05) -> tuple[Problem, Boun
     return prob, MPC(prob, Ipopt(), x0=jnp.array([0.1, 0.0]), t0=0.0, xf=xf).bc
 
 
-def test_mpc_update_step_and_warmstart_shift() -> None:
-    """Verify one update step runs the solve, returns control, and shifts the internal state."""
+def test_mpc_update_step_and_warmstart_advance() -> None:
+    """Verify one update step runs the solve, returns control, and advances the internal state."""
     prob, boundary = _make_pendulum_problem(N=10, dt=0.05)
     controller = TrajOptMPC(
         dt=0.05,

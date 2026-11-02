@@ -505,7 +505,7 @@ def measure_closed_loop_mpc(
     *,
     num_steps: int = 20,
 ) -> ClosedLoopStats:
-    """Measure closed-loop MPC sustained frequency, latency jitter, and warm-start speedup.
+    """Measure closed-loop MPC sustained frequency, latency jitter, and warm-start speedup across Horizon steps.
 
     Every timed section is preceded by a discarded solve, so the statistics describe the solver
     rather than JIT compilation: the first step of an uncompiled loop runs two orders of
@@ -527,7 +527,7 @@ def measure_closed_loop_mpc(
     t_loop_start = time.perf_counter()
 
     for _ in range(num_steps):
-        mpc.shift(dt_val)
+        mpc.advance(1)
         t_step_start = time.perf_counter()
         mpc.solve()
         durations.append(time.perf_counter() - t_step_start)

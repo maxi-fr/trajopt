@@ -92,7 +92,7 @@ def _run_closed_loop(z_seed):
         x_curr = dmodel.discrete_dynamics(x_curr, u_cmd, t_curr, DT)
         X_hist.append(np.asarray(x_curr))
 
-        mpc.shift(DT)
+        mpc.advance(1)
         t_curr += DT
 
     return np.array(X_hist), np.array(U_hist)

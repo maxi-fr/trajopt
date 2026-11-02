@@ -4,20 +4,6 @@
 
 `uv` runs everything. Add dependencies with `uv add <package>` instead of editing `pyproject.toml`.
 
-Iterate with targeted checks:
-
-```bash
-uv run pytest tests/test_foo.py -x
-uv run ty check src/trajopt/foo.py
-uv run ruff check --fix
-```
-
-Then run the gate once before calling the work done:
-
-```bash
-uv run pre-commit run --all-files
-```
-
 ## Clarify, then run
 
 Don't guess my intent. Name missing constraints, give the competing readings rather than picking one, push back if something simpler exists, ask when unclear. That comes before coding, not during. Once the approach is settled, execute to green without checking back in; if ambiguity surfaces mid-task, do the parts that don't depend on it and state your assumption.

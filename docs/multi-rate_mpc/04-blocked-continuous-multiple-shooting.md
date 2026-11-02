@@ -1,0 +1,17 @@
+# 04 — Blocked continuous multiple shooting in `Ipopt`
+
+**What to build:** Enable blocked continuous trajectory optimization (`control_block_steps >= 1`) in multiple shooting (`Ipopt`) through `Program.solve`, `MPC.solve`, and `Ipopt.transcription_callback`. Multiple shooting optimizes an internal NLP vector of `N` native states and `B = H // b` independent block controls (total length `N * n + B * m`), while evaluating the original Objective, native dynamics Defects, and Knot Point constraints on the native grid and publishing expanded native Trajectories and canonical-sized results.
+
+**Blocked by:** 01 — Count-based horizon advancement (`MPC.advance`), 03 — Structural control blocking on `Problem`, block bounds, and `Program` pairing guards.
+
+## Acceptance criteria
+
+- [ ] For a Problem with `H = N - 1` transitions and block size `b`, multiple shooting's internal NLP vector has length `N * n + B * m` (with `B = H // b`). For `H = 12, b = 6`, the NLP optimizes two independent control vectors while returning 12 native control vectors and 13 native state vectors.
+- [ ] Canonical warm starts and native control guesses are reduced to the internal NLP initial guess by taking the first native control in each block (`U[block * b]`) without averaging, rounding, or magnitude selection, while retaining the native state guess `X`.
+- [ ] Expanding internal block controls maps block control `floor(j / b)` to native step `j` for `j in 0..H-1`. Both successful and failed solves expand the returned block iterate to the native `Trajectory` and canonical Primal Vector `Z` while preserving the actual iterate and solver status.
+- [ ] The Objective is evaluated on all `N` native states, the expanded native controls, and the native time stamps without scaling stage weights by `b`, preserving `LQRObjective`, `TrackingObjective`, output-based Costs, stacked stage parameters, linear control costs, and run-time retargeting.
+- [ ] Multiple shooting retains the initial-state pin and all `H` native Defect equations; Defect `j` evaluates native transition `j` with its own `t[j]` and `dt[j]` and references native states `j`, `j + 1` and block control `floor(j / b)`.
+- [ ] `Ipopt.transcription_callback` differentiates with respect to the reduced internal NLP vector: Objective gradients reduce via `S^T`, sparse Defect and Knot Point Jacobians reference shared block-control columns with accumulated nonzeros (no duplicate `(row, col)` coordinates in the sparse structure), and sparse exact Lagrangian Hessians accumulate shared control/control (`S^T H_{uu} S`) and mixed state/control entries in lower-triangular sparse form without converting the whole Hessian to dense.
+- [ ] Central finite differences of the callback objective and constraints and finite differences of the Lagrangian gradient match `callback.gradient`, reconstructed sparse `callback.jacobian`, and reconstructed sparse `callback.hessian` on a smooth blocked Problem (`b > 1`).
+- [ ] For `b > 1`, `IpoptResult.lam` and `IpoptResult.mu` are canonical-sized zero arrays (`(P,)` and `(N * n + H * m,)`) on both success and failure, replacing any prior nonzero Multipliers in `MPC`'s `WarmStart`; for `b = 1`, existing canonical Multiplier output and dual warm-starting are preserved.
+- [ ] Canonical `compute_constraint_violation` verifies all native bounds, Defects, and constraints on the expanded Trajectory and checks that published controls are constant within each declared block of length `b`.

@@ -1,0 +1,14 @@
+# 02 — Canonical Multipliers, Cone feasibility, and dual warm starts in `SingleShooting`
+
+**What to build:** Bring unblocked (`b = 1`) `SingleShooting` into full compliance with the canonical `SolverResult` and `WarmStart` contracts. Every `SingleShooting` solve returns canonical-sized `lam` (with eliminated initial-state pin and native Defect Multipliers recovered via backward adjoint recursion from state stationarity) and canonical-sized `mu`, accepts warm-start duals from a canonical `WarmStart`, computes ordinary constraint violation on the expanded native Trajectory using Cone projection rather than raw absolute values, and passes driver-level Multiplier dimension validation at `MPC.solve`.
+
+**Blocked by:** 01 — Count-based horizon advancement (`MPC.advance`).
+
+## Acceptance criteria
+
+- [ ] For `b = 1`, `SingleShooting` returns `lam` of canonical length `P` (initial-state pin, all `H` native Defects, all stage and terminal Knot Point rows, and trailing Horizon rows) and `mu` of canonical length `N * n + H * m` using the `mult_x_U - mult_x_L` sign convention, with zero entries in all state-bound positions and control-bound Multipliers in their native control positions.
+- [ ] Eliminated initial-state pin and native Defect Multipliers in `b = 1` `SingleShooting` are recovered after the solve by a backward adjoint recursion from state stationarity using the retargeted Objective, native discrete dynamics Jacobians, and retained user/Horizon constraint Jacobians under the existing Defect sign convention `x_{k+1} - f(x_k, u_k) = 0`.
+- [ ] On a deterministic smooth unblocked Problem solved with `SingleShooting`, the canonical Lagrangian gradient residual evaluated with the returned `(Z, lam, mu)` vanishes within solver tolerance without any external wrapper.
+- [ ] A `b = 1` `SingleShooting` solve extracts retained user/Horizon constraint Multipliers and control-bound Multipliers from a supplied canonical `WarmStart` to warm-start IPOPT when duals are present, without supplying eliminated equation Multipliers as extra IPOPT rows.
+- [ ] `SingleShooting` computes `constraint_violation` via the canonical native evaluation over the rolled-out `Trajectory` and canonical Primal Vector `Z` (including bounds, initial-state pin, native Defects, Knot Point rows, and Horizon rows), measuring inequality violation as distance outside the permitted Cone so a satisfied negative residual for a `NegativeOrthant` row contributes zero rather than its absolute value.
+- [ ] `MPC.solve` validates that any nonempty `res.lam` and `res.mu` match the Problem's canonical constraint count `P` and canonical Primal Vector length `N * n + H * m`, raising a `ValueError` immediately on malformed custom results before any subsequent `MPC.advance` call, while preserving existing behavior for empty Multiplier arrays and reset/absent `al` state on IPOPT results.

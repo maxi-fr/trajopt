@@ -189,7 +189,7 @@ class TrajOptMPC(Controller[TrajOptMPCLog]):
 
         u_cmd = np.asarray(self.mpc.controls[0], dtype=np.float64)
 
-        self.mpc.shift(self.dt)
+        self.mpc.advance(1)
         solve_time = time.perf_counter() - t_start
 
         return u_cmd, TrajOptMPCLog(

@@ -137,7 +137,7 @@ def test_capped_penalties_stay_bounded_when_inherited_across_horizon_steps() -> 
         inherited |= bool(mu.max() > options.penalty_initial)
 
         x = dmodel.discrete_dynamics(x, mpc.controls[0], t, dt)
-        mpc.shift(dt)
+        mpc.advance(1)
         t += dt
 
     assert inherited, "penalties never crossed a step boundary, so this run does not exercise the carry"

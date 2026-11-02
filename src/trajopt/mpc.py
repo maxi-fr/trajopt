@@ -2,6 +2,7 @@ from collections.abc import Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from trajopt.problem import BoundaryConditions, Problem
 from trajopt.program import Program, WarmStart
@@ -72,7 +73,7 @@ class MPC:
     boundary data in `BoundaryConditions`, and the primal/dual iterates in a private `WarmStart`.
 
     The reference is a pushed window. `push_reference` stages the point that enters the horizon at
-    the far end; `shift` advances the window by one knot and appends it, holding the last point
+    the far end; `advance` advances the window by `steps` knots and appends it, holding the last point
     when nothing was pushed. A constant window is shift-invariant, so regulating to a fixed goal
     and tracking a moving one are the same mechanism with nothing special-cased.
 
@@ -191,12 +192,21 @@ class MPC:
         t = self.bc.t0 + jnp.concatenate([jnp.zeros(1, dtype=dt.dtype), jnp.cumsum(dt)])
         return Trajectory(X=X, U=U, t=t, dt=dt)
 
-    def measure(self, x: jax.Array | Sequence[float], t: float | jax.Array) -> None:
-        """Take the measured state x of shape (n,) at time t, pinning the warm start's first knot to it."""
+    def measure(self, x: jax.Array | Sequence[float], t: float | jax.Array | None = None) -> None:
+        """Update Boundary Conditions and pin the warm start's first Knot Point to measured state.
+
+        Parameters
+        ----------
+        x : jax.Array | Sequence[float]
+            Measured state of shape (n,).
+        t : float | jax.Array | None, optional
+            Timestamp of the measurement. Defaults to None, keeping current timestamp t0.
+        """
         x_arr = jnp.asarray(x, dtype=self.bc.x0.dtype)
+        t0_val = self.bc.t0 if t is None else jnp.asarray(t, dtype=self.bc.t0.dtype)
         self.bc = BoundaryConditions(
             x0=x_arr,
-            t0=jnp.asarray(t, dtype=self.bc.t0.dtype),
+            t0=t0_val,
             X_ref=self.bc.X_ref,
             U_ref=self.bc.U_ref,
             xf=self.bc.xf,
@@ -240,7 +250,7 @@ class MPC:
         x_ref: jax.Array | Sequence[float],
         u_ref: jax.Array | Sequence[float] | None = None,
     ) -> None:
-        """Stage the reference point the next `shift` appends at the far end of the window.
+        """Stage the reference point the next `advance` appends at the far end of the window.
 
         Parameters
         ----------
@@ -259,33 +269,55 @@ class MPC:
         )
         self._pending_ref = (jnp.asarray(x_ref, dtype=self.bc.X_ref.dtype), u)
 
-    def _advanced_reference(self) -> tuple[jax.Array | None, jax.Array | None]:
-        """Advance the reference window one knot, appending the pushed point or holding the last one."""
+    def _advanced_reference(self, steps: int) -> tuple[jax.Array | None, jax.Array | None]:
+        """Advance the reference window by `steps` Knot Points using endpoint hold semantics."""
         X_ref, U_ref = self.bc.X_ref, self.bc.U_ref
         if X_ref is None or U_ref is None:
             return None, None
-        x_new, u_new = (X_ref[-1], U_ref[-1]) if self._pending_ref is None else self._pending_ref
-        return (
-            jnp.concatenate([X_ref[1:], x_new[None, :]], axis=0),
-            jnp.concatenate([U_ref[1:], u_new[None, :]], axis=0),
-        )
+        for _ in range(steps):
+            x_new, u_new = (X_ref[-1], U_ref[-1]) if self._pending_ref is None else self._pending_ref
+            self._pending_ref = None
+            X_ref = jnp.concatenate([X_ref[1:], x_new[None, :]], axis=0)
+            U_ref = jnp.concatenate([U_ref[1:], u_new[None, :]], axis=0)
+        return X_ref, U_ref
 
-    def shift(self, dt: float | jax.Array | None = None) -> None:
-        """Advance the horizon one knot: shift the warm start, the clock, and the reference window.
+    def advance(self, steps: int = 1) -> None:
+        """Advance the Horizon by `steps` Knot Points: move warm start, clock, and reference window.
 
         Parameters
         ----------
-        dt : float | jax.Array | None, optional
-            Time the clock advances by. Defaults to None, meaning the problem's first step.
+        steps : int, optional
+            Number of native Knot Points to advance, in [0, H] where H = N - 1. Defaults to 1.
+
+        Raises
+        ------
+        TypeError
+            If `steps` is a boolean or not an integer.
+        ValueError
+            If `steps` is negative or exceeds H = N - 1.
         """
+        if isinstance(steps, (bool, np.bool_)):
+            msg = f"steps must be an integer, got {type(steps).__name__}."
+            raise TypeError(msg)
+        if not isinstance(steps, (int, np.integer)):
+            msg = f"steps must be an integer, got {type(steps).__name__}."
+            raise TypeError(msg)
+
+        h = int(self.problem.N) - 1
+        if steps < 0 or steps > h:
+            msg = f"steps must be between 0 and {h}, got {steps}."
+            raise ValueError(msg)
+
+        if steps == 0:
+            return
+
         problem = self.problem
-        self._ws = self._ws.shift(problem)
-        step = problem.dt[0] if dt is None else jnp.asarray(dt, dtype=self.bc.t0.dtype)
-        X_ref, U_ref = self._advanced_reference()
-        self._pending_ref = None
+        self._ws = self._ws.advance(problem, steps)
+        t0_advanced = self.bc.t0 + jnp.sum(problem.dt[:steps])
+        X_ref, U_ref = self._advanced_reference(steps)
         self.bc = BoundaryConditions(
             x0=self._ws.unpack(problem)[0][0],
-            t0=self.bc.t0 + step,
+            t0=t0_advanced,
             X_ref=X_ref,
             U_ref=U_ref,
             xf=self.bc.xf,

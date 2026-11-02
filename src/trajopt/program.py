@@ -85,7 +85,7 @@ class WarmStart(eqx.Module):
         return eqx.tree_at(lambda w: w.Z, self, _trajectory_to_z(X_new, U_new))
 
     def shift(self, problem: "Problem") -> "WarmStart":
-        """Advance this warm start one knot: every primal and dual quantity shifts with the horizon.
+        """Advance this warm start one Knot Point: every primal and dual quantity shifts with the Horizon.
 
         Knot k of the new horizon is knot k + 1 of the old one, so each quantity drops its first
         knot and holds its last, mirroring `Z`. Holding is the right vacancy fill for a multiplier
@@ -108,6 +108,13 @@ class WarmStart(eqx.Module):
             jnp.concatenate([U[1:], U[-1:]], axis=0),
         )
         return WarmStart(Z=Z, lam=self._shifted_lam(problem), mu=self._shifted_mu(problem), al=_shifted_al(self.al))
+
+    def advance(self, problem: "Problem", steps: int = 1) -> "WarmStart":
+        """Advance this warm start by `steps` Knot Points."""
+        ws = self
+        for _ in range(steps):
+            ws = ws.shift(problem)
+        return ws
 
     def _shifted_lam(self, problem: "Problem") -> jax.Array:
         """Transcription duals of shape (P,) advanced one knot, gathered through `_lam_shift_index`."""
