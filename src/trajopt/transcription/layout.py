@@ -34,6 +34,32 @@ def _trajectory_to_z(X: jax.Array, U: jax.Array) -> jax.Array:
     return jnp.concatenate([Z_stages, X[-1]])
 
 
+def _trajectory_to_nlp_z(X: jax.Array, U_blk: jax.Array, b: int) -> jax.Array:
+    """Interleave states and block controls into the flat NLP primal vector z_nlp.
+
+    Parameters
+    ----------
+    X : jax.Array
+        Stacked state trajectory of shape (N, n).
+    U_blk : jax.Array
+        Stacked block control trajectory of shape (B, m) where B = (N - 1) // b.
+    b : int
+        Block size in native steps.
+
+    Returns
+    -------
+    jax.Array
+        Flat NLP primal vector z_nlp of shape (N * n + B * m,).
+    """
+    if b == 1:
+        return _trajectory_to_z(X, U_blk)
+    n = X.shape[1]
+    B = U_blk.shape[0]
+    X_blocks = X[:-1].reshape((B, b * n))
+    stages = jnp.concatenate([X_blocks, U_blk], axis=1).reshape(-1)
+    return jnp.concatenate([stages, X[-1]])
+
+
 def _z_to_trajectory(
     Z: jax.Array,
     N: int,
@@ -65,6 +91,62 @@ def _z_to_trajectory(
     X_term = Z[stage_len : stage_len + n]
     X = jnp.vstack([X_stage, X_term])
     return X, U
+
+
+def _nlp_z_to_trajectory(
+    z: jax.Array,
+    N: int,
+    n: int,
+    m: int,
+    b: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Recover state trajectory and block controls from the flat NLP primal vector z_nlp.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Flat NLP primal vector of shape (N * n + B * m,).
+    N : int
+        Horizon length in knot points.
+    n : int
+        State dimension.
+    m : int
+        Control dimension.
+    b : int
+        Block size in native steps.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        State trajectory X of shape (N, n) and block controls U_blk of shape (B, m).
+    """
+    if b == 1:
+        return _z_to_trajectory(z, N, n, m)
+    H = N - 1
+    B = H // b
+    d_blk = b * n + m
+    stage_len = B * d_blk
+    stage_part = z[:stage_len].reshape((B, d_blk))
+    X_stage = stage_part[:, : b * n].reshape((H, n))
+    U_blk = stage_part[:, b * n :]
+    X_term = z[stage_len : stage_len + n]
+    X = jnp.vstack([X_stage, X_term])
+    return X, U_blk
+
+
+def reduce_controls(U: jax.Array | np.ndarray, b: int) -> jax.Array | np.ndarray:
+    """Reduce canonical controls of shape (H, m) to block controls of shape (B, m) via first-step sampling."""
+    return U[::b]
+
+
+def expand_controls(U_blk: jax.Array, b: int) -> jax.Array:
+    """Expand block controls of shape (B, m) to native controls of shape (B * b, m)."""
+    return jnp.repeat(U_blk, b, axis=0)
+
+
+def expand_controls_np(U_blk: np.ndarray, b: int) -> np.ndarray:
+    """Expand numpy block controls of shape (B, m) to native controls of shape (B * b, m)."""
+    return np.repeat(U_blk, b, axis=0)
 
 
 def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
@@ -166,6 +248,42 @@ def blocked_control_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
                     raise ValueError(msg)
 
     return block_uL, block_uU
+
+
+def nlp_primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+    """Extract solver variable limits zL <= z_nlp <= zU for the reduced NLP vector.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance containing constraints, horizon dimensions, and control_block_steps.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Lower bounds zL and upper bounds zU of shape (N * n + B * m,).
+    """
+    b = int(problem.control_block_steps)
+    if b == 1:
+        return primal_bounds(problem)
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    H = N - 1
+    B = H // b
+
+    xL, xU, _, _ = problem.constraints.primal_bounds()
+    block_uL, block_uU = blocked_control_bounds(problem)
+
+    xL_blocks = xL[:-1].reshape((B, b * n))
+    zL_stages = np.concatenate([xL_blocks, block_uL], axis=1).reshape(-1)
+    zL = np.concatenate([zL_stages, xL[-1]])
+
+    xU_blocks = xU[:-1].reshape((B, b * n))
+    zU_stages = np.concatenate([xU_blocks, block_uU], axis=1).reshape(-1)
+    zU = np.concatenate([zU_stages, xU[-1]])
+
+    return zL.astype(np.float64), zU.astype(np.float64)
 
 
 def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -283,7 +401,7 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     dt: float | jax.Array = 0.05,
     xf: jax.Array | np.ndarray | None = None,
 ) -> float:
-    """Compute maximum violation across dynamics, bounds, Knot Point and Horizon constraints.
+    """Compute maximum violation across dynamics, bounds, Knot Point, Horizon, and block constancy constraints.
 
     Parameters
     ----------
@@ -357,7 +475,16 @@ def compute_constraint_violation(  # noqa: PLR0913 -- Metric calculation takes 6
     for con in problem.constraints.horizon_constraints:
         val = con.evaluate(Z_arr)
         viol_horizon = max(viol_horizon, float(jnp.max(jnp.abs(val - con.cone.project(val)))))
-    return max(max_primal, viol_init, viol_dyn, viol_stage, viol_horizon)
+
+    viol_block = 0.0
+    b = int(problem.control_block_steps)
+    if b > 1:
+        H = N - 1
+        B = H // b
+        U_blocks = np.asarray(U, dtype=np.float64).reshape((B, b, m))
+        viol_block = float(np.max(np.abs(U_blocks - U_blocks[:, :1, :])))
+
+    return max(max_primal, viol_init, viol_dyn, viol_stage, viol_horizon, viol_block)
 
 
 def parse_solver_initial_state(

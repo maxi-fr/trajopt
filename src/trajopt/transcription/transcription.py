@@ -1,3 +1,5 @@
+from typing import Any
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -7,7 +9,7 @@ from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
-from trajopt.transcription.layout import _z_to_trajectory
+from trajopt.transcription.layout import _nlp_z_to_trajectory, _trajectory_to_z, _z_to_trajectory, expand_controls
 
 
 def _cost_fn(
@@ -446,3 +448,487 @@ def eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 7 arguments
 ) -> jax.Array:
     """Evaluate lower-triangular nonzeros of the Lagrangian Hessian."""
     return hessian(problem, Z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, bc=bc)
+
+
+def _nlp_cost_fn(
+    problem: Problem,
+    z: jax.Array,
+    t0: float | jax.Array,
+    dt: float | jax.Array,
+    bc: BoundaryConditions | None = None,
+) -> jax.Array:
+    """Evaluate total trajectory cost scalar J(z_nlp) on expanded controls."""
+    b = int(problem.control_block_steps)
+    if b == 1:
+        return _cost_fn(problem, z, t0, dt, bc)
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+
+    X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
+    U = expand_controls(U_blk, b)
+    dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
+    t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
+    t_term = t0 + jnp.sum(dt_arr)
+
+    obj = retarget_problem(problem, bc).obj
+
+    stage_costs = obj.stage_cost.stage_costs(X[:-1], U, t_stage)
+    term_cost = obj.terminal_cost.evaluate(X[-1], None, t_term)
+    return jnp.sum(stage_costs) + term_cost
+
+
+@eqx.filter_jit
+def nlp_cost_and_grad(
+    problem: Problem,
+    z: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    bc: BoundaryConditions | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Evaluate objective value J(z_nlp) and its gradient nabla J(z_nlp) of shape (N * n + B * m,)."""
+    return jax.value_and_grad(lambda z_: _nlp_cost_fn(problem, z_, t0, dt, bc))(z)
+
+
+@eqx.filter_jit
+def nlp_eval_f(
+    problem: Problem,
+    z: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    bc: BoundaryConditions | None = None,
+) -> jax.Array:
+    """Evaluate objective value J(z_nlp) as a scalar on expanded controls."""
+    return _nlp_cost_fn(problem, z, t0, dt, bc)
+
+
+@eqx.filter_jit
+def nlp_eval_grad_f(
+    problem: Problem,
+    z: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    bc: BoundaryConditions | None = None,
+) -> jax.Array:
+    """Evaluate objective gradient nabla J(z_nlp) of shape (N * n + B * m,)."""
+    return jax.grad(lambda z_: _nlp_cost_fn(problem, z_, t0, dt, bc))(z)
+
+
+def _nlp_constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
+    problem: Problem,
+    z: jax.Array,
+    x0: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
+) -> jax.Array:
+    """Evaluate constraint vector c(z_nlp) of shape (P,) without Jacobians."""
+    b = int(problem.control_block_steps)
+    if b == 1:
+        return _constraints_fn(problem, z, x0, t0, dt, xf=xf)
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
+    U = expand_controls(U_blk, b)
+    Z = _trajectory_to_z(X, U)
+    return _constraints_fn(problem, Z, x0, t0, dt, xf=xf)
+
+
+def _nlp_horizon_jac(  # noqa: PLR0913 -- Horizon Jacobian helper takes 7 arguments
+    horizon_constraints: tuple[Any, ...],
+    Z_canon: jax.Array,
+    *,
+    N: int,
+    n: int,
+    m: int,
+    b: int,
+    B: int,
+) -> tuple[list[jax.Array], list[jax.Array]]:
+    """Evaluate Horizon constraint residuals and sparse Jacobian rows for z_nlp."""
+    c_list: list[jax.Array] = []
+    jac_list: list[jax.Array] = []
+
+    def _map_col(c: int) -> int:
+        stage_part_len = (N - 1) * (n + m)
+        if c >= stage_part_len:
+            return B * (b * n + m) + (c - stage_part_len)
+        stage_idx = c // (n + m)
+        rem = c % (n + m)
+        if rem < n:
+            return (stage_idx // b) * (b * n + m) + (stage_idx % b) * n + rem
+        return (stage_idx // b) * (b * n + m) + b * n + (rem - n)
+
+    for con in horizon_constraints:
+        c_list.append(con.evaluate(Z_canon))
+        mapped = [_map_col(int(c)) for c in con.inds]
+        unique_cols = np.unique(mapped)
+        cols_arr = jnp.asarray(mapped)
+        u_cols_arr = jnp.asarray(unique_cols)
+
+        def acc_col(u_col: jax.Array, cols: jax.Array = cols_arr, A: jax.Array = con.A) -> jax.Array:
+            mask = cols == u_col
+            return jnp.sum(jnp.where(mask[None, :], A, 0.0), axis=1)
+
+        A_nlp = jax.vmap(acc_col, in_axes=0, out_axes=1)(u_cols_arr)
+        jac_list.append(A_nlp.reshape(-1))
+
+    return c_list, jac_list
+
+
+def _nlp_stage_constraints_and_jac(  # noqa: PLR0913 -- Stage helper takes 8 arguments
+    discrete_model: DiscreteDynamics,
+    knot_evaluators: tuple[BuiltKnotConstraint, ...],
+    X: jax.Array,
+    U_blk: jax.Array,
+    *,
+    b: int,
+    t_stage: jax.Array,
+    dt_arr: jax.Array,
+    xf: jax.Array | None,
+) -> tuple[list[jax.Array], list[jax.Array]]:
+    """Evaluate native Defect equations, stage Knot Point constraints, and their Jacobians for z_nlp."""
+    H = len(X) - 1
+    n = X.shape[1]
+    eye_n = jnp.eye(n, dtype=X.dtype).reshape(-1)
+    c_list: list[jax.Array] = []
+    jac_list: list[jax.Array] = []
+
+    for j in range(H):
+        k = j // b
+        u_j = U_blk[k]
+        xk = X[j]
+        x_next = X[j + 1]
+        tk = t_stage[j]
+        dtk = dt_arr[j]
+
+        defect = x_next - discrete_model.discrete_dynamics(xk, u_j, tk, dtk)
+        Ak = discrete_model.state_jacobian(xk, u_j, tk, dtk)
+        Bk = discrete_model.control_jacobian(xk, u_j, tk, dtk)
+
+        c_list.append(defect)
+        jac_list.append(-Ak.reshape(-1))
+        jac_list.append(-Bk.reshape(-1))
+        jac_list.append(eye_n)
+
+        if j < len(knot_evaluators) and knot_evaluators[j].p > 0:
+            evaluator = knot_evaluators[j]
+            c_list.append(evaluator.evaluate(xk, u_j, tk, xf=xf))
+            jx_j, ju_j = evaluator.jacobian(xk, u_j, tk)
+            jac_list.append(jx_j.reshape(-1))
+            jac_list.append(ju_j.reshape(-1))
+
+    return c_list, jac_list
+
+
+@eqx.filter_jit
+def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 arguments
+    problem: Problem,
+    z: jax.Array,
+    x0: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Evaluate canonical constraints and Jacobian with respect to z_nlp.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance containing model, constraints, and horizon.
+    z : jax.Array
+        Flat NLP primal vector of shape (N * n + B * m,).
+    x0 : jax.Array
+        Initial state condition of shape (n,).
+    t0 : float | jax.Array, optional
+        Initial time. Defaults to 0.0.
+    dt : float | jax.Array, optional
+        Time step duration. Defaults to 0.05.
+    xf : jax.Array | None, optional
+        Goal state vector. Defaults to None.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        Constraint vector c(z) of shape (P,) and sparse Jacobian nonzeros of shape (nnz_jac,).
+    """
+    b = int(problem.control_block_steps)
+    if b == 1:
+        return constraints_and_jac(problem, z, x0, t0, dt, xf=xf)
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    H = N - 1
+    B = H // b
+    discrete_model = problem.model
+    built_constraints = problem.constraints
+    knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
+
+    X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
+    dt_arr = jnp.broadcast_to(jnp.asarray(dt), (H,))
+    t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
+    t_term = t0 + jnp.sum(dt_arr)
+
+    # 1. Initial state defect and jacobian
+    c_init = X[0] - x0
+    jac_init = jnp.eye(n, dtype=z.dtype).reshape(-1)
+
+    c_list: list[jax.Array] = [c_init]
+    jac_list: list[jax.Array] = [jac_init]
+
+    c_stages, jac_stages = _nlp_stage_constraints_and_jac(
+        discrete_model,
+        knot_evaluators,
+        X,
+        U_blk,
+        b=b,
+        t_stage=t_stage,
+        dt_arr=dt_arr,
+        xf=xf,
+    )
+    c_list.extend(c_stages)
+    jac_list.extend(jac_stages)
+
+    if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
+        evaluator = knot_evaluators[N - 1]
+        val_term = evaluator.evaluate(X[-1], None, t_term, xf=xf)
+        jx_term, _ = evaluator.jacobian(X[-1], None, t_term)
+        c_list.append(val_term)
+        jac_list.append(jx_term.reshape(-1))
+
+    U_expanded = expand_controls(U_blk, b)
+    Z_canon = _trajectory_to_z(X, U_expanded)
+
+    c_hz, jac_hz = _nlp_horizon_jac(
+        built_constraints.horizon_constraints,
+        Z_canon,
+        N=N,
+        n=n,
+        m=m,
+        b=b,
+        B=B,
+    )
+    c_list.extend(c_hz)
+    jac_list.extend(jac_hz)
+
+    c_all = jnp.concatenate(c_list)
+    jac_all = jnp.concatenate(jac_list)
+    return c_all, jac_all
+
+
+@eqx.filter_jit
+def nlp_eval_g(  # noqa: PLR0913 -- Constraint callback takes 6 arguments
+    problem: Problem,
+    z: jax.Array,
+    x0: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
+) -> jax.Array:
+    """Evaluate constraint vector c(z_nlp) of shape (P,)."""
+    return _nlp_constraints_fn(problem, z, x0, t0, dt, xf=xf)
+
+
+@eqx.filter_jit
+def nlp_eval_jac_g(  # noqa: PLR0913 -- Constraint Jacobian callback takes 6 arguments
+    problem: Problem,
+    z: jax.Array,
+    x0: jax.Array,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    *,
+    xf: jax.Array | None = None,
+) -> jax.Array:
+    """Evaluate sparse constraint Jacobian values of shape (nnz_jac,)."""
+    _, jac_val = nlp_constraints_and_jac(problem, z, x0, t0, dt, xf=xf)
+    return jac_val
+
+
+def _block_hessian_entries(  # noqa: PLR0913 -- Block Hessian helper takes 14 arguments
+    problem: Problem,
+    X: jax.Array,
+    u_blk_k: jax.Array,
+    k: int,
+    *,
+    b: int,
+    n: int,
+    m: int,
+    t_stage: jax.Array,
+    dt_arr: jax.Array,
+    lam_dyn_list: list[jax.Array],
+    lam_con_list: list[jax.Array | None],
+    knot_evaluators: tuple[BuiltKnotConstraint, ...],
+    obj_factor: float | jax.Array,
+    discrete_model: DiscreteDynamics,
+) -> list[jax.Array]:
+    """Evaluate lower-triangular nonzeros for one control block."""
+    H_xx_list = []
+    H_ux_list = []
+    H_uu_list = []
+
+    for s in range(b):
+        j = k * b + s
+        zk = jnp.concatenate([X[j], u_blk_k])
+        tk = t_stage[j]
+        dtk = dt_arr[j]
+        lam_dyn_j = lam_dyn_list[j]
+        lam_con_j = lam_con_list[j]
+        evaluator_j = knot_evaluators[j] if j < len(knot_evaluators) else None
+        stage_cost_j = problem.obj[j]
+
+        Hj = _knot_lagrangian_hessian(
+            stage_cost_j,
+            discrete_model,
+            evaluator_j,
+            lam_dyn_k=lam_dyn_j,
+            lam_con_k=lam_con_j,
+            zk=zk,
+            tk=tk,
+            dtk=dtk,
+            obj_factor=obj_factor,
+            n=n,
+        )
+        H_xx_list.append(Hj[:n, :n])
+        H_ux_list.append(Hj[n:, :n])
+        H_uu_list.append(Hj[n:, n:])
+
+    tril_r_n, tril_c_n = np.tril_indices(n)
+    tril_r_m, tril_c_m = np.tril_indices(m)
+
+    block_entries: list[jax.Array] = []
+    block_entries.extend(H_xx_list[s][tril_r_n, tril_c_n] for s in range(b))
+    block_entries.extend(H_ux_list[s].reshape(-1) for s in range(b))
+    H_uu_blk = jnp.sum(jnp.stack(H_uu_list), axis=0)
+    block_entries.append(H_uu_blk[tril_r_m, tril_c_m])
+    return block_entries
+
+
+@eqx.filter_jit
+def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
+    problem: Problem,
+    z: jax.Array,
+    *,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    obj_factor: float | jax.Array = 1.0,
+    lam: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
+) -> jax.Array:
+    """Evaluate lower-triangular nonzeros of the Lagrangian Hessian for z_nlp.
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance containing model, objective, constraints, and horizon.
+    z : jax.Array
+        Flat NLP primal vector of shape (N * n + B * m,).
+    t0 : float | jax.Array, optional
+        Initial time. Defaults to 0.0.
+    dt : float | jax.Array, optional
+        Time step duration. Defaults to 0.05.
+    obj_factor : float | jax.Array, optional
+        Objective scale factor sigma_f. Defaults to 1.0.
+    lam : jax.Array | None, optional
+        Constraint multiplier vector of shape (P,). Defaults to zeros.
+    bc : BoundaryConditions | None, optional
+        Traced boundary conditions, accepted for signature parity. Defaults to None.
+
+    Returns
+    -------
+    jax.Array
+        Lower-triangular nonzeros of the Lagrangian Hessian of shape (nnz_hess,).
+    """
+    del bc
+    b = int(problem.control_block_steps)
+    if b == 1:
+        return hessian(problem, z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam)
+
+    N = int(problem.N)
+    n = int(problem.model.n)
+    m = int(problem.model.m)
+    discrete_model = problem.model
+    built_constraints = problem.constraints
+    knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
+
+    H = N - 1
+    B = H // b
+    X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
+    dt_arr = jnp.broadcast_to(jnp.asarray(dt), (H,))
+    t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
+    t_term = t0 + jnp.sum(dt_arr)
+
+    P_total = n + H * n + sum(k.p for k in knot_evaluators)
+    lam_vec = jnp.zeros(P_total, dtype=z.dtype) if lam is None else jnp.asarray(lam, dtype=z.dtype)
+
+    offset = n
+    lam_dyn_list = []
+    lam_con_list = []
+    for k in range(H):
+        lam_dyn_list.append(lam_vec[offset : offset + n])
+        offset += n
+        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        if pk > 0:
+            lam_con_list.append(lam_vec[offset : offset + pk])
+            offset += pk
+        else:
+            lam_con_list.append(None)
+
+    p_term = knot_evaluators[N - 1].p if len(knot_evaluators) > N - 1 else 0
+    lam_con_term = lam_vec[offset : offset + p_term] if p_term > 0 else None
+
+    tril_r_term, tril_c_term = np.tril_indices(n)
+    hess_blocks: list[jax.Array] = []
+
+    for k in range(B):
+        entries_k = _block_hessian_entries(
+            problem,
+            X,
+            U_blk[k],
+            k,
+            b=b,
+            n=n,
+            m=m,
+            t_stage=t_stage,
+            dt_arr=dt_arr,
+            lam_dyn_list=lam_dyn_list,
+            lam_con_list=lam_con_list,
+            knot_evaluators=knot_evaluators,
+            obj_factor=obj_factor,
+            discrete_model=discrete_model,
+        )
+        hess_blocks.extend(entries_k)
+
+    # 4. Terminal knot
+    x_term = X[-1]
+    evaluator_term = knot_evaluators[N - 1] if len(knot_evaluators) > N - 1 else None
+    H_term = _term_lagrangian_hessian(
+        problem.obj.terminal_cost,
+        evaluator_term,
+        lam_con_term,
+        x_term,
+        t_term,
+        obj_factor=obj_factor,
+    )
+    hess_blocks.append(H_term[tril_r_term, tril_c_term])
+
+    return jnp.concatenate(hess_blocks)
+
+
+@eqx.filter_jit
+def nlp_eval_h(  # noqa: PLR0913 -- Lagrangian Hessian callback requires 7 arguments
+    problem: Problem,
+    z: jax.Array,
+    *,
+    t0: float | jax.Array = 0.0,
+    dt: float | jax.Array = 0.05,
+    obj_factor: float | jax.Array = 1.0,
+    lam: jax.Array | None = None,
+    bc: BoundaryConditions | None = None,
+) -> jax.Array:
+    """Evaluate lower-triangular nonzeros of the Lagrangian Hessian for z_nlp."""
+    return nlp_hessian(problem, z, t0=t0, dt=dt, obj_factor=obj_factor, lam=lam, bc=bc)

@@ -10,11 +10,16 @@ from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
+    _nlp_z_to_trajectory,
+    _trajectory_to_nlp_z,
+    _trajectory_to_z,
     _z_to_trajectory,
     compute_constraint_violation,
     constraint_bounds,
+    expand_controls,
+    nlp_primal_bounds,
     parse_solver_initial_state,
-    primal_bounds,
+    reduce_controls,
 )
 from trajopt.transcription.result import split_bound_duals, warm_start_duals
 from trajopt.transcription.sparsity import (
@@ -23,10 +28,11 @@ from trajopt.transcription.sparsity import (
 )
 from trajopt.transcription.transcription import (
     eval_f,
-    eval_g,
-    eval_grad_f,
-    eval_h,
-    eval_jac_g,
+    nlp_eval_f,
+    nlp_eval_g,
+    nlp_eval_grad_f,
+    nlp_eval_h,
+    nlp_eval_jac_g,
 )
 
 _SUCCESS_STATUSES = {0, 1}  # 0: Solve_Succeeded, 1: Solved_To_Acceptable_Level
@@ -97,6 +103,9 @@ class _IpoptCallback:
         N = int(problem.N)
         n = int(problem.model.n)
         m = int(problem.model.m)
+        b = int(problem.control_block_steps)
+        H = N - 1
+        B = H // b
         p_seq = tuple(int(pk) for pk in problem.constraints.p)
 
         self.jac_rows, self.jac_cols = jacobian_sparsity_pattern(
@@ -106,10 +115,11 @@ class _IpoptCallback:
             p_seq,
             tuple(c.inds for c in problem.constraints.horizon_constraints),
             tuple(c.p for c in problem.constraints.horizon_constraints),
+            b=b,
         )
-        self.hess_rows, self.hess_cols = hessian_sparsity_pattern(N, n, m)
+        self.hess_rows, self.hess_cols = hessian_sparsity_pattern(N, n, m, b=b)
         self.binary_z_indices = np.asarray(
-            [k * (n + m) + n + i for k in range(N - 1) for i in problem.binary_control_indices], dtype=np.int32
+            [k * (b * n + m) + b * n + i for k in range(B) for i in problem.binary_control_indices], dtype=np.int32
         )
         self.beta = 0.0
         self.iteration_count = 0
@@ -122,23 +132,29 @@ class _IpoptCallback:
 
     def objective(self, z: np.ndarray) -> float:
         """Evaluate caller cost plus the current binary homotopy penalty."""
+        b = int(self.problem.control_block_steps)
         a = z[self.binary_z_indices]
-        return float(eval_f(self.problem, jnp.asarray(z), self.t0, self.dt)) + self.beta * float(np.sum(a * (1 - a)))
+        return float(nlp_eval_f(self.problem, jnp.asarray(z), self.t0, self.dt)) + b * self.beta * float(
+            np.sum(a * (1 - a))
+        )
 
     def gradient(self, z: np.ndarray) -> np.ndarray:
         """Evaluate caller gradient plus the current binary penalty gradient."""
-        grad = np.asarray(eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64).copy()
-        grad[self.binary_z_indices] += self.beta * (1 - 2 * z[self.binary_z_indices])
+        b = int(self.problem.control_block_steps)
+        grad = np.asarray(nlp_eval_grad_f(self.problem, jnp.asarray(z), self.t0, self.dt), dtype=np.float64).copy()
+        grad[self.binary_z_indices] += b * self.beta * (1 - 2 * z[self.binary_z_indices])
         return grad
 
     def constraints(self, z: np.ndarray) -> np.ndarray:
         """Evaluate constraint vector c(z)."""
-        return np.asarray(eval_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64)
+        return np.asarray(
+            nlp_eval_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64
+        )
 
     def jacobian(self, z: np.ndarray) -> np.ndarray:
         """Evaluate sparse constraint Jacobian values."""
         return np.asarray(
-            eval_jac_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64
+            nlp_eval_jac_g(self.problem, jnp.asarray(z), self.x0, self.t0, self.dt, xf=self.xf), dtype=np.float64
         )
 
     def jacobianstructure(self) -> tuple[np.ndarray, np.ndarray]:
@@ -147,8 +163,9 @@ class _IpoptCallback:
 
     def hessian(self, z: np.ndarray, lagrange: np.ndarray, obj_factor: float = 1.0) -> np.ndarray:
         """Evaluate Lagrangian Hessian values including scaled binary diagonal terms."""
+        b = int(self.problem.control_block_steps)
         values = np.asarray(
-            eval_h(
+            nlp_eval_h(
                 self.problem,
                 jnp.asarray(z),
                 t0=self.t0,
@@ -162,7 +179,7 @@ class _IpoptCallback:
         ).copy()
         diagonal = self.hess_rows == self.hess_cols
         binary = np.isin(self.hess_rows, self.binary_z_indices)
-        values[diagonal & binary] -= 2 * self.beta * obj_factor
+        values[diagonal & binary] -= 2 * b * self.beta * obj_factor
         return values
 
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
@@ -261,15 +278,24 @@ class Ipopt:
         N = int(problem.N)
         n = int(problem.model.n)
         m = int(problem.model.m)
+        b = int(problem.control_block_steps)
 
         x0_arr, t0_arr, dt_arr, xf_val, z0_jax = parse_solver_initial_state(problem, bc, ws)
         problem = retarget_problem(problem, bc)
         dt_arr = jnp.broadcast_to(dt_arr, (N - 1,))
-        z0 = np.asarray(z0_jax, dtype=np.float64)
-        lam0, mu0 = warm_start_duals(problem, ws)
+
+        if b > 1:
+            X_guess, U_guess = _z_to_trajectory(z0_jax, N, n, m)
+            U_blk_guess = jnp.asarray(reduce_controls(U_guess, b))
+            z0 = np.asarray(_trajectory_to_nlp_z(X_guess, U_blk_guess, b), dtype=np.float64)
+            lam0 = None
+            mu0 = None
+        else:
+            z0 = np.asarray(z0_jax, dtype=np.float64)
+            lam0, mu0 = warm_start_duals(problem, ws)
 
         # Bounds
-        zL, zU = primal_bounds(problem)
+        zL, zU = nlp_primal_bounds(problem)
         gL, gU = constraint_bounds(problem)
 
         cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
@@ -290,22 +316,65 @@ class Ipopt:
                 nlp.add_option(k, v)
 
         z_opt, info, pass_count, binary_distance = self._solve_passes(nlp, cb, z0, lam0, mu0)
+        return self._build_result(
+            problem,
+            cb,
+            z_opt,
+            info,
+            pass_count,
+            binary_distance,
+            x0_arr=x0_arr,
+            t0_arr=t0_arr,
+            dt_arr=dt_arr,
+            xf_val=xf_val,
+            gL_len=len(gL),
+        )
+
+    def _build_result(  # noqa: PLR0913, PLR0917 -- unpack helper needs solve metadata
+        self,
+        problem: Problem,
+        cb: _IpoptCallback,
+        z_opt: np.ndarray,
+        info: dict[str, Any],
+        pass_count: int,
+        binary_distance: float,
+        *,
+        x0_arr: jax.Array,
+        t0_arr: jax.Array,
+        dt_arr: jax.Array,
+        xf_val: jax.Array | None,
+        gL_len: int,
+    ) -> IpoptResult:
+        """Expand optimal NLP iterate and package canonical IpoptResult."""
+        N = int(problem.N)
+        n = int(problem.model.n)
+        m = int(problem.model.m)
+        b = int(problem.control_block_steps)
+
         status = int(info.get("status", -1))
         success = status in _SUCCESS_STATUSES and (
             not problem.binary_control_indices or (pass_count > 1 and binary_distance <= self.binary_tolerance)
         )
         message = str(info.get("status_msg", ""))
-        cost_val = float(eval_f(problem, jnp.asarray(z_opt), t0_arr, dt_arr))
+
+        z_opt_arr = jnp.asarray(z_opt, dtype=jnp.float64)
+        if b > 1:
+            X_opt, U_blk_opt = _nlp_z_to_trajectory(z_opt_arr, N, n, m, b)
+            U_opt = expand_controls(U_blk_opt, b)
+            Z_opt_jax = _trajectory_to_z(X_opt, U_opt)
+        else:
+            Z_opt_jax = z_opt_arr
+            X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
+
+        cost_val = float(eval_f(problem, Z_opt_jax, t0_arr, dt_arr))
         a = z_opt[cb.binary_z_indices]
         info.update(
             homotopy_beta=cb.beta,
-            homotopy_penalty=cb.beta * float(np.sum(a * (1 - a))),
+            homotopy_penalty=b * cb.beta * float(np.sum(a * (1 - a))),
             binary_distance=binary_distance,
             homotopy_passes=pass_count,
         )
 
-        Z_opt_jax = jnp.asarray(z_opt, dtype=jnp.float64)
-        X_opt, U_opt = _z_to_trajectory(Z_opt_jax, N, n, m)
         t_opt = t0_arr + jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), jnp.cumsum(dt_arr)])
 
         opt_traj = Trajectory(
@@ -328,10 +397,15 @@ class Ipopt:
             feasibility_tol = float(self.options.get("constr_viol_tol", 1e-4))
             success = success and viol <= feasibility_tol
 
-        lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
-        mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
-        mult_x_U_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
-        mu_out = mult_x_U_out - mult_x_L_out
+        if b > 1:
+            nz_primal = N * n + (N - 1) * m
+            lam_out = np.zeros(gL_len, dtype=np.float64)
+            mu_out = np.zeros(nz_primal, dtype=np.float64)
+        else:
+            lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)
+            mult_x_L_out = np.asarray(info.get("mult_x_L", _EMPTY), dtype=np.float64)
+            mult_x_U_out = np.asarray(info.get("mult_x_U", _EMPTY), dtype=np.float64)
+            mu_out = mult_x_U_out - mult_x_L_out
 
         return IpoptResult(
             trajectory=opt_traj,
