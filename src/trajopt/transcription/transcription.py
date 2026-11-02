@@ -15,6 +15,7 @@ from trajopt.transcription.layout import (
     _z_to_trajectory,
     canonical_to_nlp_col,
     expand_controls,
+    retained_knot_evaluators,
 )
 
 
@@ -534,13 +535,8 @@ def _nlp_constraints_fn(  # noqa: PLR0913 -- Constraint evaluation takes 6 argum
     b = int(problem.control_block_steps)
     if b == 1:
         return _constraints_fn(problem, z, x0, t0, dt, xf=xf)
-    N = int(problem.N)
-    n = int(problem.model.n)
-    m = int(problem.model.m)
-    X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
-    U = expand_controls(U_blk, b)
-    Z = _trajectory_to_z(X, U)
-    return _constraints_fn(problem, Z, x0, t0, dt, xf=xf)
+    c_val, _ = nlp_constraints_and_jac(problem, z, x0, t0, dt, xf=xf)
+    return c_val
 
 
 def _nlp_horizon_jac(  # noqa: PLR0913 -- Horizon Jacobian helper takes 7 arguments
@@ -662,8 +658,7 @@ def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 a
     H = N - 1
     B = H // b
     discrete_model = problem.model
-    built_constraints = problem.constraints
-    knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
+    retained_evaluators = retained_knot_evaluators(problem)
 
     X, U_blk = _nlp_z_to_trajectory(z, N, n, m, b)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (H,))
@@ -679,7 +674,7 @@ def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 a
 
     c_stages, jac_stages = _nlp_stage_constraints_and_jac(
         discrete_model,
-        knot_evaluators,
+        retained_evaluators,
         X,
         U_blk,
         b=b,
@@ -690,8 +685,8 @@ def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 a
     c_list.extend(c_stages)
     jac_list.extend(jac_stages)
 
-    if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
-        evaluator = knot_evaluators[N - 1]
+    if len(retained_evaluators) > N - 1 and retained_evaluators[N - 1].p > 0:
+        evaluator = retained_evaluators[N - 1]
         val_term = evaluator.evaluate(X[-1], None, t_term, xf=xf)
         jx_term, _ = evaluator.jacobian(X[-1], None, t_term)
         c_list.append(val_term)
@@ -701,7 +696,7 @@ def nlp_constraints_and_jac(  # noqa: PLR0913 -- Constraint evaluation takes 6 a
     Z_canon = _trajectory_to_z(X, U_expanded)
 
     c_hz, jac_hz = _nlp_horizon_jac(
-        built_constraints.horizon_constraints,
+        problem.constraints.horizon_constraints,
         Z_canon,
         N=N,
         n=n,
@@ -849,8 +844,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     n = int(problem.model.n)
     m = int(problem.model.m)
     discrete_model = problem.model
-    built_constraints = problem.constraints
-    knot_evaluators = built_constraints.knot_evaluators if built_constraints is not None else ()
+    retained_evaluators = retained_knot_evaluators(problem)
 
     H = N - 1
     B = H // b
@@ -859,7 +853,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=z.dtype), jnp.cumsum(dt_arr[:-1])])
     t_term = t0 + jnp.sum(dt_arr)
 
-    P_total = n + H * n + sum(k.p for k in knot_evaluators)
+    P_total = n + H * n + sum(k.p for k in retained_evaluators)
     lam_vec = jnp.zeros(P_total, dtype=z.dtype) if lam is None else jnp.asarray(lam, dtype=z.dtype)
 
     offset = n
@@ -868,14 +862,14 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
     for k in range(H):
         lam_dyn_list.append(lam_vec[offset : offset + n])
         offset += n
-        pk = knot_evaluators[k].p if k < len(knot_evaluators) else 0
+        pk = retained_evaluators[k].p if k < len(retained_evaluators) else 0
         if pk > 0:
             lam_con_list.append(lam_vec[offset : offset + pk])
             offset += pk
         else:
             lam_con_list.append(None)
 
-    p_term = knot_evaluators[N - 1].p if len(knot_evaluators) > N - 1 else 0
+    p_term = retained_evaluators[N - 1].p if len(retained_evaluators) > N - 1 else 0
     lam_con_term = lam_vec[offset : offset + p_term] if p_term > 0 else None
 
     tril_r_term, tril_c_term = np.tril_indices(n)
@@ -894,7 +888,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
             dt_arr=dt_arr,
             lam_dyn_list=lam_dyn_list,
             lam_con_list=lam_con_list,
-            knot_evaluators=knot_evaluators,
+            knot_evaluators=retained_evaluators,
             obj_factor=obj_factor,
             discrete_model=discrete_model,
         )
@@ -902,7 +896,7 @@ def nlp_hessian(  # noqa: PLR0913 -- Lagrangian Hessian requires 7 arguments
 
     # 4. Terminal knot
     x_term = X[-1]
-    evaluator_term = knot_evaluators[N - 1] if len(knot_evaluators) > N - 1 else None
+    evaluator_term = retained_evaluators[N - 1] if len(retained_evaluators) > N - 1 else None
     H_term = _term_lagrangian_hessian(
         problem.obj.terminal_cost,
         evaluator_term,

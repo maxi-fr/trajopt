@@ -75,6 +75,10 @@ class GoalConstraint(StateConstraint):
         target = self.xf if xf is None else (xf[self.inds_arr] if len(xf) == self.n else xf)
         return x[self.inds_arr] - target
 
+    def is_time_independent(self) -> bool:
+        """GoalConstraint defect does not depend on timestamp t."""
+        return True
+
 
 class LinearConstraint(StageConstraint):
     """Linear constraint: A * z[inds] - b {<=, =} 0 where z = [x; u].
@@ -99,6 +103,9 @@ class LinearConstraint(StageConstraint):
     b: jax.Array
     inds_arr: jax.Array
     inds: tuple[int, ...] = eqx.field(static=True)
+    _uses_state: bool = eqx.field(static=True)
+    _uses_control: bool = eqx.field(static=True)
+    _structural_key: tuple[object, ...] = eqx.field(static=True)
 
     def __init__(  # noqa: PLR0913
         self,
@@ -132,6 +139,16 @@ class LinearConstraint(StageConstraint):
             msg = f"Column dimension of A ({A_arr.shape[1]}) does not match inds length ({len(inds_tuple)})."
             raise ValueError(msg)
 
+        A_np = np.asarray(A)
+        b_np = np.asarray(b)
+        uses_s = False
+        uses_c = False
+        for col_idx, i in enumerate(inds_tuple):
+            if i < n_int and np.any(A_np[:, col_idx] != 0):
+                uses_s = True
+            if i >= n_int and np.any(A_np[:, col_idx] != 0):
+                uses_c = True
+
         p = int(A_arr.shape[0])
         cone = NegativeOrthant() if sense is None else sense
         super().__init__(n=n_int, m=m_int, p=p, cone=cone)
@@ -139,10 +156,34 @@ class LinearConstraint(StageConstraint):
         self.b = b_arr
         self.inds = inds_tuple
         self.inds_arr = jnp.asarray(inds_tuple, dtype=int)
+        self._uses_state = uses_s
+        self._uses_control = uses_c
+        self._structural_key = (
+            "LinearConstraint",
+            n_int,
+            m_int,
+            p,
+            type(cone),
+            inds_tuple,
+            A_np.tobytes(),
+            b_np.tobytes(),
+        )
+
+    def structural_key(self) -> tuple[object, ...]:
+        """Return static structural identity key."""
+        return self._structural_key
+
+    def uses_state(self) -> bool:
+        """Whether any state coordinate has non-zero coefficients in A."""
+        return self._uses_state
 
     def uses_control(self) -> bool:
-        """Whether any gathered index falls in the control block of z = [x; u]."""
-        return any(i >= self.n for i in self.inds)
+        """Whether any control coordinate has non-zero coefficients in A."""
+        return self._uses_control
+
+    def is_time_independent(self) -> bool:
+        """LinearConstraint has constant coefficients with no timestamp dependence."""
+        return True
 
     def evaluate(
         self,

@@ -15,13 +15,18 @@ from trajopt.transcription.layout import (
     _trajectory_to_z,
     _z_to_trajectory,
     compute_constraint_violation,
-    constraint_bounds,
     expand_controls,
+    nlp_constraint_bounds,
     nlp_primal_bounds,
     parse_solver_initial_state,
     reduce_controls,
+    retained_knot_evaluators,
 )
-from trajopt.transcription.result import split_bound_duals, warm_start_duals
+from trajopt.transcription.result import (
+    constraint_row_count,
+    split_bound_duals,
+    warm_start_duals,
+)
 from trajopt.transcription.sparsity import (
     hessian_sparsity_pattern,
     jacobian_sparsity_pattern,
@@ -106,7 +111,8 @@ class _IpoptCallback:
         b = int(problem.control_block_steps)
         H = N - 1
         B = H // b
-        p_seq = tuple(int(pk) for pk in problem.constraints.p)
+        retained = retained_knot_evaluators(problem)
+        p_seq = tuple(int(pk.p) for pk in retained)
 
         self.jac_rows, self.jac_cols = jacobian_sparsity_pattern(
             N,
@@ -296,7 +302,7 @@ class Ipopt:
 
         # Bounds
         zL, zU = nlp_primal_bounds(problem)
-        gL, gU = constraint_bounds(problem)
+        gL, gU = nlp_constraint_bounds(problem)
 
         cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
 
@@ -346,6 +352,7 @@ class Ipopt:
         gL_len: int,
     ) -> IpoptResult:
         """Expand optimal NLP iterate and package canonical IpoptResult."""
+        del gL_len
         N = int(problem.N)
         n = int(problem.model.n)
         m = int(problem.model.m)
@@ -398,8 +405,9 @@ class Ipopt:
             success = success and viol <= feasibility_tol
 
         if b > 1:
+            P_total = constraint_row_count(problem)
             nz_primal = N * n + (N - 1) * m
-            lam_out = np.zeros(gL_len, dtype=np.float64)
+            lam_out = np.zeros(P_total, dtype=np.float64)
             mu_out = np.zeros(nz_primal, dtype=np.float64)
         else:
             lam_out = np.asarray(info.get("mult_g", _EMPTY), dtype=np.float64)

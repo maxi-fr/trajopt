@@ -55,6 +55,18 @@ class Constraint(ConstraintShape):
         """
         return True
 
+    def is_time_independent(self) -> bool:
+        """Whether constraint c does not depend explicitly on timestamp t."""
+        return False
+
+    def is_time_independent_input_constraint(self) -> bool:
+        """Whether constraint c depends only on control u and is invariant to timestamp t."""
+        return not self.uses_state() and self.uses_control() and self.is_time_independent()
+
+    def structural_key(self) -> tuple[object, ...]:
+        """Return structural identity key for deduplicating time-independent input constraints."""
+        return ("Constraint", id(self))
+
     def stage_vector(self, x: jax.Array | None, u: jax.Array | None) -> jax.Array:
         """Assemble the gather source z = [x; u] of shape (n + m,), or x of shape (n,) alone.
 
@@ -62,8 +74,11 @@ class Constraint(ConstraintShape):
         into the control block can never silently gather out of range when u is absent.
         """
         if x is None:
-            msg = f"State vector x is required to evaluate {type(self).__name__}."
-            raise ValueError(msg)
+            if not self.uses_state():
+                x = jnp.zeros(self.n, dtype=u.dtype if u is not None else jnp.float64)
+            else:
+                msg = f"State vector x is required to evaluate {type(self).__name__}."
+                raise ValueError(msg)
         if u is not None:
             return jnp.concatenate([x, u])
         if self.uses_control():

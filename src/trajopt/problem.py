@@ -75,6 +75,14 @@ class _EpigraphModel(DiscreteDynamics):
         """Retain whether original controls feed directly into output."""
         return self.original.has_control_feedthrough()
 
+    def output_uses_state(self) -> bool:
+        """Retain whether original model output depends on state."""
+        return self.original.output_uses_state()
+
+    def output_is_time_independent(self) -> bool:
+        """Retain whether original model output is time-independent."""
+        return getattr(self.original, "output_is_time_independent", lambda: True)()
+
 
 class _EpigraphStageCost(CostFunction):
     """Lift a nonquadratic stage cost and add a linear epigraph cost."""

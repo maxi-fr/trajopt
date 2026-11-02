@@ -112,6 +112,10 @@ class StateBound(StateConstraint):
         """Return solver variable limits (x_min, x_max), each of shape (n,)."""
         return self.bounds_box.lo, self.bounds_box.hi
 
+    def is_time_independent(self) -> bool:
+        """StateBound has fixed limits with no timestamp dependence."""
+        return True
+
 
 class ControlBound(ControlConstraint):
     """Box bound constraint on controls: u_min <= u <= u_max.
@@ -148,6 +152,10 @@ class ControlBound(ControlConstraint):
     def primal_bounds(self) -> tuple[jax.Array, jax.Array]:
         """Return solver variable limits (u_min, u_max), each of shape (m,)."""
         return self.bounds_box.lo, self.bounds_box.hi
+
+    def is_time_independent(self) -> bool:
+        """ControlBound has fixed limits with no timestamp dependence."""
+        return True
 
 
 class BoundConstraint(StageConstraint):
@@ -204,3 +212,7 @@ class BoundConstraint(StageConstraint):
     def primal_bounds(self) -> tuple[jax.Array, jax.Array]:
         """Return solver variable limits (z_min, z_max), each of shape (n + m,)."""
         return self.bounds_box.lo, self.bounds_box.hi
+
+    def is_time_independent(self) -> bool:
+        """BoundConstraint has fixed limits with no timestamp dependence."""
+        return True

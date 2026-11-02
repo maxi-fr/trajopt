@@ -115,3 +115,11 @@ class AffineModel(DiscreteDynamics):
     def has_control_feedthrough(self) -> bool:
         """Whether output control matrix D is non-zero."""
         return self.D is not None and not bool(jnp.all(self.D == 0))
+
+    def output_uses_state(self) -> bool:
+        """Whether output state matrix C is non-zero."""
+        return self.C is not None and not bool(jnp.all(self.C == 0))
+
+    def output_is_time_independent(self) -> bool:
+        """AffineModel output equation is time-invariant."""
+        return True

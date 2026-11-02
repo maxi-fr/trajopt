@@ -29,6 +29,7 @@ class IndexedConstraint(StageConstraint):
     iu_arr: jax.Array
     ix: tuple[int, ...] = eqx.field(static=True)
     iu: tuple[int, ...] = eqx.field(static=True)
+    _structural_key: tuple[object, ...] = eqx.field(static=True)
 
     def __init__(
         self,
@@ -51,16 +52,41 @@ class IndexedConstraint(StageConstraint):
             msg = f"Control index length ({len(iu_tuple)}) does not match inner constraint m ({constraint.m})."
             raise ValueError(msg)
 
+        inner_key = constraint.structural_key()
         super().__init__(n=n_int, m=m_int, p=constraint.p, cone=constraint.cone)
         self.constraint = constraint
         self.ix = ix_tuple
         self.iu = iu_tuple
         self.ix_arr = jnp.asarray(ix_tuple, dtype=int)
         self.iu_arr = jnp.asarray(iu_tuple, dtype=int)
+        self._structural_key = (
+            "IndexedConstraint",
+            n_int,
+            m_int,
+            constraint.p,
+            iu_tuple,
+            inner_key,
+        )
+
+    def structural_key(self) -> tuple[object, ...]:
+        """Return static structural identity key."""
+        return self._structural_key
+
+    def uses_state(self) -> bool:
+        """Whether the wrapped constraint reads any of the mapped state indices."""
+        return len(self.ix) > 0 and self.constraint.uses_state()
 
     def uses_control(self) -> bool:
         """Whether the wrapped constraint reads any of the mapped control indices."""
         return len(self.iu) > 0 and self.constraint.uses_control()
+
+    def is_time_independent(self) -> bool:
+        """Whether the wrapped constraint is invariant to timestamp t."""
+        return self.constraint.is_time_independent()
+
+    def is_time_independent_input_constraint(self) -> bool:
+        """Whether the wrapped constraint is a time-independent input-only constraint."""
+        return not self.uses_state() and self.constraint.is_time_independent_input_constraint()
 
     def evaluate(
         self,

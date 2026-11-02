@@ -231,6 +231,10 @@ class AbstractModel(eqx.Module):
         """Whether the output function depends directly on control u."""
         return False
 
+    def output_uses_state(self) -> bool:
+        """Whether the output function depends on state x."""
+        return True
+
 
 class ContinuousDynamics(AbstractModel):
     """Abstract base class for continuous-time dynamics models: xdot = f(x, u, t)."""
@@ -445,3 +449,7 @@ class DiscretizedDynamics(DiscreteDynamics):
     def has_control_feedthrough(self) -> bool:
         """Whether output function has control feedthrough."""
         return self.continuous_dynamics.has_control_feedthrough()
+
+    def output_uses_state(self) -> bool:
+        """Whether output function depends on state x."""
+        return self.continuous_dynamics.output_uses_state()

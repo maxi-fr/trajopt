@@ -14,6 +14,7 @@ from trajopt.program import Program, WarmStart
 from trajopt.trajectory import Trajectory
 from trajopt.transcription.ipopt import Ipopt, IpoptResult
 from trajopt.transcription.layout import (
+    _cone_bounds,
     _evaluator_bounds,
     _trajectory_to_z,
     _z_to_trajectory,
@@ -22,6 +23,7 @@ from trajopt.transcription.layout import (
     expand_controls,
     parse_solver_initial_state,
     reduce_controls,
+    retained_knot_evaluators,
 )
 from trajopt.transcription.result import (
     constraint_row_count,
@@ -83,15 +85,18 @@ def _constraints_fn(  # noqa: PLR0913, PLR0917 -- Constraint evaluation takes 6 
     """Evaluate the user constraint vector c(u) after rolling out the states."""
     N = int(problem.N)
     X, U, t_arr = _shooting_rollout(problem, u, x0, t0, dt)
-    knot_evaluators = problem.constraints.knot_evaluators
+    retained = retained_knot_evaluators(problem)
 
     c_list: list[jax.Array] = []
     for k in range(N - 1):
-        evaluator = knot_evaluators[k]
+        evaluator = retained[k]
         if evaluator.p > 0:
             c_list.append(evaluator.evaluate(X[k], U[k], t_arr[k], xf=xf))
-    if len(knot_evaluators) > N - 1 and knot_evaluators[N - 1].p > 0:
-        c_list.append(knot_evaluators[N - 1].evaluate(X[-1], None, t_arr[-1], xf=xf))
+    if len(retained) > N - 1 and retained[N - 1].p > 0:
+        c_list.append(retained[N - 1].evaluate(X[-1], None, t_arr[-1], xf=xf))
+
+    Z_canon = _trajectory_to_z(X, U)
+    c_list.extend(con.evaluate(Z_canon) for con in problem.constraints.horizon_constraints)
 
     if c_list:
         return jnp.concatenate(c_list)
@@ -179,7 +184,8 @@ def single_shooting_dimensions(problem: Problem) -> tuple[int, int]:
     b = int(problem.control_block_steps)
     B = (int(problem.N) - 1) // b
     n_u = B * int(problem.model.m)
-    p_user = int(sum(problem.constraints.p))
+    retained = retained_knot_evaluators(problem)
+    p_user = int(sum(k.p for k in retained)) + sum(con.p for con in problem.constraints.horizon_constraints)
     return n_u, p_user
 
 
@@ -198,18 +204,23 @@ def _validate_supported_constraints(problem: Problem) -> None:
 def _constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     """Compute lower and upper bounds gL <= c(u) <= gU for the user constraint rows."""
     N = int(problem.N)
-    knot_evaluators = problem.constraints.knot_evaluators
+    retained = retained_knot_evaluators(problem)
 
     g_lower: list[np.ndarray] = []
     g_upper: list[np.ndarray] = []
     for k in range(N - 1):
-        lo_k, hi_k = _evaluator_bounds(knot_evaluators[k])
+        lo_k, hi_k = _evaluator_bounds(retained[k])
         g_lower.extend(lo_k)
         g_upper.extend(hi_k)
-    if len(knot_evaluators) > N - 1:
-        lo_term, hi_term = _evaluator_bounds(knot_evaluators[N - 1])
+    if len(retained) > N - 1:
+        lo_term, hi_term = _evaluator_bounds(retained[N - 1])
         g_lower.extend(lo_term)
         g_upper.extend(hi_term)
+
+    for con in problem.constraints.horizon_constraints:
+        lo, hi = _cone_bounds(con.cone, con.p)
+        g_lower.append(lo)
+        g_upper.append(hi)
 
     g_l = np.concatenate(g_lower) if g_lower else np.empty(0, dtype=np.float64)
     g_u = np.concatenate(g_upper) if g_upper else np.empty(0, dtype=np.float64)
