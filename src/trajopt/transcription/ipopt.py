@@ -132,6 +132,23 @@ class _IpoptCallback:
         self.beta = 0.0
         self.iteration_count = 0
 
+    def update(
+        self,
+        problem: Problem,
+        x0: jax.Array,
+        t0: float | jax.Array,
+        dt: float | jax.Array,
+        xf: jax.Array | None = None,
+    ) -> None:
+        """Update dynamic problem and Boundary Conditions and reset per-solve state."""
+        self.problem = problem
+        self.x0 = x0
+        self.t0 = t0
+        self.dt = dt
+        self.xf = xf
+        self.beta = 0.0
+        self.iteration_count = 0
+
     @property
     def binary_indices(self) -> np.ndarray:
         """Return indices of binary decision variables in the NLP primal vector."""
@@ -198,6 +215,19 @@ class _IpoptCallback:
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         """Return build-time Lagrangian Hessian sparsity pattern (rows, cols)."""
         return self.hess_rows, self.hess_cols
+
+
+@dataclass
+class IpoptHandle:
+    """Retained cyipopt Problem handle and callback wrapper for a Program."""
+
+    nlp: Any
+    cb: _IpoptCallback
+
+    @property
+    def solver(self) -> Any:  # noqa: ANN401 -- cyipopt's C-extension handle is untyped
+        """Alias for the underlying cyipopt Problem handle."""
+        return self.nlp
 
 
 @dataclass(frozen=True)
@@ -294,26 +324,30 @@ class Ipopt:
             z0 = np.asarray(z0_jax, dtype=np.float64)
             lam0, mu0 = warm_start_duals(problem, ws)
 
-        # Bounds
-        zL, zU = nlp_primal_bounds(problem)
-        gL, gU = nlp_constraint_bounds(problem)
-
-        cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
-
-        problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
-        nlp = problem_cls(
-            n=len(z0),
-            m=len(gL),
-            problem_obj=cb,
-            lb=zL,
-            ub=zU,
-            cl=gL,
-            cu=gU,
-        )
-
-        if self.options:
-            for k, v in self.options.items():
-                nlp.add_option(k, v)
+        handle: IpoptHandle | None = program.handles.get("ipopt")
+        if handle is None:
+            zL, zU = nlp_primal_bounds(problem)
+            gL, gU = nlp_constraint_bounds(problem)
+            cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
+            problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
+            nlp = problem_cls(
+                n=len(z0),
+                m=len(gL),
+                problem_obj=cb,
+                lb=zL,
+                ub=zU,
+                cl=gL,
+                cu=gU,
+            )
+            if self.options:
+                for k, v in self.options.items():
+                    nlp.add_option(k, v)
+            handle = IpoptHandle(nlp=nlp, cb=cb)
+            program.handles["ipopt"] = handle
+        else:
+            cb = handle.cb
+            nlp = handle.nlp
+            cb.update(problem, x0_arr, t0_arr, dt_arr, xf_val)
 
         z_opt, info, pass_count, binary_distance = self._solve_passes(nlp, cb, z0, lam0, mu0)
         return self._build_result(

@@ -38,6 +38,12 @@ The reformulation of the optimal control problem as a single finite-dimensional 
 over the Primal Vector.
 _Avoid_: discretization (that is the integrator's job), encoding, formulation
 
+**Control Blocking**:
+Constraining groups of contiguous native Knot Points to hold a uniform constant control vector,
+reducing the number of control degrees of freedom while preserving native dynamics, time spacing,
+and constraint evaluations.
+_Avoid_: subsampling, downsampling, coarse grid
+
 **Defect**:
 The residual of a dynamics constraint at one Knot Point: the gap between the next state and what
 the dynamics predict from the current state and control.
@@ -51,7 +57,8 @@ _Avoid_: initial conditions (it carries the target too), state, boundary values
 
 **Program**:
 One solver's compiled and allocated form of a Problem — its jitted cores and its live external
-solver handles. Mutable and eager-side, where a Problem is immutable and structural.
+solver handles (such as OSQP or IPOPT external handles retained across solves and continuation passes).
+Mutable and eager-side, where a Problem is immutable and structural.
 _Avoid_: cache, context, session, compiled problem
 
 **Quadratic Subproblem**:
@@ -80,8 +87,16 @@ constraints and takes the cost to second order.
 _Avoid_: reference trajectory, linearization point, nominal (Nominal is the fixed trajectory an
 iLQR line search rolls out against)
 
+**Advancement**:
+Moving the Horizon by a specified count of native Knot Points, shifting the warm start, clock,
+and reference window, while keeping the structural Problem, Program, and live solver handles intact.
+_Avoid_: step, pop, receding
+
 **Multiplier**:
-The dual variable priced against one constraint row at a solution.
+The dual variable priced against one constraint row at a solution. Canonical Multipliers are
+returned for all native rows; SingleShooting recovers canonical initial-state and Defect Multipliers
+via backward adjoint recursion, while blocked solves (b > 1) deliberately reset exported canonical
+Multipliers to zero.
 _Avoid_: dual, lambda, Lagrange multiplier (in prose; the symbol is fine in formulas)
 
 **Cone**:

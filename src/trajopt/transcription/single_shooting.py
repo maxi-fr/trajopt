@@ -497,6 +497,23 @@ class _SingleShootingCallback:
         )
         self.beta = 0.0
 
+    def update(
+        self,
+        problem: Problem,
+        x0: jax.Array,
+        t0: jax.Array,
+        dt: jax.Array,
+        xf: jax.Array | None = None,
+    ) -> None:
+        """Update dynamic problem and Boundary Conditions and reset per-solve state."""
+        self.problem = problem
+        self.x0 = x0
+        self.t0 = t0
+        self.dt = dt
+        self.xf = xf
+        self.beta = 0.0
+        self.iteration_count = 0
+
     @property
     def binary_indices(self) -> np.ndarray:
         """Return indices of binary decision variables in the reduced control vector."""
@@ -571,6 +588,19 @@ class _SingleShootingCallback:
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         """Return build-time Lagrangian Hessian sparsity pattern (rows, cols)."""
         return self.hess_rows, self.hess_cols
+
+
+@dataclass
+class SingleShootingHandle:
+    """Retained cyipopt Problem handle and callback wrapper for a SingleShooting Program."""
+
+    nlp: Any
+    cb: _SingleShootingCallback
+
+    @property
+    def solver(self) -> Any:  # noqa: ANN401 -- cyipopt's C-extension handle is untyped
+        """Alias for the underlying cyipopt Problem handle."""
+        return self.nlp
 
 
 @dataclass(frozen=True)
@@ -683,28 +713,33 @@ class SingleShooting:
 
         _, U_guess = ws.unpack(problem)
         u0 = np.asarray(reduce_controls(U_guess, b), dtype=np.float64).reshape(-1)
-        z_lower, z_upper = _primal_bounds(problem)
-        g_lower, g_upper = _constraint_bounds(problem)
-
-        cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
-
-        problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
-        nlp = problem_cls(
-            n=len(u0),
-            m=len(g_lower),
-            problem_obj=cb,
-            lb=z_lower,
-            ub=z_upper,
-            cl=g_lower,
-            cu=g_upper,
-        )
-
-        options: dict[str, Any] = dict(self.solver.options)
-        if self.hessian == "lbfgs":
-            options.setdefault("hessian_approximation", "limited-memory")
-
-        for key, value in options.items():
-            nlp.add_option(key, value)
+        handle: SingleShootingHandle | None = program.handles.get("single_shooting")
+        if handle is None:
+            z_lower, z_upper = _primal_bounds(problem)
+            g_lower, g_upper = _constraint_bounds(problem)
+            cb = self.transcription_callback(problem, x0_arr, t0_arr, dt_arr, xf_val)
+            problem_cls: Any = getattr(cyipopt, "Problem")  # noqa: B009 -- cyipopt is an untyped C-extension
+            nlp = problem_cls(
+                n=len(u0),
+                m=len(g_lower),
+                problem_obj=cb,
+                lb=z_lower,
+                ub=z_upper,
+                cl=g_lower,
+                cu=g_upper,
+            )
+            options: dict[str, Any] = dict(self.solver.options)
+            if self.hessian == "lbfgs":
+                options.setdefault("hessian_approximation", "limited-memory")
+            for key, value in options.items():
+                nlp.add_option(key, value)
+            handle = SingleShootingHandle(nlp=nlp, cb=cb)
+            program.handles["single_shooting"] = handle
+            program.handles.setdefault("ipopt", handle)
+        else:
+            cb = handle.cb
+            nlp = handle.nlp
+            cb.update(problem, x0_arr, t0_arr, dt_arr, xf_val)
 
         if b == 1:
             lam0, mu0 = _extract_retained_warm_start_duals(problem, ws)

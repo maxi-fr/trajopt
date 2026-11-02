@@ -60,6 +60,7 @@ def solve_continuation_passes(  # noqa: PLR0913 -- continuation loop coordinates
             nlp.add_option("warm_start_mult_bound_push", 1e-9)
             z_opt, raw_info = nlp.solve(z0, **solve_kwargs)
         else:
+            nlp.add_option("warm_start_init_point", "no")
             z_opt, raw_info = nlp.solve(z0)
 
         info = dict(raw_info)
