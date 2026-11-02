@@ -72,8 +72,8 @@ class MPC:
     for the life of the driver. What genuinely changes between steps is split in two: traced
     boundary data in `BoundaryConditions`, and the primal/dual iterates in a private `WarmStart`.
 
-    The reference is a pushed window. `push_reference` stages the point that enters the horizon at
-    the far end; `advance` advances the window by `steps` knots and appends it, holding the last point
+    The reference is a pushed window. `push_reference` stages the point that enters the Horizon at
+    the far end; `advance` advances the window by `steps` Knot Points and appends it, holding the last point
     when nothing was pushed. A constant window is shift-invariant, so regulating to a fixed goal
     and tracking a moving one are the same mechanism with nothing special-cased.
 
@@ -326,7 +326,7 @@ class MPC:
     def solve(self) -> SolverResult:
         """Solve one Horizon, validate canonical Multipliers, fold into the warm start, and return the Backend's result.
 
-        A backend that returns no duals (an empty vector) leaves the warm start's own untouched,
+        A Backend that returns no duals (an empty vector) leaves the warm start's own untouched,
         and only the AL solvers populate `res.al`, so a prior AL warm start survives a step taken
         by a solver that knows nothing about it.
         """
@@ -338,7 +338,7 @@ class MPC:
                 msg = f"Multiplier lam has length {len(res.lam)}, expected canonical constraint count {p_canon}."
                 raise ValueError(msg)
         if len(res.mu) > 0 and len(res.mu) != len(self._ws.Z):
-            msg = f"Multiplier mu has length {len(res.mu)}, expected canonical primal length {len(self._ws.Z)}."
+            msg = f"Multiplier mu has length {len(res.mu)}, expected canonical Primal Vector length {len(self._ws.Z)}."
             raise ValueError(msg)
 
         lam = jnp.asarray(res.lam, dtype=self._ws.Z.dtype) if len(res.lam) > 0 else self._ws.lam

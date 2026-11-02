@@ -200,7 +200,7 @@ def test_single_shooting_canonical_lagrangian_stationarity() -> None:
 
 
 def test_single_shooting_dual_warm_start() -> None:
-    """SingleShooting extracts retained multipliers from a canonical WarmStart."""
+    """SingleShooting extracts retained Multipliers from a canonical WarmStart."""
     pytest.importorskip("cyipopt")
 
     model = Pendulum()
@@ -257,7 +257,7 @@ def test_single_shooting_cone_feasibility_negative_orthant() -> None:
 
 
 def test_mpc_solve_validates_multiplier_dimensions() -> None:
-    """MPC.solve raises ValueError on malformed multiplier dimensions."""
+    """MPC.solve raises ValueError on malformed Multiplier dimensions."""
     model = Pendulum()
     n, m, N = model.n, model.m, 10
     dt = 0.05
@@ -318,6 +318,6 @@ def test_mpc_solve_validates_multiplier_dimensions() -> None:
             )
 
     mpc2 = MPC(prob, BadBoundSolver(), x0=x0, xf=xf)
-    with pytest.raises(ValueError, match="Multiplier mu has length 5, expected canonical primal length"):
+    with pytest.raises(ValueError, match="Multiplier mu has length 5, expected canonical Primal Vector length"):
         mpc2.solve()
 

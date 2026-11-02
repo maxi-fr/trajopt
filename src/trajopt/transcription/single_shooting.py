@@ -231,7 +231,7 @@ def _extract_retained_warm_start_duals(
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    knot_evaluators = problem.constraints.knot_evaluators
 
     offset = n  # initial-state pin
     retained_lam: list[np.ndarray] = []
@@ -266,8 +266,8 @@ def _unpack_retained_multipliers(
     mult_g: np.ndarray | None,
 ) -> tuple[list[jax.Array], jax.Array]:
     """Unpack raw solver constraint Multipliers into per-Knot Point and Horizon arrays."""
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
-    horizon_constraints = problem.constraints.horizon_constraints if problem.constraints is not None else ()
+    knot_evaluators = problem.constraints.knot_evaluators
+    horizon_constraints = problem.constraints.horizon_constraints
     N = int(problem.N)
 
     mult_g_arr = np.asarray(mult_g, dtype=np.float64) if mult_g is not None else _EMPTY
@@ -303,11 +303,11 @@ def _state_stationarity_rhs(
     lam_c: list[jax.Array],
     lam_hz: jax.Array,
 ) -> jax.Array:
-    """Evaluate sum of Cost and constraint gradients with respect to states."""
+    """Evaluate sum of Objective and constraint gradients with respect to states."""
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    knot_evaluators = problem.constraints.knot_evaluators
     X_opt, U_opt, t_opt = traj.X, traj.U, traj.t
 
     def cost_of_x(X_var: jax.Array) -> jax.Array:
@@ -359,7 +359,7 @@ def _backward_adjoint_recursion(
     N = int(problem.N)
     n = int(problem.model.n)
     X_opt, U_opt, t_opt, dt_arr = traj.X, traj.U, traj.t, traj.dt
-    lam_d: list[jax.Array] = [jnp.zeros(n, dtype=jnp.float64)] * (N - 1)
+    lam_d: list[jax.Array] = [jnp.zeros(n, dtype=jnp.float64) for _ in range(N - 1)]
     lam_d[N - 2] = -rhs[N - 1]
     for k in range(N - 2, 0, -1):
         ak = problem.model.state_jacobian(X_opt[k], U_opt[k], t_opt[k], dt_arr[k])
@@ -379,7 +379,7 @@ def _assemble_canonical_lam(
 ) -> np.ndarray:
     """Assemble recovered and retained Multipliers into canonical constraint order."""
     N = int(problem.N)
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    knot_evaluators = problem.constraints.knot_evaluators
     lam_parts: list[np.ndarray] = [np.asarray(lam_0, dtype=np.float64)]
     for k in range(N - 1):
         lam_parts.append(np.asarray(lam_d[k], dtype=np.float64))
