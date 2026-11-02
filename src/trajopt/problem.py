@@ -173,7 +173,7 @@ def _epigraph_constraints(original: BuiltConstraintList) -> BuiltConstraintList:
 
 
 def add_l1_epigraph(problem: "Problem", weight: float) -> "Problem":
-    """Add exact weight * sum(abs(u)) by augmenting controls as [u, s] at each Knot Point.
+    """Add exact weight * sum(abs(u)) by augmenting controls as [u, s] at each Knot Point, preserving blocking.
 
     The returned Problem has control width 2m. Trajectories and reference windows supplied to it
     therefore need controls [u, s] of shape (N - 1, 2m). The original Problem is unchanged.
@@ -188,6 +188,7 @@ def add_l1_epigraph(problem: "Problem", weight: float) -> "Problem":
         N=problem.N,
         dt=problem.dt,
         binary_control_indices=problem.binary_control_indices,
+        control_block_steps=problem.control_block_steps,
     )
 
 
@@ -291,8 +292,9 @@ class Problem(eqx.Module):
     N: int = eqx.field(static=True)
     dt: jax.Array
     binary_control_indices: tuple[int, ...] = eqx.field(static=True)
+    control_block_steps: int = eqx.field(static=True)
 
-    def __init__(  # noqa: PLR0913, PLR0917 -- the six pieces that define a transcription
+    def __init__(  # noqa: PLR0913, PLR0917 -- the seven pieces that define a transcription
         self,
         model: AbstractModel,
         obj: Objective,
@@ -301,11 +303,29 @@ class Problem(eqx.Module):
         dt: float | jax.Array = 0.05,
         integrator: Integrator | IntegratorCallable | None = None,
         binary_control_indices: Sequence[int] = (),
+        control_block_steps: int = 1,
     ) -> None:
-        """Build a Problem and intersect declared binary control coordinates with box bounds."""
+        """Build a Problem with structural control blocking and validate binary control coordinates."""
+        if isinstance(control_block_steps, (bool, np.bool_)) or not isinstance(
+            control_block_steps, (int, np.integer)
+        ):
+            msg = f"control_block_steps must be a positive integer, got {type(control_block_steps).__name__}."
+            raise TypeError(msg)
+        b = int(control_block_steps)
+        if b < 1:
+            msg = f"control_block_steps must be a positive integer, got {b}."
+            raise ValueError(msg)
+
         n = int(model.n)
         m = int(model.m)
         N_val = int(N if N is not None else obj.N)
+        H_val = N_val - 1
+        if H_val < 1:
+            msg = f"Problem requires H = N - 1 >= 1, got N={N_val} (H={H_val})."
+            raise ValueError(msg)
+        if H_val % b != 0:
+            msg = f"H = N - 1 ({H_val}) must be divisible by control_block_steps ({b})."
+            raise ValueError(msg)
 
         cl = ConstraintList(n=n, m=m, N=N_val) if constraints is None else constraints
         built_con = cl.build()
@@ -336,6 +356,7 @@ class Problem(eqx.Module):
         self.N = N_val
         self.dt = jnp.broadcast_to(jnp.asarray(dt, dtype=jnp.float64), (N_val - 1,))
         self.binary_control_indices = binary
+        self.control_block_steps = b
 
     def cost_expansion(self, traj: "Trajectory") -> "Expansion":
         """Stacked first- and second-order cost expansion in error coordinates along traj."""

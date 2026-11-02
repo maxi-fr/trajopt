@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant
+from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant, ZeroCone
 
 if TYPE_CHECKING:
     from trajopt.constraints.constraint_list import BuiltKnotConstraint
@@ -92,15 +92,80 @@ def primal_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _cone_bounds(cone: object, p: int) -> tuple[np.ndarray, np.ndarray]:
-    """Compute (gL, gU) bounds corresponding to a cone constraint."""
+    """Compute (gL, gU) bounds corresponding to an interval Cone constraint."""
     if isinstance(cone, NegativeOrthant):
         return np.full(p, -np.inf, dtype=np.float64), np.zeros(p, dtype=np.float64)
     if isinstance(cone, PositiveOrthant):
         return np.zeros(p, dtype=np.float64), np.full(p, np.inf, dtype=np.float64)
     if isinstance(cone, IdentityCone):
         return np.full(p, -np.inf, dtype=np.float64), np.full(p, np.inf, dtype=np.float64)
-    # Default equality (ZeroCone or general equality)
-    return np.zeros(p, dtype=np.float64), np.zeros(p, dtype=np.float64)
+    if isinstance(cone, ZeroCone):
+        return np.zeros(p, dtype=np.float64), np.zeros(p, dtype=np.float64)
+    msg = f"Cannot express non-interval cone {type(cone).__name__} as bounds."
+    raise ValueError(msg)
+
+
+def blocked_control_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+    """Compute and validate intersected per-block control bounds of shape (B, m).
+
+    Parameters
+    ----------
+    problem : Problem
+        Problem instance specifying Horizon, controls, block size, and binary coordinates.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Block lower bounds and upper bounds of shape (B, m) where B = (N - 1) // b.
+
+    Raises
+    ------
+    ValueError
+        If any block lower bound exceeds its upper bound, or if a declared binary control
+        coordinate's intersected block interval contains neither 0.0 nor 1.0.
+    """
+    N = int(problem.N)
+    m = int(problem.model.m)
+    H = N - 1
+    b = int(problem.control_block_steps)
+    B = H // b
+
+    _, _, uL_orig, uU_orig = problem.constraints.primal_bounds()
+    uL = np.array(uL_orig, dtype=np.float64, copy=True)
+    uU = np.array(uU_orig, dtype=np.float64, copy=True)
+
+    if problem.binary_control_indices:
+        binary = list(problem.binary_control_indices)
+        uL[:, binary] = np.maximum(uL[:, binary], 0.0)
+        uU[:, binary] = np.minimum(uU[:, binary], 1.0)
+        if np.any(uL[:, binary] > uU[:, binary]):
+            msg = "Binary control bounds contradict existing control bounds."
+            raise ValueError(msg)
+
+    uL_blocks = uL.reshape(B, b, m)
+    uU_blocks = uU.reshape(B, b, m)
+    block_uL = np.max(uL_blocks, axis=1)
+    block_uU = np.min(uU_blocks, axis=1)
+
+    if np.any(block_uL > block_uU):
+        msg = "Block control lower bound exceeds upper bound."
+        raise ValueError(msg)
+
+    if problem.binary_control_indices:
+        for j in problem.binary_control_indices:
+            for k in range(B):
+                lo = block_uL[k, j]
+                hi = block_uU[k, j]
+                has_zero = lo <= 0.0 <= hi
+                has_one = lo <= 1.0 <= hi
+                if not (has_zero or has_one):
+                    msg = (
+                        f"Binary control coordinate {j} in block {k} has intersected bounds "
+                        f"[{lo}, {hi}] which contains neither 0.0 nor 1.0."
+                    )
+                    raise ValueError(msg)
+
+    return block_uL, block_uU
 
 
 def _evaluator_bounds(evaluator: BuiltKnotConstraint) -> tuple[list[np.ndarray], list[np.ndarray]]:

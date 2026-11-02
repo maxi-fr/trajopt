@@ -197,6 +197,60 @@ def _shifted_al(al: "ALConstraints | None") -> "ALConstraints | None":
     )
 
 
+def _validate_cones(problem: "Problem") -> None:
+    """Validate that constraint Cones can be expressed as interval bounds."""
+    from trajopt.cones import IdentityCone, NegativeOrthant, PositiveOrthant, ZeroCone  # noqa: PLC0415
+
+    allowed_cones = (ZeroCone, NegativeOrthant, PositiveOrthant, IdentityCone)
+    if problem.constraints is None:
+        return
+    for ev in problem.constraints.knot_evaluators:
+        for con in ev.constraints:
+            if not isinstance(con.cone, allowed_cones):
+                msg = f"Ipopt cannot express non-interval Cone {type(con.cone).__name__}."
+                raise ValueError(msg)  # noqa: TRY004 -- spec requires ValueError for unsupported cones
+    for hcon in problem.constraints.horizon_constraints:
+        if not isinstance(hcon.cone, allowed_cones):
+            msg = f"Ipopt cannot express non-interval Cone {type(hcon.cone).__name__}."
+            raise ValueError(msg)  # noqa: TRY004 -- spec requires ValueError for unsupported cones
+
+
+def _validate_single_shooting(problem: "Problem") -> None:
+    """Validate that Problem contains no state bounds for SingleShooting."""
+    x_lower, x_upper, _, _ = problem.constraints.primal_bounds()
+    if np.any(np.isfinite(x_lower)) or np.any(np.isfinite(x_upper)):
+        msg = (
+            "Single shooting cannot express state bounds: with no state decision variables a "
+            "StateBound has no primal variable to bound. Remove the state bound or use the "
+            "multiple-shooting transcription."
+        )
+        raise ValueError(msg)
+
+
+def _validate_program_pairing(problem: "Problem", solver: "Solver") -> None:
+    """Validate Problem and Solver pairing upfront before compilation or numerical work."""
+    from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415
+    from trajopt.transcription.layout import blocked_control_bounds  # noqa: PLC0415
+    from trajopt.transcription.single_shooting import SingleShooting  # noqa: PLC0415
+
+    is_ipopt = isinstance(solver, Ipopt)
+    is_single_shooting_ipopt = isinstance(solver, SingleShooting) and isinstance(solver.solver, Ipopt)
+
+    if not (is_ipopt or is_single_shooting_ipopt):
+        if problem.control_block_steps > 1:
+            msg = f"{type(solver).__name__} does not support control_block_steps > 1."
+            raise ValueError(msg)
+        if problem.binary_control_indices or problem.constraints.horizon_constraints:
+            msg = f"{type(solver).__name__} does not support binary controls or Horizon constraints."
+            raise ValueError(msg)
+        return
+
+    _validate_cones(problem)
+    if isinstance(solver, SingleShooting):
+        _validate_single_shooting(problem)
+    blocked_control_bounds(problem)
+
+
 class Program:
     """One solver's compiled, allocated form of a `Problem`: its jitted cores and its live handles.
 
@@ -225,6 +279,8 @@ class Program:
     __slots__ = ("_cores", "handles", "problem", "solver")
 
     def __init__(self, problem: "Problem", solver: "Solver") -> None:
+        """Validate Problem and Solver pairing upfront and store static configuration."""
+        _validate_program_pairing(problem, solver)
         self.problem = problem
         self.solver = solver
         self._cores: dict[tuple[Any, Any], Callable[..., Any]] = {}
@@ -269,12 +325,6 @@ class Program:
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
     def solve(self, bc: "BoundaryConditions", ws: WarmStart) -> "SolverResult":
-        """Solve this Problem, rejecting features unsupported by the chosen Solver."""
-        from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415 -- avoid solver import cycle
-
-        if not isinstance(self.solver, Ipopt) and (
-            self.problem.binary_control_indices or self.problem.constraints.horizon_constraints
-        ):
-            msg = f"{type(self.solver).__name__} does not support binary controls or Horizon constraints."
-            raise ValueError(msg)
+        """Solve this Problem with the configured Solver Backend."""
+        _validate_program_pairing(self.problem, self.solver)
         return self.solver.solve(self, bc, ws)
