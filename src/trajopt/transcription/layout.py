@@ -314,19 +314,11 @@ def _evaluator_bounds(
     return gL_list, gU_list
 
 
-def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
-    """Compute bounds for canonical constraints, ending with linear Horizon rows.
-
-    Parameters
-    ----------
-    problem : Problem
-        Problem instance containing model, constraints, and horizon.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        Constraint lower and upper bounds of shape (P,).
-    """
+def _assemble_constraint_bounds(
+    problem: Problem,
+    knot_evaluators: tuple[BuiltKnotConstraint, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assemble initial-state, Defect, selected Knot Point, and trailing Horizon bounds in row order."""
     N = int(problem.N)
     n = int(problem.model.n)
 
@@ -336,8 +328,6 @@ def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     # 1. Initial state condition: x0 - x_init = 0
     gL_list.append(np.zeros(n, dtype=np.float64))
     gU_list.append(np.zeros(n, dtype=np.float64))
-
-    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
 
     for k in range(N - 1):
         # 2a. Dynamics Defect k: x_{k+1} - f_d(x_k, u_k) = 0
@@ -364,6 +354,12 @@ def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     gL = np.concatenate(gL_list) if gL_list else np.empty(0, dtype=np.float64)
     gU = np.concatenate(gU_list) if gU_list else np.empty(0, dtype=np.float64)
     return gL, gU
+
+
+def constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+    """Compute canonical constraint bounds from all native Knot Point evaluators and Horizon rows."""
+    knot_evaluators = problem.constraints.knot_evaluators if problem.constraints is not None else ()
+    return _assemble_constraint_bounds(problem, knot_evaluators)
 
 
 def constraint_structural_key(con: object) -> tuple[object, ...]:
@@ -421,48 +417,8 @@ def retained_knot_evaluators(problem: Problem) -> tuple[BuiltKnotConstraint, ...
 
 
 def nlp_constraint_bounds(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
-    """Compute bounds for the reduced NLP constraint vector, ending with linear Horizon rows."""
-    b = int(problem.control_block_steps)
-    if b == 1:
-        return constraint_bounds(problem)
-
-    N = int(problem.N)
-    n = int(problem.model.n)
-    retained = retained_knot_evaluators(problem)
-
-    gL_list: list[np.ndarray] = []
-    gU_list: list[np.ndarray] = []
-
-    # 1. Initial state condition: x0 - x_init = 0
-    gL_list.append(np.zeros(n, dtype=np.float64))
-    gU_list.append(np.zeros(n, dtype=np.float64))
-
-    for k in range(N - 1):
-        # 2a. Dynamics Defect k: x_{k+1} - f_d(x_k, u_k) = 0
-        gL_list.append(np.zeros(n, dtype=np.float64))
-        gU_list.append(np.zeros(n, dtype=np.float64))
-
-        # 2b. Retained stage constraints at knot k
-        if k < len(retained) and retained[k].p > 0:
-            lo_k, hi_k = _evaluator_bounds(retained[k])
-            gL_list.extend(lo_k)
-            gU_list.extend(hi_k)
-
-    # 3. Terminal constraints at knot N - 1
-    if len(retained) > N - 1 and retained[N - 1].p > 0:
-        lo_term, hi_term = _evaluator_bounds(retained[N - 1])
-        gL_list.extend(lo_term)
-        gU_list.extend(hi_term)
-
-    # 4. Trailing linear Horizon rows
-    for con in problem.constraints.horizon_constraints:
-        lo, hi = _cone_bounds(con.cone, con.p, strict=False)
-        gL_list.append(lo)
-        gU_list.append(hi)
-
-    gL = np.concatenate(gL_list) if gL_list else np.empty(0, dtype=np.float64)
-    gU = np.concatenate(gU_list) if gU_list else np.empty(0, dtype=np.float64)
-    return gL, gU
+    """Compute reduced NLP constraint bounds from retained Knot Point evaluators and Horizon rows."""
+    return _assemble_constraint_bounds(problem, retained_knot_evaluators(problem))
 
 
 def nlp_constraint_row_count(problem: Problem) -> int:
