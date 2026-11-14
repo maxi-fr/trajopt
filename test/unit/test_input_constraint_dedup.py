@@ -13,12 +13,13 @@ from trajopt.constraints.horizon import LinearHorizonConstraint
 from trajopt.constraints.indexed import IndexedConstraint
 from trajopt.constraints.linear import LinearConstraint
 from trajopt.constraints.output import OutputConstraint
+from trajopt.costs.l1 import L1ControlCost
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.base import ContinuousDynamics
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.affine import AffineModel
 from trajopt.mpc import MPC
-from trajopt.problem import Problem, add_l1_epigraph
+from trajopt.problem import Problem
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.layout import (
     nlp_constraint_bounds,
@@ -265,11 +266,7 @@ def test_custom_and_epigraph_constraint_classification() -> None:
     assert not time_indep.uses_state()
     assert time_indep.is_time_independent_input_constraint()
 
-    # Epigraph constraint via add_l1_epigraph
-    prob = _make_prob(N=7, b=2, m=2, n=2)
-    epigraph_prob = add_l1_epigraph(prob, weight=1.0)
-    # The epigraph constraint is at index 0 of knot_evaluators[0]
-    epigraph_con = epigraph_prob.constraints.knot_evaluators[0].constraints[-1]
+    (epigraph_con,) = L1ControlCost(n=2, m=2, weight=1.0).reformulate().constraints
     assert not epigraph_con.uses_state()
     assert epigraph_con.uses_control()
     assert epigraph_con.is_time_independent_input_constraint()

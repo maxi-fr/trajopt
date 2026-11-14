@@ -172,18 +172,19 @@ from trajopt.costs.pseudo_huber import PseudoHuberControlCost
 smooth_obj = Objective(PseudoHuberControlCost(n=n, m=m, weight=0.5, delta=0.01), N=N)
 ```
 
-For an exact L1 penalty added to an existing `Problem`, use `add_l1_epigraph`:
+Add `L1ControlCost` to the Stage Cost for an exact L1 penalty.
 
 ```python3
-from trajopt.problem import add_l1_epigraph
+from trajopt.costs.l1 import L1ControlCost
+from trajopt.costs.objective import Objective
 
-l1_prob = add_l1_epigraph(prob, weight=0.5)
+l1_cost = L1ControlCost(n=obj.n, m=obj.m, weight=0.5)
+l1_obj = Objective(obj.stage_cost + l1_cost, obj.terminal_cost, N=obj.N,
+                   linear_control_cost=obj.linear_control_cost)
 ```
 
-The returned problem has controls `[u, s]` of width `2m`, with `s >= |u|`. Supply augmented
-controls in Trajectories, warm starts, and reference windows. For an existing control array `U`,
-`jnp.concatenate([U, jnp.abs(U)], axis=-1)` gives a feasible epigraph control array. For a
-reference window, append `jnp.zeros_like(U_ref)` to the original control reference.
+The Program introduces internal slacks with `s >= |u|`. Trajectories, warm starts, and reference
+windows use the physical control width `m`.
 
 For linear MPC, declare a one-sided quadratic penalty on affine residuals in the `Objective`.
 The example penalizes control above 0.5 and terminal state above 1.0 in a scalar model.

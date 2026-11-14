@@ -313,18 +313,20 @@ class Program:
             self._lower_penalties(forms)
 
     def _lower_penalties(self, forms: "tuple[tuple[CostReformulation | None, ...], ...]") -> None:
-        """Validate the selected forms and prepare the Problem consumed by the solver."""
+        """Validate the selected forms, including auxiliary sharing under Control Blocking."""
         from trajopt.solvers.ilqr import ILQR  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.clarabel import Clarabel  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.osqp import OSQP  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.penalties import PenaltyLayout  # noqa: PLC0415 -- lowering consumes Program types
 
         solver = self.solver
-        for i, form in enumerate(form for group in forms for form in group):
+        for i, form in enumerate((*forms[0], *forms[1])):
             if form is None:
                 continue
             if (form.constraints and isinstance(solver, ILQR)) or (
-                form.auxiliary_dim and self.problem.control_block_steps > 1
+                form.auxiliary_dim
+                and self.problem.control_block_steps > 1
+                and (i >= len(forms[0]) or not form.supports_control_blocking)
             ):
                 msg = (
                     f"{type(solver).__name__} cannot enforce cost term {i}'s epigraph or constraint reformulation. "

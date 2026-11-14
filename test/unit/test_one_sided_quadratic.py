@@ -7,6 +7,7 @@ from trajopt.constraints.constraint_list import ConstraintList
 from trajopt.constraints.linear import GoalConstraint, LinearConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.costs.generic import GenericCost
+from trajopt.costs.l1 import L1ControlCost
 from trajopt.costs.objective import LQRObjective, Objective
 from trajopt.costs.one_sided_quadratic import OneSidedQuadratic
 from trajopt.costs.reformulation import CostReformulation
@@ -176,13 +177,15 @@ class _AbsoluteControlCost(CostFunction):
         return CostReformulation(cost, (rows,), auxiliary_dim=1)
 
 
-def test_user_defined_cost_can_supply_a_different_epigraph():
+@pytest.mark.parametrize("absolute_cost", [_AbsoluteControlCost(1, 1, terminal=False), L1ControlCost(1, 1, 1.0)])
+def test_linear_and_quadratic_epigraph_costs_compose(absolute_cost):
+    """Compose a built-in or user-defined linear epigraph with a squared hinge."""
     pytest.importorskip("osqp")
     model = AffineModel(A=jnp.ones((1, 1)), B=jnp.ones((1, 1)))
     base = LQRObjective(jnp.zeros(1), jnp.ones(1), jnp.ones(1), 2)
     limit = OneSidedQuadratic(jnp.array([[0.0, 1.0]]), jnp.zeros(1), 1.0, n=1)
     objective = Objective(
-        base.stage_cost + _AbsoluteControlCost(1, 1, terminal=False) + limit,
+        base.stage_cost + absolute_cost + limit,
         base.terminal_cost,
         N=2,
         linear_control_cost=base.linear_control_cost,

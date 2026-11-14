@@ -21,6 +21,8 @@ class CostReformulation:
     Points. Return a replacement ready for evaluation by the selected solver.
     Optional callbacks accept batched or unbatched physical x and u (None at the
     terminal Knot Point) and return an auxiliary seed or diagnostic residual.
+    Set supports_control_blocking when sharing Stage Cost auxiliaries across
+    Knot Points with the same control preserves the reformulation's optimum.
     """
 
     cost: "CostFunction | None" = None
@@ -29,6 +31,7 @@ class CostReformulation:
     initial_auxiliary: "Callable[[jax.Array, jax.Array | None], jax.Array] | None" = None
     violation: "Callable[[jax.Array, jax.Array | None], jax.Array] | None" = None
     requires_iterative: bool = False
+    supports_control_blocking: bool = False
 
     def __post_init__(self) -> None:
         """Validate the auxiliary layout described by the cost."""

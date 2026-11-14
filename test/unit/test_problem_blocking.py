@@ -12,7 +12,7 @@ from trajopt.constraints.horizon import LinearHorizonConstraint
 from trajopt.costs.objective import LQRObjective
 from trajopt.dynamics.integrators import RK4
 from trajopt.models.pendulum import Pendulum
-from trajopt.problem import BoundaryConditions, Problem, add_l1_epigraph, retarget_problem
+from trajopt.problem import BoundaryConditions, Problem, retarget_problem
 from trajopt.program import Program
 from trajopt.solvers.al import AL
 from trajopt.solvers.altro import ALTRO
@@ -90,19 +90,12 @@ def test_problem_blocking_validation_horizon_divisibility() -> None:
     assert prob6.control_block_steps == 6
 
 
-def test_problem_blocking_preserved_through_transformations() -> None:
-    """Problem transformations retarget_problem and add_l1_epigraph preserve control_block_steps."""
+def test_problem_blocking_preserved_through_retargeting() -> None:
+    """Retargeting preserves Control Blocking."""
     prob = _make_problem(N=7, b=2)
     bc = BoundaryConditions(x0=jnp.zeros(2), t0=jnp.array(0.0))
     retargeted = retarget_problem(prob, bc)
     assert retargeted.control_block_steps == 2
-
-    epigraph = add_l1_epigraph(prob, weight=1.0)
-    assert epigraph.control_block_steps == 2
-    assert epigraph.model.m == 2 * prob.model.m
-    b_uL, b_uU = blocked_control_bounds(epigraph)
-    assert b_uL.shape == (3, 2)
-    assert b_uU.shape == (3, 2)
 
 
 def test_blocked_control_bounds_computation() -> None:
