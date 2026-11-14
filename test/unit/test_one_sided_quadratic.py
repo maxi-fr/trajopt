@@ -52,6 +52,21 @@ def _problem(formulation="epigraph", *, terminal=True):
     )
 
 
+@pytest.mark.filterwarnings("ignore:.*single convex subproblem:UserWarning")
+def test_stage_epigraph_mpc_solves_without_reference_or_goal():
+    """Solve a stage-only epigraph with all optional Boundary Conditions absent."""
+    pytest.importorskip("osqp")
+    model = AffineModel(A=jnp.ones((1, 1)), B=jnp.ones((1, 1)))
+    stage = OneSidedQuadratic(jnp.array([[1.0, 1.0], [0.0, -1.0]]), jnp.zeros(2), 1.0, n=1)
+    terminal = LQRObjective(jnp.zeros(1), jnp.zeros(1), jnp.zeros(1), 2).terminal_cost
+    problem = Problem(model, Objective(stage, terminal, N=2))
+
+    result = MPC(problem, OSQP(), x0=[1.0]).solve()
+
+    assert result.success, result.message
+    np.testing.assert_allclose(result.trajectory.U, [[-0.5]], atol=1e-3)
+
+
 @pytest.mark.parametrize("backend", [OSQP, Clarabel])
 @pytest.mark.parametrize("terminal", [False, True])
 def test_epigraph_mpc_preserves_physical_layout_and_finds_exact_optimum(backend, terminal):

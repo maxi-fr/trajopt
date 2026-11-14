@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
@@ -268,11 +268,11 @@ class PenaltyLayout:
         return eqx.tree_at(lambda t: (t.X, t.U), traj, (X, U))
 
     def lift_boundary(self, bc: BoundaryConditions) -> BoundaryConditions:
-        """Pad boundary states and references with zeros for private coordinates."""
+        """Pad Boundary Conditions for private coordinates while preserving absent targets."""
         xf = jnp.pad(bc.xf, (0, self.ns)) if bc.xf is not None and len(bc.xf) == self.n else bc.xf
         xr = None if bc.X_ref is None else jnp.pad(bc.X_ref, ((0, 0), (0, self.ns)))
         ur = None if bc.U_ref is None else jnp.pad(bc.U_ref, ((0, 0), (0, self.ms)))
-        return eqx.tree_at(lambda b: (b.x0, b.X_ref, b.U_ref, b.xf), bc, (jnp.pad(bc.x0, (0, self.ns)), xr, ur, xf))
+        return replace(bc, x0=jnp.pad(bc.x0, (0, self.ns)), X_ref=xr, U_ref=ur, xf=xf)
 
     def lift_warm_start(self, ws: WarmStart) -> WarmStart:
         """Lift the primal seed and scatter physical Multipliers into the transformed layout."""
