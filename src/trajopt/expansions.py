@@ -238,7 +238,7 @@ def _stage_cost_expansion(
     t_stage: jax.Array,
     model: AbstractModel | None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Compute stacked stage cost derivatives in error coordinates."""
+    """Compute stacked stage cost derivatives in error coordinates using each Knot Point's parameters."""
     n = obj.n
     m = obj.m
     dtype = X_stage.dtype
@@ -270,18 +270,18 @@ def _stage_cost_expansion(
     else:
 
         def single_step(
+            k: jax.Array,
             xk: jax.Array,
             uk: jax.Array,
             tk: float | jax.Array,
         ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-            gx_k = jax.grad(lambda x_: obj.stage_cost.evaluate(x_, uk, tk))(xk)
-            gu_k = jax.grad(lambda u_: obj.stage_cost.evaluate(xk, u_, tk))(uk)
-            Hxx_k = jax.hessian(lambda x_: obj.stage_cost.evaluate(x_, uk, tk))(xk)
-            Huu_k = jax.hessian(lambda u_: obj.stage_cost.evaluate(xk, u_, tk))(uk)
-            Hux_k = jax.jacobian(lambda x_in: jax.grad(lambda u_in: obj.stage_cost.evaluate(x_in, u_in, tk))(uk))(xk)
+            """Differentiate the scalar Stage Cost at Knot Point k."""
+            cost = obj.stage_cost.unstacked(k)
+            gx_k, gu_k = jax.grad(cost.evaluate, argnums=(0, 1))(xk, uk, tk)
+            (Hxx_k, _), (Hux_k, Huu_k) = jax.hessian(cost.evaluate, argnums=(0, 1))(xk, uk, tk)
             return gx_k, gu_k, Hxx_k, Huu_k, Hux_k
 
-        gx, gu, Hxx, Huu, Hux = jax.vmap(single_step)(X_stage, U_stage, t_stage)
+        gx, gu, Hxx, Huu, Hux = jax.vmap(single_step)(jnp.arange(n_stage), X_stage, U_stage, t_stage)
 
     if model is not None:
         G_stage = jax.vmap(model.errstate_jacobian)(X_stage)

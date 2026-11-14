@@ -58,11 +58,11 @@ def test_mpc_loop_builds_one_program_and_one_core(monkeypatch: pytest.MonkeyPatc
     constructions = 0
     original_init = Program.__init__
 
-    def counting_init(self, problem, solver):
-        """Delegate to `Program.__init__`, counting every program the loop constructs."""
+    def counting_init(self, *args, **kwargs):
+        """Count every Program the loop constructs and forward its configuration."""
         nonlocal constructions
         constructions += 1
-        original_init(self, problem, solver)
+        original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(Program, "__init__", counting_init)
 

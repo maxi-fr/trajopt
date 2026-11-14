@@ -15,7 +15,7 @@ def _targets(
     xf: jax.Array | Sequence[float] | None,
     reference: Trajectory | None,
 ) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None]:
-    """Build the tracked window of shape (N, n) and (N - 1, m) plus the terminal goal of shape (n,).
+    """Build the reference window and terminal goal for the tracking costs and goal constraints.
 
     Goal and window are independent: a window alone tracks and leaves goal constraints at their
     build-time target, a goal alone is also spread into a constant window so it still regulates
@@ -36,7 +36,7 @@ def _targets(
         )
         raise ValueError(msg)
     if (xf is not None or reference is not None) and not (
-        problem.obj.is_quadratic or problem.constraints.has_goal_constraint()
+        problem.obj.can_retarget or problem.constraints.has_goal_constraint()
     ):
         msg = (
             f"A run-time target was given but nothing in the problem reads it: the "
@@ -104,6 +104,8 @@ class MPC:
     initial_z : jax.Array | None, optional
         Flat warm-start guess of shape (N * n + (N - 1) * m,), taking precedence over
         `initial_trajectory`.
+    penalty_diagnostics : bool, optional
+        Report violations and solved auxiliary values in `result.info["penalties"]`.
     """
 
     def __init__(  # noqa: PLR0913 -- the driver's boundary data is 6 optional arguments wide
@@ -117,7 +119,9 @@ class MPC:
         reference: Trajectory | None = None,
         initial_trajectory: Trajectory | None = None,
         initial_z: jax.Array | None = None,
+        penalty_diagnostics: bool = False,
     ) -> None:
+        """Build the physical MPC state and configure optional penalty diagnostics."""
         if solver is None:
             from trajopt.transcription.ipopt import Ipopt  # noqa: PLC0415 -- avoid an import cycle
 
@@ -126,7 +130,7 @@ class MPC:
         X_ref, U_ref, xf_arr = _targets(problem, xf, reference)
         x0_arr = jnp.asarray(x0, dtype=jnp.float64)
 
-        self.program = Program(problem, solver)
+        self.program = Program(problem, solver, penalty_diagnostics=penalty_diagnostics)
         self.bc = BoundaryConditions(
             x0=x0_arr,
             t0=jnp.asarray(t0, dtype=jnp.float64),
@@ -350,7 +354,7 @@ class MPC:
         return res
 
     def cost(self) -> jax.Array:
-        """Objective scalar J evaluated at the current warm start under the current boundary conditions."""
+        """Evaluate the Objective and penalties at the current physical warm start."""
         from trajopt.transcription.transcription import eval_f  # noqa: PLC0415 -- avoid circular import
 
         problem = self.problem

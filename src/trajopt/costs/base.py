@@ -5,6 +5,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
+if TYPE_CHECKING:
+    from trajopt.costs.reformulation import CostReformulation
+
 
 class CostFunction(eqx.Module):
     """Abstract base class for cost functions.
@@ -22,6 +25,18 @@ class CostFunction(eqx.Module):
     n: int = eqx.field(static=True)
     m: int = eqx.field(static=True)
     terminal: bool = eqx.field(static=True)
+
+    def reformulate(self) -> "CostReformulation | None":
+        """Describe a solver representation, or evaluate this cost directly by default."""
+        return None
+
+    def __add__(self, other: "CostFunction") -> "CostFunction":
+        """Sum costs evaluated at the same Knot Point."""
+        from trajopt.costs.sum import SumCost  # noqa: PLC0415 -- SumCost extends CostFunction
+
+        if not isinstance(other, CostFunction):
+            return NotImplemented
+        return SumCost(self, other)
 
     def __init__(self, n: int, m: int = 0, *, terminal: bool = False) -> None:
         self.n = int(n)
@@ -163,8 +178,8 @@ class CostFunction(eqx.Module):
         del N
         return self
 
-    def unstacked(self, k: int) -> "CostFunction":
-        """Cost at stage k, the inverse of `stacked`; a cost with no horizon axis is its own stage cost."""
+    def unstacked(self, k: int | jax.Array) -> "CostFunction":
+        """Select the Stage Cost at k, including when k is traced by a batched expansion."""
         del k
         return self
 
@@ -329,8 +344,8 @@ class QuadraticCostFunction(CostFunction):
         """Repeat every parameter over N - 1 stages, adding a leading axis of that length."""
         return jax.tree.map(lambda leaf: jnp.repeat(leaf[None], N - 1, axis=0), self)
 
-    def unstacked(self, k: int) -> "QuadraticCostFunction":
-        """Cost at stage k, dropping the leading horizon axis from every parameter."""
+    def unstacked(self, k: int | jax.Array) -> "QuadraticCostFunction":
+        """Select one Stage Cost by indexing the leading Horizon axis of each parameter."""
         if not self.is_stacked:
             return self
         return jax.tree.map(lambda leaf: leaf[k], self)

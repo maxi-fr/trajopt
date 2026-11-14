@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trajopt.costs.base import QuadraticCostFunction
+from trajopt.costs.base import CostFunction, QuadraticCostFunction
 
 _EXPECTED_NDIM_1D = 1
 _EXPECTED_NDIM_2D = 2
@@ -281,8 +281,8 @@ class DiagonalCost(QuadraticCostFunction):
             return jnp.diag(1.0 / self.Q)
         return jnp.diag(jnp.concatenate([1.0 / self.Q, 1.0 / self.R]))
 
-    def __add__(self, other: QuadraticCostFunction) -> QuadraticCostFunction:
-        """Add two cost functions.
+    def __add__(self, other: CostFunction) -> CostFunction:
+        """Add costs, retaining the quadratic representation when both are quadratic.
 
         Parameters
         ----------
@@ -310,8 +310,7 @@ class DiagonalCost(QuadraticCostFunction):
             )
         if isinstance(other, QuadraticCost):
             return self.to_quadratic() + other
-        msg = f"Unsupported operand type for +: {type(other).__name__}"
-        raise TypeError(msg)
+        return super().__add__(other)
 
     def to_quadratic(self) -> "QuadraticCost":
         """Convert DiagonalCost to QuadraticCost.
@@ -670,8 +669,8 @@ class QuadraticCost(QuadraticCostFunction):
         G = self.hessian()
         return jnp.linalg.inv(G)
 
-    def __add__(self, other: QuadraticCostFunction) -> "QuadraticCost":
-        """Add two cost functions.
+    def __add__(self, other: CostFunction) -> CostFunction:
+        """Add costs, retaining the quadratic representation when both are quadratic.
 
         Parameters
         ----------
@@ -701,8 +700,7 @@ class QuadraticCost(QuadraticCostFunction):
                 terminal=is_term,
                 m=self.m,
             )
-        msg = f"Unsupported operand type for +: {type(other).__name__}"
-        raise TypeError(msg)
+        return super().__add__(other)
 
 
 def promote_weights(*weights: jax.Array) -> tuple[type[QuadraticCostFunction], tuple[jax.Array, ...]]:

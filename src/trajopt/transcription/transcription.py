@@ -9,6 +9,7 @@ from trajopt.constraints.constraint_list import BuiltKnotConstraint
 from trajopt.costs.base import CostFunction
 from trajopt.dynamics.base import DiscreteDynamics
 from trajopt.problem import BoundaryConditions, Problem, retarget_problem
+from trajopt.trajectory import Trajectory
 from trajopt.transcription.layout import (
     _nlp_z_to_trajectory,
     _trajectory_to_z,
@@ -26,21 +27,15 @@ def _cost_fn(
     dt: float | jax.Array,
     bc: BoundaryConditions | None = None,
 ) -> jax.Array:
-    """Evaluate total trajectory cost scalar J(Z), aiming the objective at `bc`'s reference window."""
+    """Evaluate the complete Objective at the Primal Vector and reference window."""
     N = int(problem.N)
     n = int(problem.model.n)
     m = int(problem.model.m)
 
     X, U = _z_to_trajectory(Z, N, n, m)
     dt_arr = jnp.broadcast_to(jnp.asarray(dt), (N - 1,))
-    t_stage = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr[:-1])])
-    t_term = t0 + jnp.sum(dt_arr)
-
-    obj = retarget_problem(problem, bc).obj
-
-    stage_costs = obj.stage_cost.stage_costs(X[:-1], U, t_stage)
-    term_cost = obj.terminal_cost.evaluate(X[-1], None, t_term)
-    return jnp.sum(stage_costs) + term_cost
+    t = t0 + jnp.concatenate([jnp.zeros(1, dtype=Z.dtype), jnp.cumsum(dt_arr)])
+    return retarget_problem(problem, bc).obj.cost(Trajectory(X=X, U=U, t=t, dt=dt_arr))
 
 
 @eqx.filter_jit

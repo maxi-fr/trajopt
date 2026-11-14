@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from trajopt.costs.base import CostFunction, QuadraticCostFunction
 from trajopt.costs.quadratic import promote_weights
+from trajopt.costs.sum import SumCost, cost_terms
 from trajopt.trajectory import Trajectory
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ class Objective(eqx.Module):
         N: int | None = None,
         linear_control_cost: jax.Array | None = None,
     ) -> None:
-        """Build a stacked Objective, retaining independent linear control costs."""
+        """Stack the Stage Cost and bind the Terminal Cost."""
         if stage_cost.is_stacked:
             n_knots = int(_quadratic(stage_cost).Q.shape[0]) + 1
             if N is not None and n_knots != N:
@@ -97,9 +98,10 @@ class Objective(eqx.Module):
         self.n = int(stage_cost.n)
         self.m = int(stage_cost.m)
         self.linear_control_cost = (
-            jnp.asarray(st_cost.r)
-            if linear_control_cost is None and isinstance(st_cost, QuadraticCostFunction)
-            else jnp.zeros((N_val - 1, self.m))
+            sum(
+                (term.r for term in cost_terms(st_cost) if isinstance(term, QuadraticCostFunction)),
+                jnp.zeros((N_val - 1, self.m)),
+            )
             if linear_control_cost is None
             else jnp.asarray(linear_control_cost)
         )
@@ -151,19 +153,28 @@ class Objective(eqx.Module):
 
     @property
     def is_diag(self) -> bool:
-        """Whether both cost Hessians are strictly diagonal."""
+        """Whether the complete Objective is known to have diagonal Hessians."""
         return self.stage_cost.is_diag and self.terminal_cost.is_diag
 
     @property
     def is_blockdiag(self) -> bool:
-        """Whether the stage cost Hessian is block diagonal."""
+        """Whether the complete Stage Cost is known to have a block-diagonal Hessian."""
         return self.stage_cost.is_blockdiag
 
     @property
     def is_quadratic(self) -> bool:
-        """Whether both stage and terminal costs are quadratic."""
+        """Whether the complete Objective is quadratic in physical coordinates."""
         return isinstance(self.stage_cost, QuadraticCostFunction) and isinstance(
             self.terminal_cost, QuadraticCostFunction
+        )
+
+    @property
+    def can_retarget(self) -> bool:
+        """Whether references can update the tracking portion of the Objective."""
+        return any(
+            isinstance(term, QuadraticCostFunction)
+            for cost in (self.stage_cost, self.terminal_cost)
+            for term in cost_terms(cost)
         )
 
     @property
@@ -175,15 +186,19 @@ class Objective(eqx.Module):
         reference. Reads concrete values, so it belongs to eager problem setup rather than a
         traced solver core.
         """
-        if not self.is_quadratic:
-            return False
-        terms = (self.q, self.r - self.linear_control_cost, self.c, self.q_f, self.c_f)
+        stage = tuple(term for term in cost_terms(self.stage_cost) if isinstance(term, QuadraticCostFunction))
+        terminal = tuple(term for term in cost_terms(self.terminal_cost) if isinstance(term, QuadraticCostFunction))
+        terms = [value for term in (*stage, *terminal) for value in (term.q, term.c)]
+        terms.append(
+            sum((term.r for term in stage), jnp.zeros_like(self.linear_control_cost)) - self.linear_control_cost
+        )
         return any(bool(jnp.any(term)) for term in terms)
 
     def cost(self, traj: Trajectory) -> jax.Array:
-        """Total cost sum_k l_k over the trajectory, as a scalar, in one batched pass."""
+        """Evaluate the Stage Cost, Terminal Cost, and additive penalties."""
         stage_c = self.stage_cost.stage_costs(traj.X[:-1], traj.U, traj.t[:-1])
-        return jnp.sum(stage_c) + self.terminal_cost.evaluate(traj.X[-1], None, traj.t[-1])
+        terminal_c = self.terminal_cost.evaluate(traj.X[-1], None, traj.t[-1])
+        return jnp.sum(stage_c) + terminal_c
 
     def cost_expansion(self, traj: Trajectory, model: "AbstractModel | None" = None) -> "Expansion":
         """Stacked first- and second-order cost expansion in error coordinates along traj."""
@@ -192,7 +207,7 @@ class Objective(eqx.Module):
         return _cost_expansion(self, traj, model)
 
     def invert(self) -> "Objective":
-        """Invert stage, terminal, and independent linear control costs."""
+        """Invert the Objective when it carries analytically invertible costs."""
         return Objective(
             stage_cost=self.stage_cost.invert(),
             terminal_cost=self.terminal_cost.invert(),
@@ -201,11 +216,11 @@ class Objective(eqx.Module):
         )
 
     def update_reference(self, trajectory: Trajectory, start: int = 0) -> "Objective":
-        """Objective tracking trajectory from knot point start, keeping the current weights."""
+        """Track the Trajectory from start while retaining weights and additive penalties."""
         return update_reference(self, trajectory, start=start)
 
     def with_reference(self, X_ref: jax.Array, U_ref: jax.Array) -> "Objective":
-        """Objective whose linear and constant terms track a reference window, keeping Q, R, H and Q_f.
+        """Retarget the base tracking costs while keeping their weights and additive penalties.
 
         Rewrites q, r and c the way `tracking` / `terminal_tracking` build them, so a quadratic
         Objective built as pure shape and one built at a fixed target agree exactly. Safe under
@@ -222,22 +237,14 @@ class Objective(eqx.Module):
         Raises
         ------
         TypeError
-            If either cost is not quadratic, since only a quadratic cost exposes q, r and c.
+            If the Objective has no quadratic cost terms.
         """
-        stage_cls = type(_quadratic(self.stage_cost))
-        term_cls = type(_quadratic(self.terminal_cost))
-        X_stage, x_term = X_ref[:-1], X_ref[-1]
-        return eqx.tree_at(
-            lambda o: (o.stage_cost.q, o.stage_cost.r, o.stage_cost.c, o.terminal_cost.q, o.terminal_cost.c),
-            self,
-            (
-                -stage_cls.matvec(self.Q, X_stage),
-                -stage_cls.matvec(self.R, U_ref) + self.linear_control_cost,
-                0.5 * stage_cls.quad_form(self.Q, X_stage) + 0.5 * stage_cls.quad_form(self.R, U_ref),
-                -term_cls.matvec(self.Q_f, x_term),
-                0.5 * term_cls.quad_form(self.Q_f, x_term),
-            ),
-        )
+        if not self.can_retarget:
+            msg = "The Objective has no quadratic tracking costs."
+            raise TypeError(msg)
+        stage = _retarget(self.stage_cost, X_ref[:-1], U_ref, self.linear_control_cost)
+        terminal = _retarget(self.terminal_cost, X_ref[-1], None, self.linear_control_cost)
+        return eqx.tree_at(lambda obj: (obj.stage_cost, obj.terminal_cost), self, (stage, terminal))
 
     def __len__(self) -> int:
         """Return the horizon length N."""
@@ -261,7 +268,12 @@ class Objective(eqx.Module):
         return self.stage_cost.unstacked(k)
 
 
-def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective:  # noqa: N802 -- factory function named to match class-like constructor
+def LQRObjective(  # noqa: N802 -- factory function named to match class-like constructor
+    Q: jax.Array,
+    R: jax.Array,
+    Qf: jax.Array,
+    N: int,
+) -> Objective:
     """Construct an LQR Objective carrying shape only, with stacked-constant weights over Horizon N.
 
     Formula, once a reference window (X_ref, U_ref) has been applied by `Objective.with_reference`:
@@ -294,7 +306,10 @@ def LQRObjective(Q: jax.Array, R: jax.Array, Qf: jax.Array, N: int) -> Objective
     )
     terminal_cost = cost_cls(Q=Qf_arr, terminal=True, m=m)
     return Objective(
-        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=jnp.zeros_like(stage_cost.r)
+        stage_cost=stage_cost,
+        terminal_cost=terminal_cost,
+        N=N,
+        linear_control_cost=jnp.zeros_like(stage_cost.r),
     )
 
 
@@ -331,7 +346,10 @@ def TrackingObjective(  # noqa: N802
     )
     terminal_cost = cost_cls.terminal_tracking(Qf_arr, trajectory.X[-1], trajectory.m)
     return Objective(
-        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=jnp.zeros_like(stage_cost.r)
+        stage_cost=stage_cost,
+        terminal_cost=terminal_cost,
+        N=N,
+        linear_control_cost=jnp.zeros_like(stage_cost.r),
     )
 
 
@@ -340,7 +358,7 @@ def update_reference(
     trajectory: Trajectory,
     start: int = 0,
 ) -> Objective:
-    """Rebuild the linear and constant terms of a tracking objective from a reference trajectory.
+    """Rebuild tracking terms from a reference Trajectory, preserving additive penalties.
 
     Parameters
     ----------
@@ -358,17 +376,23 @@ def update_reference(
     if start + N > trajectory.N:
         msg = f"Reference trajectory length ({trajectory.N}) is insufficient for horizon {N} from start {start}"
         raise ValueError(msg)
-    if not isinstance(obj.stage_cost, QuadraticCostFunction):
-        msg = f"Cannot update the reference of a non-quadratic stage cost {type(obj.stage_cost).__name__}"
-        raise TypeError(msg)
+    return obj.with_reference(trajectory.X[start : start + N], trajectory.U[start : start + N - 1])
 
-    cost_cls = type(obj.stage_cost)
-    X_ref = trajectory.X[start : start + N]
-    U_ref = trajectory.U[start : start + N - 1]
 
-    stage_cost = cost_cls.tracking(obj.Q, obj.R, X_ref[:-1], U_ref)
-    stage_cost = eqx.tree_at(lambda c: c.r, stage_cost, stage_cost.r + obj.linear_control_cost)
-    terminal_cost = cost_cls.terminal_tracking(obj.Q_f, X_ref[-1], obj.m)
-    return Objective(
-        stage_cost=stage_cost, terminal_cost=terminal_cost, N=N, linear_control_cost=obj.linear_control_cost
-    )
+def _retarget(cost: CostFunction, X: jax.Array, U: jax.Array | None, linear: jax.Array) -> CostFunction:
+    """Retarget quadratic summands and apply the independent control term once."""
+    terms = []
+    for original in cost_terms(cost):
+        term = original
+        if isinstance(term, QuadraticCostFunction):
+            q = -term.matvec(term.Q, X)
+            c = 0.5 * term.quad_form(term.Q, X)
+            if U is None:
+                term = eqx.tree_at(lambda part: (part.q, part.c), term, (q, c))
+            else:
+                r = -term.matvec(term.R, U) + linear
+                c = c + 0.5 * term.quad_form(term.R, U)
+                term = eqx.tree_at(lambda part: (part.q, part.r, part.c), term, (q, r, c))
+                linear = jnp.zeros_like(linear)
+        terms.append(term)
+    return SumCost(*terms) if isinstance(cost, SumCost) else terms[0]

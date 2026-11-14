@@ -185,6 +185,49 @@ controls in Trajectories, warm starts, and reference windows. For an existing co
 `jnp.concatenate([U, jnp.abs(U)], axis=-1)` gives a feasible epigraph control array. For a
 reference window, append `jnp.zeros_like(U_ref)` to the original control reference.
 
+For linear MPC, declare a one-sided quadratic penalty on affine residuals in the `Objective`.
+The example penalizes control above 0.5 and terminal state above 1.0 in a scalar model.
+
+```python
+import jax.numpy as jnp
+
+from trajopt.costs.objective import LQRObjective, Objective
+from trajopt.costs.one_sided_quadratic import OneSidedQuadratic
+from trajopt.models.affine import AffineModel
+from trajopt.mpc import MPC
+from trajopt.problem import Problem
+from trajopt.transcription.osqp import OSQP
+
+model = AffineModel(A=jnp.ones((1, 1)), B=jnp.ones((1, 1)))
+stage_limit = OneSidedQuadratic(jnp.array([[0.0, 1.0]]), jnp.array([0.5]), 2.0, n=1)
+terminal_limit = OneSidedQuadratic(jnp.array([[1.0]]), jnp.array([1.0]), 4.0, n=1, terminal=True)
+tracking = LQRObjective(jnp.zeros(1), jnp.ones(1), jnp.ones(1), N=5)
+obj = Objective(
+    stage_cost=tracking.stage_cost + stage_limit,
+    terminal_cost=tracking.terminal_cost + terminal_limit,
+    N=tracking.N,
+)
+mpc = MPC(Problem(model, obj), OSQP(), x0=[0.0], xf=[2.0],
+          penalty_diagnostics=True)
+result = mpc.solve()
+slacks = result.info["penalties"][0]
+```
+
+Each row contributes `weight * max(A @ z - b, 0)**2`, with `z = [x, u]` at control Knot Points
+and `z = x` at the terminal Knot Point. Either location can be omitted. The default
+`formulation="epigraph"` introduces private slacks, so the Trajectory, MPC commands, references,
+and warm starts use physical coordinates. With diagnostics enabled, entries follow the order of
+the stage terms and then the terminal terms. They report violations and solved slacks separately.
+
+Plain iLQR and Control Blocking require `formulation="direct"`. OSQP and Clarabel require
+`"epigraph"` for this penalty. The Program checks these combinations at construction.
+
+Custom `CostFunction` subclasses can override `reformulate()` to return a
+`CostReformulation` from `trajopt.costs.reformulation`. It describes a replacement
+cost, ordinary Constraints, and any auxiliary coordinates. The Program calls this
+hook on Objective terms, including summands, and maps the solve back to physical
+coordinates. Use `evaluate()` for the equivalent cost on physical coordinates.
+
 ### Native iLQR / ALTRO solvers
 
 Alongside the Ipopt/OSQP/Clarabel transcription adapters, `trajopt.solvers` ports iLQR, an

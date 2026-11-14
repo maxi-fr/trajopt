@@ -1,5 +1,6 @@
 import functools
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -10,9 +11,11 @@ import numpy as np
 from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory
 
 if TYPE_CHECKING:
+    from trajopt.costs.reformulation import CostReformulation
     from trajopt.problem import BoundaryConditions, Problem
     from trajopt.solvers.al import ALConstraints
     from trajopt.trajectory import Trajectory
+    from trajopt.transcription.penalties import PenaltyLayout
     from trajopt.transcription.result import Solver, SolverResult
 
 
@@ -284,17 +287,64 @@ class Program:
         over it, so it must not be swapped.
     solver : Solver
         The Backend this program belongs to, and the source of its static configuration.
+    penalty_diagnostics : bool, optional
+        Include per-term violations and solved slacks in result.info["penalties"].
     """
 
-    __slots__ = ("_cores", "handles", "problem", "solver")
+    __slots__ = ("_cores", "_penalty_diagnostics", "_penalty_layout", "_transformed", "handles", "problem", "solver")
 
-    def __init__(self, problem: "Problem", solver: "Solver") -> None:
-        """Validate Problem and Solver pairing upfront and store static configuration."""
+    def __init__(self, problem: "Problem", solver: "Solver", *, penalty_diagnostics: bool = False) -> None:
+        """Validate the pairing and lower the declared penalties once for this Program."""
         _validate_program_pairing(problem, solver)
         self.problem = problem
         self.solver = solver
         self._cores: dict[tuple[Any, Any], Callable[..., Any]] = {}
         self.handles: dict[str, Any] = {}
+        self._penalty_layout: PenaltyLayout | None = None
+        self._transformed: Program | None = None
+        self._penalty_diagnostics = penalty_diagnostics
+        from trajopt.costs.sum import cost_terms  # noqa: PLC0415 -- keep Program imports light
+
+        forms = tuple(
+            tuple(term.reformulate() for term in cost_terms(cost))
+            for cost in (problem.obj.stage_cost, problem.obj.terminal_cost)
+        )
+        if any(form is not None for group in forms for form in group):
+            self._lower_penalties(forms)
+
+    def _lower_penalties(self, forms: "tuple[tuple[CostReformulation | None, ...], ...]") -> None:
+        """Validate the selected forms and prepare the Problem consumed by the solver."""
+        from trajopt.solvers.ilqr import ILQR  # noqa: PLC0415 -- solvers import Program
+        from trajopt.transcription.clarabel import Clarabel  # noqa: PLC0415 -- solvers import Program
+        from trajopt.transcription.osqp import OSQP  # noqa: PLC0415 -- solvers import Program
+        from trajopt.transcription.penalties import PenaltyLayout  # noqa: PLC0415 -- lowering consumes Program types
+
+        solver = self.solver
+        for i, form in enumerate(form for group in forms for form in group):
+            if form is None:
+                continue
+            if (form.constraints and isinstance(solver, ILQR)) or (
+                form.auxiliary_dim and self.problem.control_block_steps > 1
+            ):
+                msg = (
+                    f"{type(solver).__name__} cannot enforce cost term {i}'s epigraph or constraint reformulation. "
+                    "Select a direct formulation if the cost supports it."
+                )
+                raise ValueError(msg)
+            if form.requires_iterative and isinstance(solver, (OSQP, Clarabel)):
+                msg = f"{type(solver).__name__} cannot solve cost term {i} in direct form at one Operating Point."
+                raise ValueError(msg)
+        layout = PenaltyLayout(self.problem, forms)
+        if isinstance(solver, (OSQP, Clarabel)) and solver.operating_point is not None:
+            point = solver.operating_point
+            from trajopt.trajectory import Trajectory  # noqa: PLC0415 -- only needed for explicit Operating Points
+
+            lifted = layout.lift_trajectory(point) if isinstance(point, Trajectory) else layout.lift_primal(point)
+            solver = replace(solver, operating_point=lifted)
+        transformed = Program(layout.lowered, solver)
+        transformed.handles = self.handles
+        self._penalty_layout = layout
+        self._transformed = transformed
 
     def core(self, fn: Callable[..., Any], key: object = None, **static_kwargs: object) -> Callable[..., Any]:
         """Return `fn` jitted and specialized to this program's problem, built once per `(fn, key)`.
@@ -335,6 +385,13 @@ class Program:
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
     def solve(self, bc: "BoundaryConditions", ws: WarmStart) -> "SolverResult":
-        """Solve this Problem with the configured Solver Backend."""
+        """Solve the selected formulation and return the result in physical coordinates."""
+        if self._penalty_layout is not None and self._transformed is not None:
+            layout = self._penalty_layout
+            lifted = self._transformed.solve(
+                layout.lift_boundary(bc) if layout.ms else bc,
+                layout.lift_warm_start(ws) if layout.ms or layout.has_new_rows else ws,
+            )
+            return layout.project(lifted, bc, diagnostics=self._penalty_diagnostics)
         _validate_program_pairing(self.problem, self.solver)
         return self.solver.solve(self, bc, ws)

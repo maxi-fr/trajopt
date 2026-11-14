@@ -24,52 +24,69 @@ if TYPE_CHECKING:
 
 
 class _EpigraphModel(DiscreteDynamics):
-    """Model accepting original controls followed by unused epigraph variables."""
+    """Model with private slack coordinates alongside physical states and controls."""
 
     original: DiscreteDynamics
 
-    def __init__(self, original: DiscreteDynamics) -> None:
-        """Double the control dimension while retaining state and output dimensions."""
-        super().__init__(n=original.n, m=2 * original.m, ne=original.ne, p=original.p)
+    def __init__(self, original: DiscreteDynamics, extra_controls: int, extra_states: int = 0) -> None:
+        """Append control slacks and, when needed, state slots for terminal slacks."""
+        super().__init__(
+            n=original.n + extra_states, m=original.m + extra_controls, ne=original.ne + extra_states, p=original.p
+        )
         self.original = original
 
     def discrete_dynamics(self, x: jax.Array, u: jax.Array, t: float | jax.Array, dt: float | jax.Array) -> jax.Array:
-        """Advance the original model using the first m control coordinates."""
-        return self.original.discrete_dynamics(x, u[: self.original.m], t, dt)
+        """Advance physical dynamics and copy terminal slack channels to the next state."""
+        state = self.original.discrete_dynamics(x[: self.original.n], u[: self.original.m], t, dt)
+        return jnp.concatenate([state, u[self.m - (self.n - self.original.n) :]])
 
     def state_jacobian(
         self, x: jax.Array, u: jax.Array, t: float | jax.Array = 0.0, *args: float | jax.Array
     ) -> jax.Array:
-        """Return the original dynamics state Jacobian of shape (n, n)."""
-        return self.original.state_jacobian(x, u[: self.original.m], t, *args)
+        """Extend the original dynamics state Jacobian with zero slack rows and columns."""
+        extra = self.n - self.original.n
+        physical = self.original.state_jacobian(x[: self.original.n], u[: self.original.m], t, *args)
+        return jnp.pad(physical, ((0, extra), (0, extra)))
 
     def control_jacobian(
         self, x: jax.Array, u: jax.Array, t: float | jax.Array = 0.0, *args: float | jax.Array
     ) -> jax.Array:
-        """Append zero epigraph columns to the original control Jacobian."""
-        original = self.original.control_jacobian(x, u[: self.original.m], t, *args)
-        return jnp.pad(original, ((0, 0), (0, self.original.m)))
+        """Extend the original control Jacobian with terminal slack transport."""
+        extra = self.n - self.original.n
+        physical = self.original.control_jacobian(x[: self.original.n], u[: self.original.m], t, *args)
+        return (
+            jnp.pad(physical, ((0, extra), (0, self.m - self.original.m)))
+            .at[self.original.n :, self.m - extra :]
+            .set(jnp.eye(extra))
+        )
 
     def state_diff(self, x: jax.Array, x0: jax.Array) -> jax.Array:
-        """Retain the original model's error-state coordinates."""
-        return self.original.state_diff(x, x0)
+        """Compute physical error coordinates and Euclidean slack errors."""
+        n = self.original.n
+        return jnp.concatenate([self.original.state_diff(x[:n], x0[:n]), x[n:] - x0[n:]])
 
     def errstate_jacobian(self, x: jax.Array) -> jax.Array:
-        """Retain the original error-state Jacobian of shape (n, ne)."""
-        return self.original.errstate_jacobian(x)
+        """Extend the physical error-state Jacobian with identity on slacks."""
+        n = self.original.n
+        extra = self.n - n
+        physical = self.original.errstate_jacobian(x[:n])
+        return jnp.pad(physical, ((0, extra), (0, extra))).at[n:, self.original.ne :].set(jnp.eye(extra))
 
     def output(self, x: jax.Array, u: jax.Array | None = None, t: float | jax.Array = 0.0) -> jax.Array:
-        """Evaluate original output using only original controls when present."""
-        return self.original.output(x, None if u is None else u[: self.original.m], t)
+        """Evaluate original output from its physical state and control coordinates."""
+        return self.original.output(x[: self.original.n], None if u is None else u[: self.original.m], t)
 
     def output_state_jacobian(self, x: jax.Array, u: jax.Array | None = None, t: float | jax.Array = 0.0) -> jax.Array:
-        """Return the original output state Jacobian of shape (p, n)."""
-        return self.original.output_state_jacobian(x, None if u is None else u[: self.original.m], t)
+        """Append zero slack columns to the original output state Jacobian."""
+        original = self.original.output_state_jacobian(
+            x[: self.original.n], None if u is None else u[: self.original.m], t
+        )
+        return jnp.pad(original, ((0, 0), (0, self.n - self.original.n)))
 
     def output_control_jacobian(self, x: jax.Array, u: jax.Array, t: float | jax.Array = 0.0) -> jax.Array:
         """Append zero epigraph columns to the original output control Jacobian."""
-        original = self.original.output_control_jacobian(x, u[: self.original.m], t)
-        return jnp.pad(original, ((0, 0), (0, self.original.m)))
+        original = self.original.output_control_jacobian(x[: self.original.n], u[: self.original.m], t)
+        return jnp.pad(original, ((0, 0), (0, self.m - self.original.m)))
 
     def has_control_feedthrough(self) -> bool:
         """Retain whether original controls feed directly into output."""
@@ -109,7 +126,7 @@ class _EpigraphStageCost(CostFunction):
         m = self.original.m
         return self.original.stage_costs(X, U[:, :m], t) + self.weight * jnp.sum(U[:, m:], axis=1)
 
-    def unstacked(self, k: int) -> CostFunction:
+    def unstacked(self, k: int | jax.Array) -> CostFunction:
         """Return a cost for knot k, including its original stage parameters."""
         return _EpigraphStageCost(self.original.unstacked(k), self.weight)
 
@@ -139,7 +156,12 @@ def _epigraph_objective(obj: Objective, weight: float) -> Objective:
         )
     else:
         lifted = _EpigraphStageCost(stage, weight)
-    return Objective(stage_cost=lifted, terminal_cost=obj.terminal_cost, N=obj.N, linear_control_cost=linear)
+    return Objective(
+        stage_cost=lifted,
+        terminal_cost=obj.terminal_cost,
+        N=obj.N,
+        linear_control_cost=linear,
+    )
 
 
 def _epigraph_constraints(original: BuiltConstraintList) -> BuiltConstraintList:
@@ -181,16 +203,17 @@ def _epigraph_constraints(original: BuiltConstraintList) -> BuiltConstraintList:
 
 
 def add_l1_epigraph(problem: "Problem", weight: float) -> "Problem":
-    """Add exact weight * sum(abs(u)) by augmenting controls as [u, s] at each Knot Point, preserving blocking.
+    """Add exact weight * sum(abs(u)) by augmenting controls as [u, s].
 
     The returned Problem has control width 2m. Trajectories and reference windows supplied to it
-    therefore need controls [u, s] of shape (N - 1, 2m). The original Problem is unchanged.
+    therefore need controls [u, s] of shape (N - 1, 2m). Existing affine penalties continue to
+    read the original control coordinates.
     """
     if not isinstance(weight, (int, float, np.floating)) or not np.isfinite(weight) or weight <= 0:
         msg = "weight must be a finite positive scalar."
         raise ValueError(msg)
     return Problem(
-        model=_EpigraphModel(problem.model),
+        model=_EpigraphModel(problem.model, problem.model.m),
         obj=_epigraph_objective(problem.obj, float(weight)),
         constraints=_epigraph_constraints(problem.constraints),
         N=problem.N,
@@ -236,10 +259,10 @@ class BoundaryConditions(eqx.Module):
     xf: jax.Array | None = None
 
     def retarget(self, obj: Objective) -> Objective:
-        """Objective aimed at this reference window, regulated to `xf` when there is no window."""
+        """Aim the Objective's tracking costs at this reference window or the constant goal."""
         if self.X_ref is None or self.U_ref is None:
             return retarget_to_goal(obj, self.xf)
-        if not obj.is_quadratic:
+        if not obj.can_retarget:
             return obj
         return obj.with_reference(self.X_ref, self.U_ref)
 
@@ -248,10 +271,9 @@ def retarget_to_goal(obj: Objective, xf: jax.Array | None) -> Objective:
     """Objective regulated to the run-time goal xf of shape (n,), held constant over the Horizon.
 
     A goal point is a constant reference window, so regulation and tracking go through the one
-    `with_reference` mechanism. Returns `obj` untouched when there is no goal, or when the cost is
-    not quadratic and so exposes no linear terms to retarget.
+    `with_reference` mechanism for Objectives with reference-dependent costs.
     """
-    if xf is None or not obj.is_quadratic:
+    if xf is None or not obj.can_retarget:
         return obj
     xf_arr = jnp.asarray(xf)
     X_ref = jnp.broadcast_to(xf_arr, (obj.N, xf_arr.shape[-1]))
@@ -313,7 +335,7 @@ class Problem(eqx.Module):
         binary_control_indices: Sequence[int] = (),
         control_block_steps: int = 1,
     ) -> None:
-        """Build a Problem with structural control blocking and validate binary control coordinates."""
+        """Build the physical Problem and validate its control structure."""
         if isinstance(control_block_steps, (bool, np.bool_)) or not isinstance(control_block_steps, (int, np.integer)):
             msg = f"control_block_steps must be a positive integer, got {type(control_block_steps).__name__}."
             raise TypeError(msg)
