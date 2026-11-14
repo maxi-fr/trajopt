@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import isfinite
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
@@ -22,9 +23,14 @@ from trajopt.transcription.layout import _trajectory_to_z, _z_to_trajectory, com
 
 if TYPE_CHECKING:
     from trajopt.problem import BoundaryConditions
-    from trajopt.program import WarmStart
+    from trajopt.program import Program, WarmStart
     from trajopt.trajectory import Trajectory
     from trajopt.transcription.result import SolverResult
+
+
+def _physical_cost(problem: Problem, bc: BoundaryConditions, traj: Trajectory) -> jax.Array:
+    """Evaluate the exact physical Objective for the current Boundary Conditions and Trajectory."""
+    return bc.retarget(problem.obj).cost(traj)
 
 
 class _KnotCost(CostFunction):
@@ -132,8 +138,14 @@ class _Entry(NamedTuple):
 class PenaltyLayout:
     """Apply cost reformulations and map between physical and solver coordinates."""
 
-    def __init__(self, problem: Problem, forms: tuple[tuple[CostReformulation | None, ...], ...]) -> None:
-        """Allocate auxiliary coordinates for stage and terminal reformulations."""
+    def __init__(
+        self,
+        problem: Problem,
+        forms: tuple[tuple[CostReformulation | None, ...], ...],
+        *,
+        reuse_transformed_violation: bool,
+    ) -> None:
+        """Allocate auxiliary coordinates and allow feasibility reuse for control-only lifts."""
         self.physical = problem
         self.n, self.m = problem.model.n, problem.model.m
         self.stage, self.terminal = (
@@ -141,6 +153,7 @@ class PenaltyLayout:
         )
         self.ns = self.terminal[-1].slot.stop - self.n
         self.ms = self.stage[-1].slot.stop - self.m + self.ns
+        self.reuse_transformed_violation = reuse_transformed_violation and self.ms > 0 and self.ns == 0
         self.has_new_rows = any(entry.form.constraints for entry in (*self.stage, *self.terminal))
         self.lowered = self._lower()
         self.lam_indices = self._physical_rows()
@@ -313,8 +326,10 @@ class PenaltyLayout:
         )
         return stage + terminal
 
-    def project(self, result: SolverResult, bc: BoundaryConditions, *, diagnostics: bool) -> SolverResult:
-        """Recover physical variables, Multipliers and cost from the transformed solve."""
+    def project(
+        self, result: SolverResult, bc: BoundaryConditions, *, diagnostics: bool, program: Program
+    ) -> SolverResult:
+        """Recover physical variables and evaluate the exact cost with the physical Program's core."""
         traj = result.trajectory
         X, U = traj.X[:, : self.n], traj.U[:, : self.m]
         Z = _trajectory_to_z(X, U)
@@ -334,9 +349,13 @@ class PenaltyLayout:
                 info.pop(key, None)
         if diagnostics:
             info["penalties"] = self.diagnostics(traj)
-        physical_violation = compute_constraint_violation(
-            self.physical, Z, bc.x0, t0=bc.t0, dt=self.physical.dt, xf=bc.xf
-        )
+        violation = result.constraint_violation
+        if not (self.reuse_transformed_violation and isfinite(violation)):
+            physical_violation = compute_constraint_violation(
+                self.physical, Z, bc.x0, t0=bc.t0, dt=self.physical.dt, xf=bc.xf
+            )
+            violation = max(physical_violation, violation)
+        evaluate_cost = program.core(_physical_cost)
         return _PhysicalResult(
             result,
             physical_traj,
@@ -344,8 +363,8 @@ class PenaltyLayout:
             lam,
             mu,
             info,
-            float(bc.retarget(self.physical.obj).cost(physical_traj)),
-            max(physical_violation, result.constraint_violation),
+            float(evaluate_cost(bc=bc, traj=physical_traj)),
+            violation,
             getattr(result, "al", None) if not (self.ms or self.has_new_rows) else None,
             getattr(result, "duals", None) if not (self.ms or self.has_new_rows) else None,
             result.success,

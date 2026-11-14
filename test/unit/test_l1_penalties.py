@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from trajopt.mpc import MPC
 from trajopt.problem import Problem
 from trajopt.program import Program
 from trajopt.trajectory import Trajectory
+from trajopt.transcription import penalties
 from trajopt.transcription.ipopt import Ipopt
 from trajopt.transcription.osqp import OSQP
 from trajopt.transcription.single_shooting import SingleShooting
@@ -57,6 +60,73 @@ def test_l1_cost_mpc_matches_exact_optimum(backend: str, block_steps: int) -> No
     np.testing.assert_allclose(result.info["penalties"][0].stage_slack, np.abs(expected_u), atol=1e-6)
     expected_cost = np.sum((np.cumsum(u) - target) ** 2 + 0.1 * u**2 + 2 * weight * u)
     assert result.cost == pytest.approx(expected_cost, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("slack", "expected_violation", "physical_checks"), [(0.75, 0.25, 0), (0.125, 0.625, 0), (np.nan, 0.25, 1)]
+)
+def test_blocked_l1_reuses_transformed_feasibility(
+    monkeypatch, slack: float, expected_violation: float, physical_checks: int
+) -> None:
+    """Reuse finite feasibility metrics and recheck the physical Trajectory if slacks make them nonfinite."""
+    pytest.importorskip("cyipopt", exc_type=ImportError)
+    model = AffineModel(A=jnp.eye(1), B=jnp.zeros((1, 1)))
+    objective = Objective(stage_cost=L1ControlCost(n=1, m=1, weight=2.0), N=3)
+    constraints = ConstraintList(n=1, m=1, N=3)
+    constraints.add_constraint(ControlBound(m=1, u_min=[-0.5], u_max=[0.5], n=1), range(2))
+    problem = Problem(model, objective, constraints, control_block_steps=2)
+
+    def solve_passes(*args, **kwargs):
+        """Supply one deliberately infeasible block of physical control and slack."""
+        return np.array([0.75, slack]), {"status": -1}, 1, 0.0
+
+    check_physical = Mock(wraps=penalties.compute_constraint_violation)
+    monkeypatch.setattr(SingleShooting, "_solve_passes", solve_passes)
+    monkeypatch.setattr(penalties, "compute_constraint_violation", check_physical)
+    result = MPC(problem, SingleShooting(Ipopt()), x0=[0.0], penalty_diagnostics=True).solve()
+
+    assert check_physical.call_count == physical_checks
+    assert result.constraint_violation == pytest.approx(expected_violation)
+    np.testing.assert_array_equal(result.trajectory.U, [[0.75], [0.75]])
+    np.testing.assert_array_equal(result.info["penalties"][0].stage_slack, [[slack], [slack]])
+    assert result.cost == pytest.approx(3.0)
+
+
+def test_projected_cost_reuses_one_trace_with_moving_reference_and_clock(monkeypatch) -> None:
+    """Project the exact physical cost using each solve's reference and timestamps."""
+    pytest.importorskip("cyipopt", exc_type=ImportError)
+    model = AffineModel(A=jnp.eye(1), B=jnp.ones((1, 1)))
+    base = LQRObjective(jnp.ones(1), jnp.ones(1), jnp.ones(1), N=3)
+    stage = base.stage_cost + L1ControlCost(n=1, m=1, weight=0.2) + GenericCost(lambda _x, _u, t: t**2, n=1, m=1)
+    objective = Objective(stage, base.terminal_cost, N=3)
+    problem = Problem(model, objective, control_block_steps=2)
+    mpc = MPC(problem, SingleShooting(Ipopt(options={"print_level": 0})), x0=[0.0])
+    evaluate = Objective.cost
+    physical_evaluations = 0
+
+    def count_physical_evaluation(self, traj):
+        nonlocal physical_evaluations
+        if type(self) is Objective:
+            physical_evaluations += 1
+        return evaluate(self, traj)
+
+    monkeypatch.setattr(Objective, "cost", count_physical_evaluation)
+    for i in range(3):
+        mpc.measure([0.0], t=float(i))
+        mpc.set_reference(
+            Trajectory(
+                X=jnp.full((3, 1), float(i)),
+                U=jnp.zeros((2, 1)),
+                t=mpc.t0 + jnp.arange(3) * 0.05,
+                dt=jnp.full(2, 0.05),
+            )
+        )
+        result = mpc.solve()
+        assert result.success, result.message
+        expected = evaluate(mpc.bc.retarget(objective), result.trajectory)
+        assert result.cost == pytest.approx(float(expected), rel=1e-12)
+
+    assert physical_evaluations == 1
 
 
 def test_pseudo_huber_control_cost_is_smooth_l1_stage_cost() -> None:

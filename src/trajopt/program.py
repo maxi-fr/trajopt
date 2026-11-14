@@ -313,11 +313,12 @@ class Program:
             self._lower_penalties(forms)
 
     def _lower_penalties(self, forms: "tuple[tuple[CostReformulation | None, ...], ...]") -> None:
-        """Validate the selected forms, including auxiliary sharing under Control Blocking."""
+        """Validate the selected forms and prepare the transformed Program."""
         from trajopt.solvers.ilqr import ILQR  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.clarabel import Clarabel  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.osqp import OSQP  # noqa: PLC0415 -- solvers import Program
         from trajopt.transcription.penalties import PenaltyLayout  # noqa: PLC0415 -- lowering consumes Program types
+        from trajopt.transcription.single_shooting import SingleShooting  # noqa: PLC0415 -- avoid import cycle
 
         solver = self.solver
         for i, form in enumerate((*forms[0], *forms[1])):
@@ -336,7 +337,8 @@ class Program:
             if form.requires_iterative and isinstance(solver, (OSQP, Clarabel)):
                 msg = f"{type(solver).__name__} cannot solve cost term {i} in direct form at one Operating Point."
                 raise ValueError(msg)
-        layout = PenaltyLayout(self.problem, forms)
+        # SingleShooting checks every lifted constraint on the returned Trajectory.
+        layout = PenaltyLayout(self.problem, forms, reuse_transformed_violation=type(solver) is SingleShooting)
         if isinstance(solver, (OSQP, Clarabel)) and solver.operating_point is not None:
             point = solver.operating_point
             from trajopt.trajectory import Trajectory  # noqa: PLC0415 -- only needed for explicit Operating Points
@@ -387,13 +389,13 @@ class Program:
         return jax.jit(functools.partial(fn, problem=self.problem, **static_kwargs))
 
     def solve(self, bc: "BoundaryConditions", ws: WarmStart) -> "SolverResult":
-        """Solve the selected formulation and return the result in physical coordinates."""
+        """Solve the selected formulation and evaluate the result in physical coordinates."""
         if self._penalty_layout is not None and self._transformed is not None:
             layout = self._penalty_layout
             lifted = self._transformed.solve(
                 layout.lift_boundary(bc) if layout.ms else bc,
                 layout.lift_warm_start(ws) if layout.ms or layout.has_new_rows else ws,
             )
-            return layout.project(lifted, bc, diagnostics=self._penalty_diagnostics)
+            return layout.project(lifted, bc, diagnostics=self._penalty_diagnostics, program=self)
         _validate_program_pairing(self.problem, self.solver)
         return self.solver.solve(self, bc, ws)

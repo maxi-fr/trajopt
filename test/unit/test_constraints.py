@@ -386,6 +386,26 @@ def test_indexed_constraint() -> None:
     np.testing.assert_allclose(ju, np.zeros((1, m_full)), atol=1e-14)
 
 
+@pytest.mark.parametrize(("ix", "iu"), [((0, 1), (1, 0)), ((1, 0), (0, 1)), ((0, 1), (0, 1))])
+def test_indexed_constraint_passes_through_identity_maps(monkeypatch, ix, iu) -> None:
+    """Gather reordered coordinates and pass full identity maps through independently."""
+    inner = NormConstraint(n=2, m=2, val=1.0, sense=NegativeOrthant(), inds="state")
+    constraint = IndexedConstraint(n=2, m=2, constraint=inner, ix=ix, iu=iu)
+    x = jnp.array([2.0, 3.0])
+    u = jnp.array([5.0, 7.0])
+    evaluate = NormConstraint.evaluate
+
+    def check_coordinates(self, x_sub, u_sub, t):
+        np.testing.assert_array_equal(x_sub, np.asarray(x)[list(ix)])
+        np.testing.assert_array_equal(u_sub, np.asarray(u)[list(iu)])
+        assert (x_sub is x) == (ix == (0, 1))
+        assert (u_sub is u) == (iu == (0, 1))
+        return evaluate(self, x_sub, u_sub, t)
+
+    monkeypatch.setattr(NormConstraint, "evaluate", check_coordinates)
+    np.testing.assert_array_equal(constraint.evaluate(x, u), [12.0])
+
+
 def test_dynamics_constraints() -> None:
     """Test explicit and implicit dynamics constraints."""
     model = Cartpole()

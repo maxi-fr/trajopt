@@ -29,6 +29,8 @@ class IndexedConstraint(StageConstraint):
     iu_arr: jax.Array
     ix: tuple[int, ...] = eqx.field(static=True)
     iu: tuple[int, ...] = eqx.field(static=True)
+    _state_identity: bool = eqx.field(static=True)
+    _control_identity: bool = eqx.field(static=True)
     _structural_key: tuple[object, ...] = eqx.field(static=True)
 
     def __init__(
@@ -39,6 +41,7 @@ class IndexedConstraint(StageConstraint):
         ix: Sequence[int] | None = None,
         iu: Sequence[int] | None = None,
     ) -> None:
+        """Bind the wrapped constraint and identify full coordinate maps."""
         n_int = int(n)
         m_int = int(m)
 
@@ -57,6 +60,8 @@ class IndexedConstraint(StageConstraint):
         self.constraint = constraint
         self.ix = ix_tuple
         self.iu = iu_tuple
+        self._state_identity = ix_tuple == tuple(range(n_int))
+        self._control_identity = iu_tuple == tuple(range(m_int))
         self.ix_arr = jnp.asarray(ix_tuple, dtype=int)
         self.iu_arr = jnp.asarray(iu_tuple, dtype=int)
         self._structural_key = (
@@ -94,7 +99,11 @@ class IndexedConstraint(StageConstraint):
         u: jax.Array | None = None,
         t: float | jax.Array = 0.0,
     ) -> jax.Array:
-        """Evaluate the wrapped constraint of shape (p,) on x[ix] and u[iu]."""
-        x_sub = x[self.ix_arr] if (x is not None and len(self.ix) > 0) else None
-        u_sub = u[self.iu_arr] if (u is not None and len(self.iu) > 0) else None
+        """Evaluate the wrapped constraint on mapped coordinates, passing full identity maps through."""
+        x_sub = None
+        if x is not None and self.ix:
+            x_sub = x if self._state_identity and x.shape[0] == self.n else x[self.ix_arr]
+        u_sub = None
+        if u is not None and self.iu:
+            u_sub = u if self._control_identity and u.shape[0] == self.m else u[self.iu_arr]
         return self.constraint.evaluate(x_sub, u_sub, t)
